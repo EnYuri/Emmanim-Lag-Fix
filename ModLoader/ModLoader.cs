@@ -5,14 +5,14 @@ using System.Reflection.Metadata;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 
-[assembly: AssemblyVersion("1.4.1.1")]
-[assembly: AssemblyFileVersion("1.4.1.1")]
+[assembly: AssemblyVersion("1.4.1.2")]
+[assembly: AssemblyFileVersion("1.4.1.2")]
 namespace ModLoader
 {
 
     public partial class ModLoader
     {
-        // Guid for harmony 2.4.1.0
+        // Guid for harmony 2.4.2.0
         // Must be updated if another version of the library is shipped
         private static readonly Guid HarmonyGuid = new("dc2e7251-4b84-4883-90eb-eb05a041522c");
         private static readonly Guid ModLoaderGuid = Assembly.GetExecutingAssembly().ManifestModule.ModuleVersionId;
@@ -127,7 +127,7 @@ namespace ModLoader
                         isModLoader = true;
                         continue;
                     }
-                    if (LibrariesInContext.Contains(guid))
+                    if (LibrariesInContext.Contains(guid) && guid != HarmonyGuid)
                     {
                         // if the assembly is already in the context that means that
                         // the mod was already loaded. We trust that the lib is OK then
@@ -481,13 +481,11 @@ namespace ModLoader
             {
                 if (ModFolders.TryGetValue(mod.Folder, out var modFolder))
                 {
-                    foreach (var guid in modFolder)
+                    var errors = modFolder.Select(guid => LibraryFiles[guid].error).Where(error => error != null);
+
+                    if (errors.Any())
                     {
-                        var error = LibraryFiles[guid].error;
-                        if (error != null)
-                        {
-                            errorList.Add((mod.ID, error));
-                        }
+                        errorList.Add((mod.ID, string.Join('\n', errors)));
                     }
                 }
             }
