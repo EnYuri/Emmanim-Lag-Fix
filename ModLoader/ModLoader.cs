@@ -33,21 +33,18 @@ namespace ModLoader
         /// <param name="funcPtr">The pointer to the function to be called</param>
         private static readonly Action<IntPtr> CallFromUnmanaged;
 
-        // dll-proxy
         [LibraryImport("winmm.dll", EntryPoint = "CallFromUnmanaged")]
-        private static unsafe partial void CallFromUnmanagedAvrt(IntPtr funcPtr);
+        private static unsafe partial void CallFromUnmanagedWindows(IntPtr funcPtr);
 
-        // non-dll-proxy
         [LibraryImport("unmanaged.dll", EntryPoint = "CallFromUnmanaged")]
-        private static unsafe partial void CallFromUnmanagedVersion(IntPtr funcPtr);
+        private static unsafe partial void CallFromUnmanagedLinux(IntPtr funcPtr);
 
 
         static ModLoader() {
             try
             {
-                // case of dll-proxy (winmm.dll)
-                Marshal.Prelink(((Action<IntPtr>)CallFromUnmanagedAvrt).Method);
-                CallFromUnmanaged = CallFromUnmanagedAvrt;
+                Marshal.Prelink(((Action<IntPtr>)CallFromUnmanagedWindows).Method);
+                CallFromUnmanaged = CallFromUnmanagedWindows;
             }
             catch (Exception)
             {
@@ -55,9 +52,8 @@ namespace ModLoader
             }
             try
             {
-                // case of non-dll-proxy (unmanaged.dll)
-                Marshal.Prelink(((Action<IntPtr>)CallFromUnmanagedVersion).Method);
-                CallFromUnmanaged = CallFromUnmanagedVersion;
+                Marshal.Prelink(((Action<IntPtr>)CallFromUnmanagedLinux).Method);
+                CallFromUnmanaged = CallFromUnmanagedLinux;
             }
             catch (Exception)
             {
