@@ -5,8 +5,8 @@ using System.Reflection.Metadata;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 
-[assembly: AssemblyVersion("1.4.2.0")]
-[assembly: AssemblyFileVersion("1.4.2.0")]
+[assembly: AssemblyVersion("1.4.3.0")]
+[assembly: AssemblyFileVersion("1.4.3.0")]
 namespace ModLoader
 {
 
@@ -26,7 +26,7 @@ namespace ModLoader
         private static HashSet<Guid> KnownModLibraries = [];
         private static HashSet<Guid> LibrariesInContext = [];
         private static HashSet<Halfling.IO.AbsolutePath> TrustedMods = [];
-        private static HashSet<Halfling.IO.AbsolutePath> ModsWithUntrustedLibs = [];
+        private static HashSet<Halfling.IO.AbsolutePath> ModsWithProblematicLibs = [];
         private static bool showErrorMessageOnce = false;
 
         /// <summary>
@@ -252,6 +252,9 @@ namespace ModLoader
                             lib.duplicated = true;
                             lib.error = $"Two or more mods have the same library {Path.GetFileName(file)}";
                             LibraryFiles[guid] = lib;
+
+                            // mark both mods as problematic to prevent other libs from these mods to load
+                            Halfling.Collections.ExtensionsHashSet.AddRange(ModsWithProblematicLibs, EncounteredLibraries.Where(kvp => kvp.Value.Contains(guid)).Select(kvp => kvp.Key));
                         }
                     }
                     // next we check if the mod is trusted, which means all the libs gets trusted automatically
@@ -267,7 +270,7 @@ namespace ModLoader
                     // finally we deal with unknown libraries
                     else
                     {
-                        ModsWithUntrustedLibs.Add(mod.Folder);
+                        ModsWithProblematicLibs.Add(mod.Folder);
                         if (libName == ModLoaderName)
                         {
                             LibraryFiles.Add(guid, (file: file, duplicated: false, consented: false, fromTrusted: false, error: $"Unknown library {Path.GetFileName(file)}, it appears to be a newer version of the ModLoader, please repeat the installation procedure"));
@@ -429,9 +432,9 @@ namespace ModLoader
                 foreach (var (guid, file) in LibraryFiles.Where(lib => !lib.Value.duplicated && lib.Value.consented).Select(lib => (lib.Key, lib.Value.file)).ToList())
                 {
                     var mod = EncounteredLibraries.First(kvp => kvp.Value.Contains(guid)).Key;
-                    if (ModsWithUntrustedLibs.Contains(mod))
+                    if (ModsWithProblematicLibs.Contains(mod))
                     {
-                        Halfling.Logging.Logger.Log($"Library {file} was not loaded, because some other files from the mod are untrusted.");
+                        Halfling.Logging.Logger.Log($"Library {file} was not loaded, because some other files from the mod have problems.");
                         continue;
                     }
 
@@ -475,6 +478,9 @@ namespace ModLoader
                             modlib.error = ex.Message;
                             LibraryFiles[guid] = modlib;
                         }
+
+                        // mark mod as problematic to skip other libraries from it
+                        ModsWithProblematicLibs.Add(mod);
                     }
                 }
 
@@ -516,6 +522,10 @@ namespace ModLoader
             var modListPostfixMethodInfo = typeof(ModLoader).GetMethod(nameof(ModListPostfix), BindingFlags.Static | BindingFlags.NonPublic);
             var modListPostfixHarmonyMethod = harmonyMethodConstructor?.Invoke([modListPostfixMethodInfo]);
 
+            var tryLoadMod = typeof(Cosmoteer.Mods.ModInfo).GetMethod(nameof(Cosmoteer.Mods.ModInfo.TryLoadMod));
+            var tryLoadModPrefixMethodInfo = typeof(ModLoader).GetMethod(nameof(TryLoadModPrefix), BindingFlags.Static | BindingFlags.NonPublic);
+            var tryLoadModPrefixHarmonyMethod = harmonyMethodConstructor?.Invoke([tryLoadModPrefixMethodInfo]);
+
             var onModSelected = typeof(Cosmoteer.Gui.ModsDialog).GetMethod(nameof(Cosmoteer.Gui.ModsDialog.OnModSelected), BindingFlags.Instance | BindingFlags.NonPublic);
             var onModSelectedPrefixMethodInfo = typeof(ModLoader).GetMethod(nameof(OnModSelectedPrefix), BindingFlags.Static | BindingFlags.NonPublic);
             var onModSelectedPrefixHarmonyMethod = harmonyMethodConstructor?.Invoke([onModSelectedPrefixMethodInfo]);
@@ -536,7 +546,7 @@ namespace ModLoader
 
             var getCommandLineArgs = typeof(Environment).GetMethod(nameof(Environment.GetCommandLineArgs));
             var getCommandLineArgsPrefixMethodInfo = typeof(ModLoader).GetMethod(nameof(GetCommandLineArgsPrefix), BindingFlags.Static | BindingFlags.NonPublic);
-            var getCommandLineArgsPrefixPrefixHarmonyMethod = harmonyMethodConstructor?.Invoke([getCommandLineArgsPrefixMethodInfo]);
+            var getCommandLineArgsPrefixHarmonyMethod = harmonyMethodConstructor?.Invoke([getCommandLineArgsPrefixMethodInfo]);
 
 
             var harmonyObj = classHarmonyConstructor?.Invoke(["Cosmoteer.ModLoader"]);
@@ -544,11 +554,12 @@ namespace ModLoader
 
             harmonyPatchMethod?.Invoke(harmonyObj, [titleScreenConstructor, null, null, titleScreenTranspilerHarmonyMethod, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [populateModList, null, modListPostfixHarmonyMethod, null, null]);
+            harmonyPatchMethod?.Invoke(harmonyObj, [tryLoadMod, tryLoadModPrefixHarmonyMethod, null, null, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [onModSelected, onModSelectedPrefixHarmonyMethod, onModSelectedPostfixHarmonyMethod, null, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [refreshToggleButtons, null, refreshToggleButtonsPostfixHarmonyMethod, null, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [settingsWriteTo, null, settingsWritePostfixHarmonyMethod, null, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [applicationMain, applicationMainPrefixHarmonyMethod, null, null, null]);
-            harmonyPatchMethod?.Invoke(harmonyObj, [getCommandLineArgs, getCommandLineArgsPrefixPrefixHarmonyMethod, null, null, null]);
+            harmonyPatchMethod?.Invoke(harmonyObj, [getCommandLineArgs, getCommandLineArgsPrefixHarmonyMethod, null, null, null]);
         }
 
         /// <summary>
@@ -612,6 +623,22 @@ namespace ModLoader
             }
 
             showErrorMessageOnce = true;
+        }
+
+        /// <summary>
+        /// Patches Cosmoteer.Mods.ModInfo.TryLoadMod
+        /// 
+        /// Changes loadActions to false if the mod has unloaded libs.
+        /// This prevents cosmoteer from crashing if the mod references custom C#
+        /// structures in its actions. Mod won't work anyway, but at least the game will launch.
+        /// </summary>
+        private static void TryLoadModPrefix(string modFolder, ref bool loadActions)
+        {
+            if (loadActions && ModsWithProblematicLibs.Contains(new Halfling.IO.AbsolutePath(modFolder)))
+            {
+                Halfling.Logging.Logger.Log($"Mod {modFolder} has problematic libs, so its actions are not loaded");
+                loadActions = false;
+            }
         }
 
         /// <summary>
