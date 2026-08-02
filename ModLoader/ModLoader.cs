@@ -5,8 +5,8 @@ using System.Reflection.Metadata;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 
-[assembly: AssemblyVersion("1.4.3.0")]
-[assembly: AssemblyFileVersion("1.4.3.0")]
+[assembly: AssemblyVersion("1.4.4.0")]
+[assembly: AssemblyFileVersion("1.4.4.0")]
 namespace ModLoader
 {
 
@@ -238,6 +238,10 @@ namespace ModLoader
                     // trust the libraries automatically, since they were already trusted once
                     if (LibrariesInContext.Contains(guid))
                     {
+                        if (!TrustedLibraries.ContainsKey(mod.Folder))
+                        {
+                            TrustedLibraries[mod.Folder] = (mod.Version ?? "unknown", []);
+                        }
                         TrustedLibraries[mod.Folder].Item2.RemoveWhere(lib => lib.Item1 == Path.GetFileName(file));
                         TrustedLibraries[mod.Folder].Item2.Add((Path.GetFileName(file), guid));
                     }
@@ -296,6 +300,7 @@ namespace ModLoader
                     LibraryFiles.Remove(guid);
                 }
                 EncounteredLibraries[mod.Folder].Clear();
+                ModsWithProblematicLibs.Remove(mod.Folder);
             }
 
             if (EncounteredLibraries[mod.Folder].Count == 0)
@@ -324,8 +329,6 @@ namespace ModLoader
                 if (reader.HasPath(nameof(TrustedLibraries)))
                 {
                     TrustedLibraries = reader.ReadFromPath<Dictionary<Halfling.IO.AbsolutePath, ValueTuple<string, HashSet<ValueTuple<string, Guid>>>>>(nameof(TrustedLibraries));
-                                             //.Select(kvp => new KeyValuePair<Halfling.IO.AbsolutePath, ValueTuple<string, HashSet<ValueTuple<string, Guid>>>>(kvp.Key, (kvp.Value.Item1, [.. kvp.Value.Item2.Select(item => (item.Item1, new Guid(item.Item2)))])))
-                                             //.ToDictionary();
                 }
                 // support for the old config
                 else if (reader.HasPath(nameof(KnownModLibraries)))
@@ -526,6 +529,10 @@ namespace ModLoader
             var tryLoadModPrefixMethodInfo = typeof(ModLoader).GetMethod(nameof(TryLoadModPrefix), BindingFlags.Static | BindingFlags.NonPublic);
             var tryLoadModPrefixHarmonyMethod = harmonyMethodConstructor?.Invoke([tryLoadModPrefixMethodInfo]);
 
+            var modInfoConstructor = typeof(Cosmoteer.Mods.ModInfo).GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).First();
+            var modInfoConstructorPostfixMethodInfo = typeof(ModLoader).GetMethod(nameof(ModInfoConstructorPostfix), BindingFlags.Static | BindingFlags.NonPublic);
+            var modInfoConstructorPostfixHarmonyMethod = harmonyMethodConstructor?.Invoke([modInfoConstructorPostfixMethodInfo]);
+
             var onModSelected = typeof(Cosmoteer.Gui.ModsDialog).GetMethod(nameof(Cosmoteer.Gui.ModsDialog.OnModSelected), BindingFlags.Instance | BindingFlags.NonPublic);
             var onModSelectedPrefixMethodInfo = typeof(ModLoader).GetMethod(nameof(OnModSelectedPrefix), BindingFlags.Static | BindingFlags.NonPublic);
             var onModSelectedPrefixHarmonyMethod = harmonyMethodConstructor?.Invoke([onModSelectedPrefixMethodInfo]);
@@ -555,6 +562,7 @@ namespace ModLoader
             harmonyPatchMethod?.Invoke(harmonyObj, [titleScreenConstructor, null, null, titleScreenTranspilerHarmonyMethod, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [populateModList, null, modListPostfixHarmonyMethod, null, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [tryLoadMod, tryLoadModPrefixHarmonyMethod, null, null, null]);
+            harmonyPatchMethod?.Invoke(harmonyObj, [modInfoConstructor, null, modInfoConstructorPostfixHarmonyMethod, null, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [onModSelected, onModSelectedPrefixHarmonyMethod, onModSelectedPostfixHarmonyMethod, null, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [refreshToggleButtons, null, refreshToggleButtonsPostfixHarmonyMethod, null, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [settingsWriteTo, null, settingsWritePostfixHarmonyMethod, null, null]);
@@ -638,6 +646,25 @@ namespace ModLoader
             {
                 Halfling.Logging.Logger.Log($"Mod {modFolder} has problematic libs, so its actions are not loaded");
                 loadActions = false;
+            }
+        }
+
+        /// <summary>
+        /// Patches Cosmoteer.Mods.ModInfo constructor
+        /// 
+        /// Tries to read additional section to the actions list.
+        /// </summary>
+        private static void ModInfoConstructorPostfix(Cosmoteer.Mods.ModInfo __instance, Halfling.Serialization.Generic.GenericSerialReader reader, bool readActions)
+        {
+            if (readActions && reader.TryReadFromPath<List<Cosmoteer.Mods.ModAction>>("CustomActions", out var actions))
+            {
+                if (__instance.Actions != null)
+                {
+                    __instance.Actions.AddRange(actions);
+                } else
+                {
+                    typeof(Cosmoteer.Mods.ModInfo).GetField(nameof(Cosmoteer.Mods.ModInfo.Actions))?.SetValue(__instance, actions);
+                }
             }
         }
 
