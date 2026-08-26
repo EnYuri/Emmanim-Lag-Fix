@@ -26,10 +26,12 @@
 
   <ItemGroup>
     <Reference Include="Cosmoteer">
-      <HintPath>..\..\libs\Cosmoteer.dll</HintPath>
+      <HintPath>$(CosmoteerBin)\Cosmoteer.dll</HintPath>
+      <Private>false</Private>
     </Reference>
     <Reference Include="HalflingCore">
-      <HintPath>..\..\libs\HalflingCore.dll</HintPath>
+      <HintPath>$(CosmoteerBin)\HalflingCore.dll</HintPath>
+      <Private>false</Private>
     </Reference>
   </ItemGroup>
 

@@ -1,0 +1,5 @@
+<Project>
+  <PropertyGroup>
+    <CosmoteerBin Condition="'$(CosmoteerBin)' == ''">E:\My Games\steamapps\common\Cosmoteer\Bin</CosmoteerBin>
+  </PropertyGroup>
+</Project>

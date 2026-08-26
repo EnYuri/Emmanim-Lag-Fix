@@ -5,13 +5,16 @@ using System.Reflection.Metadata;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 
-[assembly: AssemblyVersion("1.4.4.0")]
-[assembly: AssemblyFileVersion("1.4.4.0")]
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]
 namespace ModLoader
 {
 
     public partial class ModLoader
     {
+        private const string TargetModId = "nayuri.emmanim_lag_fix";
+        private const string TargetLibraryName = "EmmanimLagFix.Code";
+
         // Guid for harmony 2.4.2.0
         // Must be updated if another version of the library is shipped
         private static readonly Guid HarmonyGuid = new("dc2e7251-4b84-4883-90eb-eb05a041522c");
@@ -216,6 +219,17 @@ namespace ModLoader
                         Halfling.Logging.Logger.Log($"File {file} is an assembly with empty name, ignored");
                         continue;
                     }
+
+                    // This fork is intentionally dedicated to Emmanim Lag Fix.
+                    // Never execute arbitrary libraries that happen to live in the
+                    // same mod folder: only the pinned Harmony dependency and our
+                    // one code module are eligible for loading.
+                    if (libName != "0Harmony" && libName != TargetLibraryName)
+                    {
+                        Halfling.Logging.Logger.Log($"Library {file} is not part of the Emmanim allow-list, ignored");
+                        continue;
+                    }
+
                     if (libName == "0Harmony" || guid == HarmonyGuid)
                     {
                         if (guid != HarmonyGuid)
@@ -371,6 +385,17 @@ namespace ModLoader
                         // version is optional, but we use it for update detection
                         modInfo.Version = "unknown";
                     }
+
+                    if (!string.Equals(modInfo.ID, TargetModId, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    Halfling.Logging.Logger.Log($"Found dedicated target mod {modInfo.ID} at {modFolder}");
+                    // The loader and code module are distributed and updated as one
+                    // package. Other mods are never scanned, so the generic per-DLL
+                    // consent workflow is unnecessary for this dedicated build.
+                    TrustedMods.Add(modFolder);
                     validMods.Add(modFolder);
                     var file = LoadLibsForMod(modInfo);
                     if (file != null)
@@ -559,13 +584,9 @@ namespace ModLoader
             var harmonyObj = classHarmonyConstructor?.Invoke(["Cosmoteer.ModLoader"]);
             var harmonyPatchMethod = classHarmony?.GetMethod("Patch");
 
-            harmonyPatchMethod?.Invoke(harmonyObj, [titleScreenConstructor, null, null, titleScreenTranspilerHarmonyMethod, null]);
-            harmonyPatchMethod?.Invoke(harmonyObj, [populateModList, null, modListPostfixHarmonyMethod, null, null]);
-            harmonyPatchMethod?.Invoke(harmonyObj, [tryLoadMod, tryLoadModPrefixHarmonyMethod, null, null, null]);
-            harmonyPatchMethod?.Invoke(harmonyObj, [modInfoConstructor, null, modInfoConstructorPostfixHarmonyMethod, null, null]);
-            harmonyPatchMethod?.Invoke(harmonyObj, [onModSelected, onModSelectedPrefixHarmonyMethod, onModSelectedPostfixHarmonyMethod, null, null]);
-            harmonyPatchMethod?.Invoke(harmonyObj, [refreshToggleButtons, null, refreshToggleButtonsPostfixHarmonyMethod, null, null]);
-            harmonyPatchMethod?.Invoke(harmonyObj, [settingsWriteTo, null, settingsWritePostfixHarmonyMethod, null, null]);
+            // The generic loader patches the mod manager, custom action loading
+            // and trust UI. This dedicated fork needs none of those surfaces:
+            // it has one hard-coded target and one allow-listed code module.
             harmonyPatchMethod?.Invoke(harmonyObj, [applicationMain, applicationMainPrefixHarmonyMethod, null, null, null]);
             harmonyPatchMethod?.Invoke(harmonyObj, [getCommandLineArgs, getCommandLineArgsPrefixHarmonyMethod, null, null, null]);
         }

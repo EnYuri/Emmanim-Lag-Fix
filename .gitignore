@@ -430,3 +430,5 @@ FodyWeavers.xsd
 CosmoDoorstop/tools/
 CosmoDoorstop/.xmake/
 CosmoDoorstop/build/
+.tools/
+.xmake/

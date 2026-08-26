@@ -55,6 +55,8 @@ if (!(Test-Path $XMAKE_DIR)) {
 $XMAKE_EXE = Join-Path $XMAKE_DIR "xmake.exe"
 foreach ($a in $Arch) {
     $verbose_opt = if ($with_logging) { "--include_logging=y" } else { "--include_logging=n" }
-    Invoke-Expression "& $XMAKE_EXE f -a $a $verbose_opt"
-    Invoke-Expression "& $XMAKE_EXE $($ScriptArgs -join " ")"
+    & $XMAKE_EXE f -P $PSScriptRoot -a $a $verbose_opt
+    if ($LASTEXITCODE -ne 0) { throw "xmake configure failed with exit code $LASTEXITCODE" }
+    & $XMAKE_EXE -P $PSScriptRoot @ScriptArgs
+    if ($LASTEXITCODE -ne 0) { throw "xmake build failed with exit code $LASTEXITCODE" }
 }
