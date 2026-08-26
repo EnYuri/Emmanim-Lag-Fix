@@ -432,3 +432,4 @@ CosmoDoorstop/.xmake/
 CosmoDoorstop/build/
 .tools/
 .xmake/
+artifacts/

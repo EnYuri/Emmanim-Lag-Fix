@@ -1,0 +1,289 @@
+// =============================================================================
+//  Emmanim Lag Fix
+// =============================================================================
+//  Cosmoteer multiplayer is deterministic lockstep: every client runs the same
+//  simulation locally and only inputs travel over the wire. Two consequences:
+//    1) The slowest PC sets the pace for everyone.
+//    2) A client that cannot keep up leaves the session.
+//
+//  Observed drops all share one signature in the game log:
+//      Cause: WaitingForAck
+//      Oldest Outgoing: exactly 10.00 sec
+//      Cur Packet Loss: 0
+//      Latency: normal (0.047 - 0.708)
+//
+//  Zero packet loss and healthy latency at the moment of the drop means this is
+//  NOT a network problem. The peer sent no acks for ten seconds because its
+//  process was stalled.
+//
+//  Steam names the cause itself. Most assert dumps carry this comment stream:
+//      Assertion Failed: SteamNetworkingSockets service thread waited 65ms for
+//      lock! This directly adds to network latency! It could be a bug, but it is
+//      usually caused by general performance problem such as thread starvation.
+//
+//  Chain: crew AI saturates the CPU, the game thread starves Steam's networking
+//  thread, acks go out late, the peer sees silence, somebody drops.
+//
+//  This mod attacks that chain in three places:
+//    A. Reduce crew assignment, resource-search, and expensive-check rates.
+//    B. Remove exterior-crew visual effects.
+//    C. Widen the lockstep input delay allowance so a brief stall is survivable.
+//
+//  The 10 second ack timeout itself is hardcoded in the game's C# code. It
+//  appears nowhere in the .rules data and cannot be modded. This mod treats the
+//  cause, not the timeout.
+//
+//  Because this is lockstep, EVERY player must install the same version.
+// =============================================================================
+
+ID = nayuri.emmanim_lag_fix
+Name = "Emmanim Lag Fix"
+Version = 2.0.1
+
+ModifiesGameplay = true
+ModifiesMultiplayer = true
+
+// Keep working when the game updates past the versions listed below. This mod
+// only touches a handful of numeric fields. If one is ever renamed, loading
+// fails and the mod needs an update.
+UseThisFileIfNoVersionMatch = true
+CompatibleGameVersions = ["0.30.4c", "0.30.4b", "0.30.4a", "0.30.4", "0.30.3"]
+
+Author = "Nayuri"
+
+// Put a logo.png in this folder, then uncomment the line below. Leaving the
+// field on without the file present will fail to load. The Workshop thumbnail
+// is separate: pick it in the upload dialog.
+Logo = "logo.png"
+
+Description = "Reduces crew assignment and resource-search work, consolidates loose vanilla resources, cuts exterior-crew effects, and widens lockstep delay tolerance. Optional dedicated code loader also caches the resource sidebar.\n"\
+              "<bad>Every player must install this, or lockstep desyncs.</bad>\n"\
+              "Using <yellow>Huge Crews</yellow>? Load this after it."
+
+Actions
+[
+	// -------------------------------------------------------------------------
+	// A-1. Crew AI workload
+	// -------------------------------------------------------------------------
+	// Crew job and resource searching is the largest CPU consumer in a late game
+	// fleet. Cost scales with crew count times candidate count, so mod packs that
+	// add thousands of parts make it explode.
+	//
+	// ManualTransferJobExpensiveCheckInterval matters most for the stalls people
+	// notice when moving resources or crew between ships. Despite the name it is
+	// a RATE, not an interval - see the note on it below.
+	//
+	// If "Huge Crews" is enabled it pushes these same fields the other way, to
+	// roughly 8x vanilla, and lifts the crew cap to 100,000. This mod does not
+	// touch the crew cap, so the two combine: keep the big crews, drop the tick
+	// rates back to sane numbers.
+	//
+	// >>> LOAD ORDER <<<
+	// Both mods write these fields and the later one wins, so this mod must load
+	// AFTER Huge Crews.
+	//
+	// The game has no UI for reordering mods. Load order is the ASCII sort order
+	// of mod IDs: digits, then uppercase, then lowercase. That is why this mod's
+	// ID starts with a lowercase letter:
+	//
+	//     cosmoteer.huge_crews      <- 'c' = 0x63
+	//     nayuri.emmanim_lag_fix    <- 'n' = 0x6E, sorts after, wins
+	//
+	// An uppercase author name (Nayuri, 0x4E) would sort BEFORE cosmoteer and
+	// silently lose. Keep this ID lowercase.
+	{
+		Action = Overrides
+		OverrideIn = "<crew/crew.rules>"
+		IgnoreIfNotExisting = false
+		Overrides
+		{
+			// --- Frequencies: optimized workload ---
+			// Version 1.2.x raised these while investigating mined nuggets that lacked
+			// pickup markers: first to vanilla/Huge Crews values and briefly to 600 for
+			// the low-priority queue. That diagnosis was wrong. Extended Tech Tree's Q
+			// mining beams destroyed only some asteroid parts with "unbreak" instead of
+			// "salvage", so those drops never entered the assignment queues at all.
+			// Mods QoL repairs the beam. Version 1.3.0 therefore restored the last
+			// intentional optimization baseline from 1.1.0. Version 1.3.1 raises only
+			// the low-priority queue to 70 as a responsiveness compromise.
+			JobAssignmentsPerSecond = 90                     // vanilla 120 / HugeCrews 1000
+			LowPriorityJobAssignmentsPerSecond = 70          // vanilla 30  / HugeCrews 250
+			ResourceSearchesPerSecond = 90                   // vanilla 120 / HugeCrews 1000
+
+			// --- These two are RATES, despite being named "Interval" ---
+			// Read the field name and you assume a bigger number means a longer
+			// gap between checks. It is the opposite. Both are multiplied, not
+			// divided, when the per-frame check budget is accumulated:
+			//
+			//     accumulated += jobCount * dt * ManualTransferJobExpensiveCheckInterval
+			//     int checksThisFrame = (int)accumulated
+			//
+			// So the value is checks per job per second. 2.0 doubled the work
+			// this section exists to cut. 0.5 is what actually halves it.
+			//
+			// It is not only a CPU question. The expensive check re-runs
+			// IsSinkReachable and, when that fails, truncates the outstanding
+			// request to what the crew is already carrying - it cancels the rest
+			// of the transfer. At 2.0 that fired twice as often as vanilla and
+			// pulled crew off deliveries. Version 1.2 restored vanilla 1.0 while the
+			// missing-pickup problem was being misdiagnosed. Version 1.3.0 restores
+			// the intentional 0.5 optimization: half the vanilla expensive-check rate.
+			//
+			// (Established by decompiling ResourceManager.ExpireManualTransferJobs
+			// and ExpireSalvageJobs from Bin/Cosmoteer.dll. Nothing in Data/
+			// documents the direction.)
+			ManualTransferJobExpensiveCheckInterval = 0.5    // vanilla 1.0
+			SalvageJobExpensiveCheckInterval = 0.5           // vanilla 1.0
+
+			// --- Deliberately left at vanilla ---
+			// MaxCrewSearchIterations (50) is not a frequency, it is the point at
+			// which a search gives up. Lowering it does not slow crew down, it
+			// truncates the candidate scan, so crew can stand idle next to work
+			// they never looked at. The risk grows with ship size, which is
+			// exactly what Huge Ships creates. Left alone.
+			//
+			// SourceRefreshesPerTick (10) behaves the same way. Starving the
+			// resource source list makes crew act on stale information and
+			// mis-route deliveries.
+			//
+			// The idle-crew cost of trimming these outweighs the CPU saved.
+			// If squeezing further is unavoidable, 40 and 8 look like the floor.
+			//
+			// CrewUpdatesPerSecond is left alone too. Below vanilla 6 the crew get
+			// stuck inside airlocks. (Confirmed by Hailstorm46 Reduce Crew Lag.)
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// A-2. Loose vanilla resource consolidation
+	// -------------------------------------------------------------------------
+	// A nugget may hold one complete storage stack. This preserves resource
+	// quantity and value while reducing the number of loose physics objects,
+	// salvage targets and tractor-beam targets in heavily mined fields.
+	// Battery charge and fire-extinguisher charge have no storage-stack size and
+	// are intentionally excluded. Mod-defined resources belong in Mods QoL.
+	{ Action=Overrides; OverrideIn="<resources/bullet/bullet.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/bullet/bullet.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/carbon/carbon.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/carbon/carbon.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/coil/coil.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/coil/coil.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/coil2/coil2.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/coil2/coil2.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/copper/copper.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/copper/copper.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/diamond/diamond.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/diamond/diamond.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/enriched_uranium/enriched_uranium.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/enriched_uranium/enriched_uranium.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/gold/gold.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/gold/gold.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/hyperium/hyperium.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/hyperium/hyperium.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/iron/iron.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/iron/iron.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/mine_part/mine_part.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/mine_part/mine_part.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/missile_part_emp/missile_part_emp.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/missile_part_emp/missile_part_emp.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/missile_part_he/missile_part_he.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/missile_part_he/missile_part_he.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/missile_part_nuke/missile_part_nuke.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/missile_part_nuke/missile_part_nuke.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/missile_part_thermal/missile_part_thermal.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/missile_part_thermal/missile_part_thermal.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/processor/processor.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/processor/processor.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/steel/steel.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/steel/steel.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/sulfur/sulfur.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/sulfur/sulfur.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/tristeel/tristeel.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/tristeel/tristeel.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/tritanium/tritanium.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/tritanium/tritanium.rules>/MaxStackSize) } }
+	{ Action=Overrides; OverrideIn="<resources/uranium/uranium.rules>"; Overrides { MaxPerNugget=(&<./Data/resources/uranium/uranium.rules>/MaxStackSize) } }
+
+	// -------------------------------------------------------------------------
+	// A-3. Exterior-crew thruster effects
+	// -------------------------------------------------------------------------
+	// Each exterior crew member normally owns four jet media-effect nodes. Those
+	// nodes emit particles and draw plume/light beams while salvaging or moving
+	// resources outside a ship. Removing the jet list keeps exterior crew logic,
+	// movement, and carrying intact while eliminating that visual-only burst.
+	//
+	// Crew AnimationInterval overrides used to live here. They were removed in
+	// 1.1.0 after checking the current renderer: animation timing is stored in
+	// static quad vertex data and frame selection happens in the shader. Raising
+	// the interval only slowed the visible animation; it did not reduce crew AI,
+	// CPU updates, draw calls, vertex count, or texture sampling.
+	{
+		Action = Replace
+		Replace = "<crew/crew.rules>/Jets"
+		IgnoreIfNotExisting = false
+		With = []
+	}
+
+	// -------------------------------------------------------------------------
+	// B. Lockstep input delay allowance
+	// -------------------------------------------------------------------------
+	// InputTicksPerSecond is 30, so vanilla MaxInputTickDelay = 60 means two
+	// seconds. Under a big mod pack, two seconds is easy to lose at a battle
+	// start, a fleet FTL jump, or a mass destruction event. Six seconds lets a
+	// client ride out the spike and catch up.
+	//
+	// Kept below ten seconds on purpose: past that the transport layer ack
+	// timeout fires first and the extra allowance buys nothing.
+	//
+	// Cost: while actually lagging, input response can trail by up to six
+	// seconds. Better than losing the session. Eight was tried first and made
+	// play effectively impossible, hence six.
+	//
+	// Note this addresses the lockstep drop path, a different mechanism from the
+	// WaitingForAck timeout described at the top. That one is not moddable;
+	// section A is what reduces it.
+	{
+		Action = Overrides
+		OverrideIn = "<cosmoteer.rules>/Simulation/Network"
+		IgnoreIfNotExisting = false
+		Overrides
+		{
+			MaxInputTickDelay = 180              // vanilla 60 (2 sec -> 6 sec)
+			InputTickDelayLatencyFactor = 1.5    // vanilla 1
+
+			// MinInputTickDelay (2) and InputTicksPerSecond (30) are left alone.
+			// Changing InputTicksPerSecond alters simulation determinism itself.
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// C. OPTIONAL: absorb Huge Crews, so load order stops mattering
+	// -------------------------------------------------------------------------
+	// The game's mod UI has no way to reorder mods. EnabledMods is stored as a
+	// HashSet and the effective load order sorts by mod ID. Keeping this mod's
+	// lowercase nayuri.* ID after cosmoteer.* makes section A win reliably.
+	//
+	// The cleaner fix is to not compete at all. Huge Crews does two separate
+	// things, and only one of them is wanted here:
+	//
+	//   1. Lifts the Career crew cap to 100,000   <- wanted
+	//   2. Raises crew tick rates to ~8x vanilla  <- exactly what section A undoes
+	//
+	// Uncommenting the block below reproduces (1) here. Then DISABLE Huge Crews
+	// entirely: nothing else writes those tick rates, section A wins by default,
+	// and load order becomes irrelevant.
+	//
+	// Vanilla CrewFamePrereqCountRange per scarcity level, for reference:
+	//     0 max        [2000, 2000]
+	//     1 plentiful  [32, 2000]
+	//     2 standard   [24, 1500]
+	//     3 scarce     [16, 1000]
+	//
+	// Left commented out by default so this stays a pure performance mod.
+/*
+	{
+		Action = Overrides
+		OverrideIn = "<modes/career/career.rules>/CrewScarcityLevels/0"
+		IgnoreIfNotExisting = true
+		Overrides { CrewFamePrereqCountRange = [100000, 100000] }
+	}
+	{
+		Action = Overrides
+		OverrideIn = "<modes/career/career.rules>/CrewScarcityLevels/1"
+		IgnoreIfNotExisting = true
+		Overrides { CrewFamePrereqCountRange = [100000, 100000] }
+	}
+	{
+		Action = Overrides
+		OverrideIn = "<modes/career/career.rules>/CrewScarcityLevels/2"
+		IgnoreIfNotExisting = true
+		Overrides { CrewFamePrereqCountRange = [100000, 100000] }
+	}
+	{
+		Action = Overrides
+		OverrideIn = "<modes/career/career.rules>/CrewScarcityLevels/3"
+		IgnoreIfNotExisting = true
+		Overrides { CrewFamePrereqCountRange = [100000, 100000] }
+	}
+*/
+]

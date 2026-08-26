@@ -1,38 +1,73 @@
-# CosmoteerModLoader
+# Emmanim Lag Fix
 
-Inspired by [EML fork](https://github.com/ElectroJr/EnhancedModLoader).
+A Cosmoteer performance mod for very large, heavily modded ships and fleets.
 
-Based (loosely) on [Unity Doorstop](https://github.com/NeighTools/UnityDoorstop)
+The project combines ordinary `.rules` tuning with a narrowly-scoped .NET 10
+code layer. The code loader is deliberately restricted to the exact mod ID
+`nayuri.emmanim_lag_fix`; it ignores DLLs from every other mod and accepts only
+the bundled Harmony library and `EmmanimLagFix.Code.dll`.
 
-The managed C# project is built as a console app, so that dll had an entrypoint, but the resulting executable is not needed, only the dll.
+> [!WARNING]
+> The `.rules` portion is established, but the dedicated loader is currently in
+> pre-release testing. Its assemblies compile cleanly and all Harmony targets
+> resolve against Cosmoteer 0.30.4c, but an in-game startup test is still pending.
 
-The native C project is built using xmake. Rename the lib into winmm.dll.
+## Current optimizations
 
-## Usage
+- Reduces crew assignment, resource-search and expensive-check rates.
+- Consolidates loose vanilla resource nuggets into larger stacks.
+- Removes exterior-crew thruster effects.
+- Widens the deterministic lockstep input-delay allowance.
+- Caches the upper-right selected-ship resource aggregation for one second.
+- Limits ship-transfer and station-trade full resource snapshots to 5 Hz.
 
-Put both `ModLoader.dll` and `winmm.dll` libs into the Cosmoteer Bin folder.
+The code patches only UI aggregation at present. They do not modify resource
+quantities, trade execution, crew jobs or simulation state.
 
-On linux rename the game's `Cosmoteer.dll` to `Cosmoteer_o.dll` and place ModPreLoader.dll in the Bin folder renaming it to `Cosmoteer.dll`. You can use `unmanaged.dll` instead of `winmm.dll` on linux.
+## Repository layout
 
-## Mod development
-
-Mod Loader will load all the dlls it finds in the folders of the enabled mods (workshop, user or built-in). First it loads dll named 0Harmony.dll, if it exists somewhere in thoose folders. If more than one file with such name exists, it will pick the first one it encounters. Then all the others dlls are loaded. The loader then looks through the loaded assemblies for the following function signatures:
-
+```text
+Mod/                            Workshop-ready mod folder
+EmmanimLagFix.Code/             Harmony performance patches
+EmmanimLagFix.Code.SmokeTest/   Patch-resolution smoke test
+ModLoader/                      Dedicated managed loader fork
+ModPreLoader/                   Alternate preloader
+CosmoDoorstop/                  Native Windows entry point
 ```
-public static void AssemblyLoadInitializer()
+
+## Installation
+
+1. Copy `Mod` into Cosmoteer's user `Mods` folder and enable it.
+2. The `.rules` optimizations work without DLL injection.
+3. To test the code layer, close Cosmoteer and run `Mod/Install-Loader.ps1`.
+4. Use `Mod/Uninstall-Loader.ps1` to remove it.
+
+The installer refuses to overwrite a different `winmm.dll` or `ModLoader.dll`.
+The uninstaller removes files only when their hashes still match its install
+manifest.
+
+## Building
+
+The managed projects require the .NET 10 SDK and references to the game's
+`Cosmoteer.dll` and `HalflingCore.dll`. Override the `CosmoteerBin` MSBuild
+property when the game is installed elsewhere.
+
+```powershell
+dotnet build ModLoader.sln -c Release
+dotnet run --project EmmanimLagFix.Code.SmokeTest -c Release
 ```
 
-This method would be called immediately on assembly load. No game components exist yet, but all the assemblies are already loaded. This method can be used for applying harmony patches.
+The Windows x64 proxy DLL requires Visual C++ and xmake:
 
+```powershell
+.\CosmoDoorstop\build.ps1 -Arch x64
 ```
-public static void GameLoadInitializer()
-public static void InitializePatches()
-```
 
-These methods are called after the game has started. They can be used to add callbacks to the game director or accessing other game components. They are exactly the same and the second function is left for compatibility with EML mods.
+## Upstream and licensing
 
-Methods marked with `[UnamagedCallersOnly]` are also supported, but this is not required and will not add any benefits.
-
-For mod rules the default `Actions` section can be used to describe mod's actions, or the `CustomActions`, which would be ignored by vanilla game and loaded only when mod loader is present. If you reference your custom code in your actions, changing them to `CustomActions` will prevent the game crashing when mod loader in not installed or disabled. There is no other difference. `CustomActions` are ordered after `Actions`.
-
-To start mod development it's best to install IDE, like Visual Strudio Community Edition or VS Code. The IDE should support C# development. Create a new C# Class library project. It should target the same .NET version as cosmoteer uses. Currently it is .NET 10, but this information might be outdated. Look at the cosmoteer logs to be sure, look for `.Net Runtime Version`. After that add the references to `Cosmoteer.dll` and `HalflingCore.dll`. You will need them to modify the game in any meaningful way. Most of the cosmoteer stuff is private, so you will need a publicizer, like [`Krafs.Publicizer`](https://github.com/krafs/Publicizer). Look at the documentation of that library, it requires some manual modification to the csproj file. To modify the existing cosmoteer C# code you will probably want to use [Harmony lib](https://github.com/pardeike/Harmony). You should reference it too. But do not include it with your mod, the loader provides it already.
+The loader is derived from
+[`radistmorse/CosmoteerModLoader`](https://github.com/radistmorse/CosmoteerModLoader)
+at commit `2aee1c7d0175c7c3508435f3eccb5411b103581e` and remains under
+LGPL-2.1. Harmony is distributed under the MIT license. Original Emmanim code
+is MIT-licensed. See `LICENSE`, `LICENSE.txt`, the notices in `Mod/Code` and
+`Mod/Loader`, and [EMMANIM_FORK.md](EMMANIM_FORK.md).
