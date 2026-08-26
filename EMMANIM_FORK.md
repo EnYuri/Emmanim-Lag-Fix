@@ -26,6 +26,11 @@ the upper-right resource display for one second. Widget animation, fading,
 flashing and layout continue to run every frame. Only displayed totals can be
 up to one second old.
 
+The ship-to-ship transfer window and station trade tab retain their last full
+resource snapshot for at most 200 ms. Their expensive all-resource scans run at
+5 Hz instead of once per rendered frame, while each transfer row's own input
+handlers remain immediate.
+
 ## Build
 
 The projects target `net10.0-windows7.0`, matching Cosmoteer 0.30.4c. Set the
