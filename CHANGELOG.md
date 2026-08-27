@@ -1,6 +1,20 @@
 # Changelog
 
-## 2.0.5 - pre-release
+## 2.0.5
+
+- Replaced the loader-only scripts with a one-click `Install.bat` that installs
+  the mod folder and the code loader together, resolving the user folder the
+  same way `Cosmoteer.Paths` does, including a redirected *Saved Games* known
+  folder.
+- The installer now self-elevates only when `Cosmoteer\Bin` is not writable,
+  refuses to run while the game is open, and clears the Mark of the Web from
+  extracted files.
+- Added `Uninstall.bat`, which can also remove the installed mod folder, still
+  guarded by the install manifest hashes.
+- Added `Pack.ps1` to build the GitHub release archive and regenerate the
+  bundled LGPL source tree.
+- Distribution moved to GitHub Releases; the Steam Workshop item is no longer
+  the delivery channel.
 
 - Reduced Steam networking thread starvation during initial multiplayer game
   construction by lowering only the host/client initialization workers to below

@@ -34,27 +34,57 @@ The code patches UI aggregation/construction and local initialization scheduling
 They do not modify resource quantities, trade execution, crew jobs or simulation
 state.
 
+## Active memory investigation
+
+A 2026-08-27 same-process trace comparison confirmed long-lived Gen 2 and GC-handle
+growth, plus a separate vanilla `BlueprintPartStatProvider` delegate-allocation
+storm on large ships. The exact measurements, trace paths, analysis helper and
+recommended Harmony patch are preserved in [MEMORY_DIAGNOSTICS.md](MEMORY_DIAGNOSTICS.md).
+Read that file before changing caches or adding memory-related patches.
+
 ## Repository layout
 
 ```text
-Mod/                            Workshop-ready mod folder
+Mod/                            Distributable mod folder
 EmmanimLagFix.Code/             Harmony performance patches
 EmmanimLagFix.Code.SmokeTest/   Patch-resolution smoke test
 ModLoader/                      Dedicated managed loader fork
 ModPreLoader/                   Alternate preloader
 CosmoDoorstop/                  Native Windows entry point
+Pack.ps1                        Builds the GitHub release archive
 ```
 
 ## Installation
 
-1. Copy `Mod` into Cosmoteer's user `Mods` folder and enable it.
-2. The `.rules` optimizations work without DLL injection.
-3. To test the code layer, close Cosmoteer and run `Mod/Install-Loader.ps1`.
-4. Use `Mod/Uninstall-Loader.ps1` to remove it.
+Releases are distributed as a single archive from the
+[Releases](https://github.com/EnYuri/Emmanim-Lag-Fix/releases) page. Extract it
+anywhere and run `Install.bat`; there is no Steam Workshop item to subscribe to.
 
-The installer refuses to overwrite a different `winmm.dll` or `ModLoader.dll`.
-The uninstaller removes files only when their hashes still match its install
-manifest.
+The installer places the mod in the Cosmoteer user `Mods` folder and the code
+loader in `Cosmoteer\Bin`, resolving both the same way the game does. It
+declines to run while the game is open, to overwrite a `winmm.dll` or
+`ModLoader.dll` it did not place, or to replace a mod folder that is not this
+mod. `Uninstall.bat` removes files only when their hashes still match its
+install manifest.
+
+`Install.bat -NoLoader` installs the `.rules` optimizations alone, with no
+native DLL. See `Mod/README.md` for the full switch list.
+
+To work from a source tree instead, copy `Mod` into the user `Mods` folder and
+run `Mod/Install.bat -LoaderOnly`.
+
+## Packaging a release
+
+```powershell
+.\Pack.ps1 -RefreshBinaries
+```
+
+This copies the freshly built loader, proxy and code module into `Mod/`,
+regenerates `Mod/Source` from the repository (the LGPL source bundle that ships
+beside the binary), and writes `build/Emmanim-Lag-Fix-<version>.zip`. The
+version is read from `Mod/mod.rules`, so the archive name cannot disagree with
+what the game reports. The script prints the tag and `gh release create`
+commands to run next.
 
 ## Building
 

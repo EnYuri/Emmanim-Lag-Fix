@@ -433,3 +433,6 @@ CosmoDoorstop/build/
 .tools/
 .xmake/
 artifacts/
+
+# Emmanim: native doorstop output and packed release archives
+/build/

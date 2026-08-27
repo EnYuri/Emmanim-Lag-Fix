@@ -136,18 +136,59 @@ which is exactly what Huge Ships creates. The idle-crew cost outweighs the CPU s
 
 ## Install
 
-1. Drop the folder into your mods folder (`Options > Mods` opens it).
-2. Enable it and put it **last in the list**.
-3. **Every player must install it.**
+Download the release archive, extract it anywhere, and run **`Install.bat`**.
 
-The `.rules` optimizations work without DLL injection. To enable the optional
-code optimization, close the game and run `Install-Loader.ps1`. The installer
-refuses to overwrite a different `winmm.dll` or `ModLoader.dll`. Run
-`Uninstall-Loader.ps1` to remove only files whose hashes still match this mod.
+That is the whole procedure. The installer:
+
+- copies the mod into your Cosmoteer user `Mods` folder, resolving it the same
+  way the game does (`%USERPROFILE%\Saved Games` when that exists, otherwise the
+  redirected *Saved Games* known folder, then the SteamID64 profile beneath it);
+- copies the code loader (`winmm.dll`, `ModLoader.dll`) into `Cosmoteer\Bin`,
+  requesting administrator rights only if that folder is not writable;
+- clears the Mark of the Web from the extracted files;
+- records a SHA-256 manifest so the uninstaller can prove what it may delete.
+
+Then start the game and enable **Emmanim Lag Fix** under `Options > Mods`.
+
+`Install.bat` refuses to run while Cosmoteer is open, refuses to overwrite a
+`winmm.dll` or `ModLoader.dll` it did not place, and refuses to replace a mod
+folder that is not this mod. **`Uninstall.bat`** reverses it, deleting only files
+whose hashes still match the manifest.
+
+Switches, for a non-default setup:
+
+| Command | Effect |
+|---|---|
+| `Install.bat -NoLoader` | `.rules` optimizations only, no DLL in `Bin` |
+| `Install.bat -LoaderOnly` | loader only, mod folder untouched |
+| `Install.bat -GameBin "...\Cosmoteer\Bin"` | override game detection |
+| `Install.bat -ModsFolder "...\Cosmoteer\<id>\Mods"` | override user-folder detection |
+| `Uninstall.bat -KeepMod` | remove the loader, keep the mod |
+
+### Two halves, two different requirements
+
+| Half | Where | Multiplayer requirement |
+|---|---|---|
+| `.rules` values | user `Mods` folder | **Every player needs the same version.** These feed the deterministic lockstep simulation. |
+| code loader | `Cosmoteer\Bin` | **Per player, optional.** UI caching and thread priority only; `Bin` is outside `datahash`, so you stay in sync with peers who skip it. |
 
 Cosmoteer multiplayer is deterministic lockstep — each client runs the same simulation independently.
 If one player's simulation values differ, the session desyncs. For the same reason, lag comes from
 the slowest PC's compute speed, not from connection quality.
+
+### After a game patch or a Steam file verification
+
+Both wipe added files out of `Cosmoteer\Bin`. Run `Install.bat` again; it will
+skip whatever is already correct. Do the same after updating the mod, so the
+loader in `Bin` and the code module in the mod folder stay the same build.
+
+### If your antivirus objects
+
+A proxy `winmm.dll` beside a game executable has the same shape as a DLL
+hijack, because that is the mechanism it uses. The source for both the loader
+and the code module is in `Source/`, and upstream is linked under *Credits*.
+Running `Install.bat -NoLoader` gives you the `.rules` optimizations with no
+native DLL at all.
 
 ## Load order (there is no UI for it)
 
