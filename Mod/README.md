@@ -17,6 +17,31 @@ of their repeated all-resource scans. Transfer buttons and typed quantities use
 their own immediate handlers; ship/resource totals and transfer progress can be
 up to 0.2 seconds old.
 
+Version 2.0.2 makes the crew role-priority list lazy. Opening a category now
+creates only one collapsed header per part; the eleven priority buttons for a
+part are created the first time that header is expanded. Expanded priority rows
+refresh their selected-button state at 10 Hz instead of every rendered frame.
+Role changes, undo history, and multiplayer inputs still use the original game
+handlers.
+
+Version 2.0.3 fixes the dedicated loader scanning its own installer payload and
+therefore skipping `EmmanimLagFix.Code.dll`. It also spreads the main-thread
+insertion of ship-transfer and station-trade resource rows across frames, two
+rows at a time, instead of allowing every completed background row to enter the
+layout queue in one burst.
+
+Version 2.0.4 smooths those windows further: resource snapshots now refresh at
+2 Hz, only one completed row enters the layout per rendered frame, and the
+background row builder yields briefly after every resource. Buttons and typed
+amounts retain their immediate handlers; displayed totals can be up to half a
+second old while a large modded catalog fills progressively.
+
+Version 2.0.5 protects the first multiplayer synchronization. The host's
+simulation-creation worker and the client's data-decoding/simulation-creation
+worker temporarily run below normal priority, leaving scheduling time for Steam
+networking while very large saves are being constructed. Their elapsed times are
+written to the log. This changes local scheduling only, not simulation data.
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:

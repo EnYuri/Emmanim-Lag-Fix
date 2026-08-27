@@ -38,7 +38,16 @@ foreach ($name in $required) {
         $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
         $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
         if ($sourceHash -ne $targetHash) {
-            throw "$target 에 다른 로더가 이미 있습니다. 자동으로 덮어쓰지 않았습니다."
+            $manifestPath = Join-Path $resolvedBin 'emmanim_lag_fix_loader.json'
+            if (-not (Test-Path -LiteralPath $manifestPath)) {
+                throw "$target 에 소유권을 확인할 수 없는 다른 로더가 있습니다. 자동으로 덮어쓰지 않았습니다."
+            }
+            $oldManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            $ownedHash = $oldManifest.Files.$name
+            if (-not $ownedHash -or $ownedHash -ne $targetHash) {
+                throw "$target 이 설치 후 변경되었습니다. 자동으로 덮어쓰지 않았습니다."
+            }
+            Copy-Item -LiteralPath $source -Destination $target -Force
         }
     } else {
         Copy-Item -LiteralPath $source -Destination $target
@@ -47,7 +56,7 @@ foreach ($name in $required) {
 
 $manifest = @{
     Mod = 'nayuri.emmanim_lag_fix'
-    Version = '2.0.1'
+    Version = '2.0.5'
     Files = @{}
 }
 foreach ($name in $required) {

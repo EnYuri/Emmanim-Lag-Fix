@@ -27,9 +27,14 @@ flashing and layout continue to run every frame. Only displayed totals can be
 up to one second old.
 
 The ship-to-ship transfer window and station trade tab retain their last full
-resource snapshot for at most 200 ms. Their expensive all-resource scans run at
-5 Hz instead of once per rendered frame, while each transfer row's own input
+resource snapshot for at most 500 ms. Their expensive all-resource scans run at
+2 Hz instead of once per rendered frame, while each transfer row's own input
 handlers remain immediate.
+
+Their asynchronously-created resource rows are also admitted to the main-thread
+layout one per frame, and their worker yields briefly after constructing each
+row. Only the package's `Code/` directory is scanned; the installer payload and
+source archive are never treated as executable mod code.
 
 ## Build
 

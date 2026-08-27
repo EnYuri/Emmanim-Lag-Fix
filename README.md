@@ -19,10 +19,20 @@ the bundled Harmony library and `EmmanimLagFix.Code.dll`.
 - Removes exterior-crew thruster effects.
 - Widens the deterministic lockstep input-delay allowance.
 - Caches the upper-right selected-ship resource aggregation for one second.
-- Limits ship-transfer and station-trade full resource snapshots to 5 Hz.
+- Limits ship-transfer and station-trade full resource snapshots to 2 Hz.
+- Spreads initial transfer/trade row insertion across frames instead of adding
+  the full modded resource catalog to the main-thread layout in one burst.
+- Paces background transfer-row construction so it does not monopolize a worker
+  core while the simulation and networking threads are active.
+- Lazily creates crew role-priority controls per expanded part and refreshes
+  their visual state at 10 Hz.
+- Runs host/client multiplayer simulation creation below normal thread priority,
+  preserving CPU scheduling time for Steam networking during the first sync.
+- Logs host creation and client decode/creation durations separately.
 
-The code patches only UI aggregation at present. They do not modify resource
-quantities, trade execution, crew jobs or simulation state.
+The code patches UI aggregation/construction and local initialization scheduling.
+They do not modify resource quantities, trade execution, crew jobs or simulation
+state.
 
 ## Repository layout
 

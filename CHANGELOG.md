@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.5 - pre-release
+
+- Reduced Steam networking thread starvation during initial multiplayer game
+  construction by lowering only the host/client initialization workers to below
+  normal priority.
+- Added separate timing logs for host simulation creation and client data
+  decoding plus simulation creation.
+
 ## 2.0.1 - pre-release
 
 - Added a dedicated .NET 10 loader restricted to `nayuri.emmanim_lag_fix`.

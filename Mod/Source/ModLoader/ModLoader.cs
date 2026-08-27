@@ -5,8 +5,8 @@ using System.Reflection.Metadata;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.0.3.0")]
+[assembly: AssemblyFileVersion("2.0.3.0")]
 namespace ModLoader
 {
 
@@ -185,10 +185,22 @@ namespace ModLoader
         static private string? LoadLibsForMod(Cosmoteer.Mods.ModInfo mod)
         {
             EncounteredLibraries[mod.Folder] = [];
-            bool isModLoader = false;
             string? harmonyFile = null;
 
-            foreach (var file in Directory.EnumerateFiles(mod.Folder, "*.dll", SearchOption.AllDirectories))
+            // The workshop package also contains the installer payload and full
+            // source tree. Scanning the whole mod recursively sees the bundled
+            // ModLoader.dll, mistakes the package for a loader mod, and clears
+            // the actual code module from EncounteredLibraries. Only Code/ is
+            // executable content in this dedicated distribution.
+            var codeFolder = Path.Combine(mod.Folder, "Code");
+            if (!Directory.Exists(codeFolder))
+            {
+                Halfling.Logging.Logger.Log($"Dedicated code folder not found: {codeFolder}");
+                EncounteredLibraries.Remove(mod.Folder);
+                return null;
+            }
+
+            foreach (var file in Directory.EnumerateFiles(codeFolder, "*.dll", SearchOption.TopDirectoryOnly))
             {
                 Halfling.Logging.Logger.Log($"found dll file {file}");
 
@@ -210,7 +222,6 @@ namespace ModLoader
                     if (guid == ModLoaderGuid)
                     {
                         Halfling.Logging.Logger.Log($"Library {file} is a mod-loader library, ignored");
-                        isModLoader = true;
                         continue;
                     }
                     var libName = AssemblyName.GetAssemblyName(file).Name ?? string.Empty;
@@ -306,17 +317,6 @@ namespace ModLoader
                     Halfling.Logging.Logger.Log($"failed to load lib from {file}, exception\n{ex}");
                 }
             }
-            if (isModLoader)
-            {
-                // remove all the libs from the list
-                foreach (var guid in EncounteredLibraries[mod.Folder])
-                {
-                    LibraryFiles.Remove(guid);
-                }
-                EncounteredLibraries[mod.Folder].Clear();
-                ModsWithProblematicLibs.Remove(mod.Folder);
-            }
-
             if (EncounteredLibraries[mod.Folder].Count == 0)
             {
                 EncounteredLibraries.Remove(mod.Folder);
