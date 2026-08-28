@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.12
+
+- Removed the 2.0.11 fixed-update `PerShipCount` cache. A controlled 20-second
+  4x trace on the original 11,563-part storage megastructure showed that its
+  shared cache lock raised `Monitor.Enter_Slowpath` from 1.76% to 3.07% and
+  `UpdateSinkJobs` from 1.40% to 2.68%. The patched count path itself cost
+  2.64%, versus 1.30% for vanilla. All other 2.0.11 optimizations remain.
+
 ## 2.0.11
 
 - Reuses each source's allied-ship anticipated-pickup total during a single

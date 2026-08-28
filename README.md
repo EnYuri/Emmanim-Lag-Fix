@@ -28,9 +28,6 @@ the bundled Harmony library and `EmmanimLagFix.Code.dll`.
 - Runs host/client multiplayer simulation creation below normal thread priority,
   preserving CPU scheduling time for Steam networking during the first sync.
 - Logs host creation and client decode/creation durations separately.
-- Reuses allied-ship anticipated-pickup totals within one resource-manager
-  fixed update, with mutation invalidation and no cross-tick path/location
-  cache.
 
 The code patches UI aggregation/construction and local initialization scheduling.
 They do not modify resource quantities, trade execution, crew jobs or simulation
@@ -87,6 +84,14 @@ beside the binary), and writes `build/Emmanim-Lag-Fix-<version>.zip`. The
 version is read from `Mod/mod.rules`, so the archive name cannot disagree with
 what the game reports. The script prints the tag and `gh release create`
 commands to run next.
+
+Pushing a matching `v*` tag runs `.github/workflows/release.yml`. The Windows
+runner validates the tag against `Mod/mod.rules`, checks the committed installer
+and binary payload, runs `Pack.ps1`, verifies the archive contents, and publishes
+the ZIP as a GitHub Release asset. It deliberately packages the committed DLLs
+instead of rebuilding the code module because Cosmoteer's proprietary reference
+assemblies are not available on GitHub-hosted runners. Build and smoke-test the
+DLL locally before committing and tagging.
 
 ## Building
 

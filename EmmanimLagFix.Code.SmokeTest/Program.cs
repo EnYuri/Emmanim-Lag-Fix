@@ -54,13 +54,6 @@ var resourceManagerType = gameAssembly.GetType("Cosmoteer.Ships.Resources.Resour
 var resourceSinkInfoType = gameAssembly.GetType("Cosmoteer.Ships.Resources.ResourceManager+SinkInfo", throwOnError: true)!;
 var resourceSearchTarget = AccessTools.Method(resourceManagerType, "SearchForSources", new[] { resourceSinkInfoType })
     ?? throw new MissingMethodException(resourceManagerType.FullName, "SearchForSources(SinkInfo)");
-var resourceFixedUpdateTarget = AccessTools.DeclaredMethod(resourceManagerType, "FixedUpdate")
-    ?? throw new MissingMethodException(resourceManagerType.FullName, "FixedUpdate");
-var perShipCountType = gameAssembly.GetType("Cosmoteer.Ships.Resources.ResourceManager+PerShipCount", throwOnError: true)!;
-var perShipGetCountTarget = AccessTools.Method(perShipCountType, "GetCount")
-    ?? throw new MissingMethodException(perShipCountType.FullName, "GetCount");
-var perShipAddCountTarget = AccessTools.Method(perShipCountType, "AddCount")
-    ?? throw new MissingMethodException(perShipCountType.FullName, "AddCount");
 
 const string smokeId = "nayuri.emmanim_lag_fix.smoke_test";
 var harmony = new Harmony(smokeId);
@@ -116,28 +109,5 @@ if (!resourceSearchInfo.Prefixes.Any(patch => patch.owner == smokeId) ||
     throw new InvalidOperationException("Expected resource-search diagnostic timing patches were not installed.");
 }
 
-var resourceFixedUpdateInfo = Harmony.GetPatchInfo(resourceFixedUpdateTarget)
-    ?? throw new InvalidOperationException("Harmony did not patch ResourceManager.FixedUpdate cache scope.");
-if (!resourceFixedUpdateInfo.Prefixes.Any(patch => patch.owner == smokeId) ||
-    !resourceFixedUpdateInfo.Finalizers.Any(patch => patch.owner == smokeId))
-{
-    throw new InvalidOperationException("Expected ResourceManager.FixedUpdate cache-scope patches were not installed.");
-}
-
-var perShipGetCountInfo = Harmony.GetPatchInfo(perShipGetCountTarget)
-    ?? throw new InvalidOperationException("Harmony did not patch PerShipCount.GetCount.");
-if (!perShipGetCountInfo.Prefixes.Any(patch => patch.owner == smokeId) ||
-    !perShipGetCountInfo.Postfixes.Any(patch => patch.owner == smokeId))
-{
-    throw new InvalidOperationException("Expected PerShipCount.GetCount cache patches were not installed.");
-}
-
-var perShipAddCountInfo = Harmony.GetPatchInfo(perShipAddCountTarget)
-    ?? throw new InvalidOperationException("Harmony did not patch PerShipCount.AddCount.");
-if (!perShipAddCountInfo.Prefixes.Any(patch => patch.owner == smokeId))
-{
-    throw new InvalidOperationException("Expected PerShipCount.AddCount invalidation patch was not installed.");
-}
-
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource, fixed-update resource-count cache, transfer, trade, technology-purchase, pickup-overlay, blueprint-network refresh, build-stats, sparse heat diffusion, opt-in resource diagnostics, role-priority, multiplayer initialization, and toggle-mode delegate cache patches resolved on this game build.");
+Console.WriteLine("PASS: resource, transfer, trade, technology-purchase, pickup-overlay, blueprint-network refresh, build-stats, sparse heat diffusion, opt-in resource diagnostics, role-priority, multiplayer initialization, and toggle-mode delegate cache patches resolved on this game build.");

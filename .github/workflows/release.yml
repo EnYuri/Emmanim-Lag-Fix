@@ -1,0 +1,100 @@
+name: Package release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Validate tag and committed payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = Get-Content -LiteralPath '.\Mod\mod.rules' -Raw
+          if ($rules -notmatch '(?m)^\s*Version\s*=\s*([^\r\n;/]+)') {
+            throw 'Could not read Version from Mod/mod.rules.'
+          }
+          $version = $Matches[1].Trim().Trim('"')
+          $expectedTag = "v$version"
+          if ('${{ github.ref_name }}' -ne $expectedTag) {
+            throw "Tag ${{ github.ref_name }} does not match mod version $version."
+          }
+
+          $required = @(
+            '.\Mod\Install.bat',
+            '.\Mod\Install.ps1',
+            '.\Mod\Code\EmmanimLagFix.Code.dll',
+            '.\Mod\Code\0Harmony.dll',
+            '.\Mod\Loader\winmm.dll',
+            '.\Mod\Loader\ModLoader.dll'
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Committed release payload is missing: $path"
+            }
+          }
+          if (Test-Path -LiteralPath '.\Mod\resource-search-diagnostics.flag') {
+            throw 'Refusing to publish with resource-search diagnostics enabled.'
+          }
+
+      - name: Build one-click archive
+        shell: pwsh
+        run: .\Pack.ps1
+
+      - name: Verify archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = Get-Content -LiteralPath '.\Mod\mod.rules' -Raw
+          $null = $rules -match '(?m)^\s*Version\s*=\s*([^\r\n;/]+)'
+          $version = $Matches[1].Trim().Trim('"')
+          $zip = (Resolve-Path ".\build\Emmanim-Lag-Fix-$version.zip").Path
+          $entries = tar -tf $zip
+          foreach ($requiredEntry in @(
+            'emmanim_lag_fix/Install.bat',
+            'emmanim_lag_fix/Install.ps1',
+            'emmanim_lag_fix/mod.rules',
+            'emmanim_lag_fix/Code/EmmanimLagFix.Code.dll',
+            'emmanim_lag_fix/Loader/winmm.dll'
+          )) {
+            if ($entries -notcontains $requiredEntry) {
+              throw "Archive is missing: $requiredEntry"
+            }
+          }
+          if ($entries -match 'resource-search-diagnostics\.flag$') {
+            throw 'Archive unexpectedly contains the resource-search diagnostics flag.'
+          }
+
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Archive SHA-256: $hash"
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $notes = @"
+          One-click installer archive. Extract it and run ``Install.bat``.
+
+          SHA-256: ``$env:RELEASE_SHA256``
+          "@
+          gh release create '${{ github.ref_name }}' $env:RELEASE_ZIP `
+            --repo $env:GITHUB_REPOSITORY `
+            --verify-tag `
+            --title "Emmanim Lag Fix $env:RELEASE_VERSION" `
+            --generate-notes `
+            --notes $notes

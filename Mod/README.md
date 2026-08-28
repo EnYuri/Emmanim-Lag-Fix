@@ -94,6 +94,11 @@ reuses that total only within the current fixed update and invalidates it before
 any count change. It does not cache resource positions or paths across ticks,
 and resource-search and crew-work rates remain unchanged.
 
+Version 2.0.12 removes that 2.0.11 resource-count cache. A controlled trace on
+the original 11,563-part storage megastructure showed that contention on the
+shared cache lock made sink-job updates substantially slower than vanilla. All
+other 2.0.11 optimizations remain intact.
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:
