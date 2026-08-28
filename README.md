@@ -8,9 +8,8 @@ code layer. The code loader is deliberately restricted to the exact mod ID
 the bundled Harmony library and `EmmanimLagFix.Code.dll`.
 
 > [!WARNING]
-> The `.rules` portion is established, but the dedicated loader is currently in
-> pre-release testing. Its assemblies compile cleanly and all Harmony targets
-> resolve against Cosmoteer 0.30.4c, but an in-game startup test is still pending.
+> Every multiplayer participant must install the same mod version because the
+> `.rules` portion changes deterministic simulation settings.
 
 ## Current optimizations
 
@@ -29,6 +28,9 @@ the bundled Harmony library and `EmmanimLagFix.Code.dll`.
 - Runs host/client multiplayer simulation creation below normal thread priority,
   preserving CPU scheduling time for Steam networking during the first sync.
 - Logs host creation and client decode/creation durations separately.
+- Reuses allied-ship anticipated-pickup totals within one resource-manager
+  fixed update, with mutation invalidation and no cross-tick path/location
+  cache.
 
 The code patches UI aggregation/construction and local initialization scheduling.
 They do not modify resource quantities, trade execution, crew jobs or simulation

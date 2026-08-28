@@ -38,7 +38,7 @@
 
 ID = nayuri.emmanim_lag_fix
 Name = "Emmanim Lag Fix"
-Version = 2.0.5
+Version = 2.0.11
 
 ModifiesGameplay = true
 ModifiesMultiplayer = true
@@ -56,7 +56,7 @@ Author = "Nayuri"
 // is separate: pick it in the upload dialog.
 Logo = "logo.png"
 
-Description = "Reduces crew assignment and resource-search work, consolidates loose vanilla resources, cuts exterior-crew effects, and widens lockstep delay tolerance. Optional dedicated code loader also caches the resource sidebar.\n"\
+Description = "Reduces crew assignment, resource-search, and large-ship heat-diffusion work; limits memory-heavy background ship preloading; consolidates loose vanilla resources; cuts exterior-crew effects; and widens lockstep delay tolerance. Optional dedicated code loader also caches expensive UI work.\n"\
               "<bad>Every player must install this, or lockstep desyncs.</bad>\n"\
               "Using <yellow>Huge Crews</yellow>? Load this after it."
 
@@ -202,6 +202,30 @@ Actions
 		Replace = "<crew/crew.rules>/Jets"
 		IgnoreIfNotExisting = false
 		With = []
+	}
+
+	// -------------------------------------------------------------------------
+	// A-4. Stasis ship preload memory
+	// -------------------------------------------------------------------------
+	// Vanilla constructs every stasis ship within 3750 world units in the
+	// background, while ships do not actually enter the live simulation until
+	// 2500. A dense heavily-modded sector was measured retaining 538 fully-built
+	// preloaded ships, including 131,159 live Part objects. The same process had
+	// only 47 preloaded ships immediately after loading the save.
+	//
+	// Keep the actual live/spawn radius unchanged and narrow only the advance
+	// preload band from 1250 to 500 world units. The engine's existing
+	// CancelPreload path disposes ships that leave this range. This trades some
+	// background lead time for substantially lower peak memory; approaching a
+	// very dense group at extreme speed may produce a larger spawn-time hitch.
+	{
+		Action = Overrides
+		OverrideIn = "<cosmoteer.rules>/Simulation"
+		IgnoreIfNotExisting = false
+		Overrides
+		{
+			StasisPreloadRange = 3000       // vanilla 3750; live range remains 2500
+		}
 	}
 
 	// -------------------------------------------------------------------------

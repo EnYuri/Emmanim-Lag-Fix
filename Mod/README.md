@@ -42,6 +42,58 @@ worker temporarily run below normal priority, leaving scheduling time for Steam
 networking while very large saves are being constructed. Their elapsed times are
 written to the log. This changes local scheduling only, not simulation data.
 
+Version 2.0.6 narrows the background stasis-ship preload radius from 3750 to
+3000 while leaving the actual 2500-unit live/spawn radius unchanged. In the
+measured dense modded sector, the engine retained 538 fully constructed
+preloaded ships and 131,159 live part objects; the same process had only 47
+preloaded ships immediately after loading. The existing cancellation path still
+disposes ships outside the smaller radius. This lowers peak memory at the cost
+of less background lead time before a nearby ship must spawn.
+
+Version 2.0.7 prevents heavily modded transfer menus from creating rows for
+the thousands of stackable resource definitions that neither ship actually
+holds. Existing in-progress transfer types are retained, and all transfer and
+trade execution stays on the vanilla path. The blueprint-purchase tab now
+admits one already-created technology card into its scroll layout per frame and
+refreshes visible card prices and prerequisite state at 2 Hz. This spreads the
+two large one-frame UI spikes without changing purchase validation or
+multiplayer inputs.
+
+Version 2.0.9 limits the purely visual scheduled-resource-pickup overlay. Its
+candidate transfer-job list refreshes once per second, every distinct scheduled
+nugget retains its orange selection outline, and at most 128 pickup connection
+lines are rendered. Visible outlines and line endpoints still follow moving
+objects every frame. It also preserves the shared line renderer's geometry
+cache when the companion selected/hover overlay is empty. Resource transfers,
+manipulator beams, crew assignment rates, and simulation state are unchanged.
+The same release also reduces hidden blueprint-network maintenance during
+normal play. Every live and stasis-preloaded ship retains a repair/construction
+blueprint even when no blueprint is visible; its rules-based network ports were
+checking saved toggle metadata every rendered update. They now refresh once per
+ten game-time seconds while running, but retain vanilla per-frame refresh while the
+simulation is paused so blueprint editing remains immediate.
+
+The build toolbox's display-only ship statistics now refresh at 4 Hz instead
+of recomputing every blueprint total before every input frame. Editor input,
+construction state, affordability checks, and authoritative ship data remain
+unchanged; only the visible labels and bars may be up to 0.25 seconds old.
+
+Version 2.0.10 optimizes vanilla heat diffusion on exceptionally large ships.
+Vanilla scans the complete rectangular area between the outermost active heat
+cells on every 30 Hz physics tick, including cells that cannot produce a heat
+change. For heat bounds of at least 128x128 cells, the code layer now evaluates
+only active heat cells and their four direct neighbours. The diffusion rate,
+coefficients, application order, status callbacks, and small-ship behavior are
+unchanged.
+
+Version 2.0.11 reduces repeated resource-logistics bookkeeping on storage-heavy
+ships. During one resource-manager fixed update, Cosmoteer can ask for the same
+source's allied-ship anticipated-pickup total many times, and vanilla locks and
+scans the complete weak ship-count list for every request. The code layer now
+reuses that total only within the current fixed update and invalidates it before
+any count change. It does not cache resource positions or paths across ticks,
+and resource-search and crew-work rates remain unchanged.
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:
