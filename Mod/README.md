@@ -99,6 +99,28 @@ the original 11,563-part storage megastructure showed that contention on the
 shared cache lock made sink-job updates substantially slower than vanilla. All
 other 2.0.11 optimizations remain intact.
 
+Version 2.0.13 replaces the vanilla resource manager's exclusive per-ship count
+lock with immutable copy-on-write snapshots. Parallel resource searches and
+sink-job readers no longer serialize on the list lock, while mutations preserve
+the original ordering, allied-ship totals, and weak-reference cleanup. In the
+original 11,563-part megastructure trace, the count reader disappeared from CPU
+samples, lock slow-path time fell 52%, and sink-job update time fell 61%. The
+replacement arrays accounted for only 2.03 MiB in a ten-second allocation
+sample, with no Gen-2 or large-object-heap growth.
+
+The same release limits non-deterministic smoothed part visuals to 20 Hz while
+passing their full accumulated game-time delta; deterministic fixed updates,
+factory conversion, and production remain unchanged. Halfling's
+application-level multiplayer session timeout is extended from ten to thirty
+seconds with exact game-code-shape guards. Packet format, resend cadence, input
+ordering, and simulation state are untouched.
+
+During initial multiplayer synchronization, the client now preallocates the
+copied `GameInit` stream to the already-known payload size and releases that
+stream immediately after unchanged deserialization, before constructing the
+simulation. This lowers peak memory and blocking-GC pressure during a large
+join. Every multiplayer participant should install the same 2.0.13 build.
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:

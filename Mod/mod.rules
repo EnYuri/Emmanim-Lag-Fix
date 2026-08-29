@@ -29,16 +29,16 @@
 //    B. Remove exterior-crew visual effects.
 //    C. Widen the lockstep input delay allowance so a brief stall is survivable.
 //
-//  The 10 second ack timeout itself is hardcoded in the game's C# code. It
-//  appears nowhere in the .rules data and cannot be modded. This mod treats the
-//  cause, not the timeout.
+//  The optional code layer also extends the application-level session timeout
+//  from 10 to 30 seconds. Packet format, resend cadence, ordering, and
+//  simulation inputs remain unchanged.
 //
 //  Because this is lockstep, EVERY player must install the same version.
 // =============================================================================
 
 ID = nayuri.emmanim_lag_fix
 Name = "Emmanim Lag Fix"
-Version = 2.0.12
+Version = 2.0.13
 
 ModifiesGameplay = true
 ModifiesMultiplayer = true
@@ -56,7 +56,7 @@ Author = "Nayuri"
 // is separate: pick it in the upload dialog.
 Logo = "logo.png"
 
-Description = "Reduces crew assignment, resource-search, and large-ship heat-diffusion work; limits memory-heavy background ship preloading; consolidates loose vanilla resources; cuts exterior-crew effects; and widens lockstep delay tolerance. Optional dedicated code loader also caches expensive UI work.\n"\
+Description = "Reduces crew assignment, resource-search, large-ship heat-diffusion, and resource-count locking work; limits memory-heavy background ship preloading; consolidates loose vanilla resources; cuts exterior-crew effects; and widens lockstep and session timeout tolerance. Optional dedicated code loader also caches expensive UI work and lowers multiplayer initialization memory peaks.\n"\
               "<bad>Every player must install this, or lockstep desyncs.</bad>\n"\
               "Using <yellow>Huge Crews</yellow>? Load this after it."
 

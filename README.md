@@ -28,10 +28,20 @@ the bundled Harmony library and `EmmanimLagFix.Code.dll`.
 - Runs host/client multiplayer simulation creation below normal thread priority,
   preserving CPU scheduling time for Steam networking during the first sync.
 - Logs host creation and client decode/creation durations separately.
+- Replaces the resource manager's exclusive per-ship count lock with immutable
+  copy-on-write snapshots, removing lock contention from parallel readers.
+- Limits display-only smoothed part values to 20 Hz while preserving their full
+  accumulated game-time delta and every deterministic fixed update.
+- Extends the application-level multiplayer session timeout from 10 to 30
+  seconds without changing packets, resend cadence, input ordering, or
+  simulation state.
+- Preallocates the client initial-sync stream to its known payload size and
+  releases it immediately after deserialization, before game construction.
 
-The code patches UI aggregation/construction and local initialization scheduling.
-They do not modify resource quantities, trade execution, crew jobs or simulation
-state.
+The code patches UI aggregation/construction, resource bookkeeping, visual
+updates, and local multiplayer timeout/initialization behavior. It does not
+modify resource quantities, trade execution, crew jobs, packet formats, or
+deterministic simulation state.
 
 ## Active memory investigation
 
@@ -40,6 +50,22 @@ growth, plus a separate vanilla `BlueprintPartStatProvider` delegate-allocation
 storm on large ships. The exact measurements, trace paths, analysis helper and
 recommended Harmony patch are preserved in [MEMORY_DIAGNOSTICS.md](MEMORY_DIAGNOSTICS.md).
 Read that file before changing caches or adding memory-related patches.
+
+## Resource logistics and path-search investigation
+
+Large multi-tile storage parts multiply otherwise identical source, sink and
+path-contiguity work. The controlled ship-removal tests, diagnostic traces,
+rejected 2.0.11 shared cache, released lock-free `PerShipCount` implementation and
+safety constraints for any future path optimization are preserved in
+[RESOURCE_LOGISTICS_DIAGNOSTICS.md](RESOURCE_LOGISTICS_DIAGNOSTICS.md). Read it
+before caching resource locations, routes, candidates or sink-job results.
+
+## Multiplayer synchronization investigation
+
+The complete `GameInit` transfer, client-side duplicate buffering, game-creation
+memory peak, frame-coupled ACK path, implemented timeout/buffer mitigations and
+the constraints for a future dedicated ACK pump are documented in
+[MULTIPLAYER_SYNC_DIAGNOSTICS.md](MULTIPLAYER_SYNC_DIAGNOSTICS.md).
 
 ## Repository layout
 

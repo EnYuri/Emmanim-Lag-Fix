@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.0.13
+
+- Replaced the resource manager's exclusive `PerShipCount` list lock with
+  immutable copy-on-write snapshots. Parallel source-search and sink-job reads
+  no longer serialize on that lock, while count mutations retain the original
+  entry order, allied-ship sums, and dead weak-reference cleanup. In the
+  original 11,563-part megastructure trace, `PerShipCount.GetCount` fell from
+  1.30% of sampled CPU time to zero samples, `Monitor.Enter_Slowpath` fell 52%,
+  and `UpdateSinkJobs` fell 61%. A ten-second allocation trace attributed only
+  2.03 MiB to the replacement arrays, with no Gen-2 or LOH growth.
+- Limited non-deterministic `PartSmoothedValue` presentation updates to 20 Hz,
+  passing the full accumulated game-time delta on each update. Deterministic
+  fixed-update values, factory conversion ticks, production, and simulation
+  state remain unchanged.
+- Extended Halfling's application-level multiplayer session timeout from ten
+  to thirty seconds. Exact IL guards preserve vanilla behavior if the expected
+  game-code shape changes. Packet format, resend cadence, input ordering, and
+  simulation state are unchanged; every peer should use the same mod version.
+- Reduced the client's initial multiplayer synchronization memory peak. The
+  received `GameInit` copy is preallocated to the known payload size, then its
+  backing stream is disposed and released immediately after the unchanged
+  deserialization step and before the simulation is constructed.
+- Added the resource-logistics/path-search and multiplayer-synchronization
+  diagnostic records, including the safety constraints for future patches.
+
 ## 2.0.12
 
 - Removed the 2.0.11 fixed-update `PerShipCount` cache. A controlled 20-second

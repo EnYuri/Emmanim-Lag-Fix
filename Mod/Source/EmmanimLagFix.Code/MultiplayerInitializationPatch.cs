@@ -1,5 +1,9 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Text;
+using Cosmoteer.Game;
+using Cosmoteer.Game.Multiplayer;
+using Cosmoteer.Modes;
 using HarmonyLib;
 
 namespace EmmanimLagFix.Code;
@@ -20,6 +24,31 @@ internal static class MultiplayerInitializationPatch
     private static int _activeLaunchWorkerDepth;
 
     internal static bool IsLaunchWorkerActive => _activeLaunchWorkerDepth > 0;
+
+    private static readonly Type ClientWorkerType = typeof(GameRoot).Assembly
+        .GetType("Cosmoteer.Gui.Multiplayer.GameLaunchFlow+ClientLaunchFlow+<>c__DisplayClass11_0", throwOnError: true)!;
+
+    private static readonly FieldInfo ClientWorkerOwnerField = ClientWorkerType.GetField(
+        "<>4__this",
+        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+        ?? throw new MissingFieldException(ClientWorkerType.FullName, "<>4__this");
+
+    private static readonly FieldInfo ClientWorkerBufferField = ClientWorkerType.GetField(
+        "buf",
+        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+        ?? throw new MissingFieldException(ClientWorkerType.FullName, "buf");
+
+    private static readonly Type ClientLaunchFlowType = ClientWorkerOwnerField.FieldType;
+
+    private static readonly FieldInfo ClientInitField = ClientLaunchFlowType.GetField(
+        "_init",
+        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+        ?? throw new MissingFieldException(ClientLaunchFlowType.FullName, "_init");
+
+    private static readonly FieldInfo ClientGameField = ClientLaunchFlowType.BaseType!.GetField(
+        "_game",
+        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+        ?? throw new MissingFieldException(ClientLaunchFlowType.BaseType!.FullName, "_game");
 
     private sealed class Scope
     {
@@ -47,7 +76,7 @@ internal static class MultiplayerInitializationPatch
             ?? throw new MissingMethodException("GameLaunchFlow.ClientLaunchFlow", "initialization worker");
     }
 
-    private static void Prefix(MethodBase __originalMethod, out Scope __state)
+    private static bool Prefix(MethodBase __originalMethod, object __instance, out Scope __state)
     {
         var thread = Thread.CurrentThread;
         var previousPriority = thread.Priority;
@@ -79,6 +108,42 @@ internal static class MultiplayerInitializationPatch
         }
 
         Halfling.Logging.Logger.Log($"Emmanim Lag Fix began {phase} (thread priority: {thread.Priority}).");
+
+        if (__originalMethod.DeclaringType == ClientWorkerType)
+        {
+            CreateClientGameAndReleaseBuffer(__instance);
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Vanilla keeps the complete copied initialization stream alive while it
+    /// creates the entire client simulation. Fully deserialize first, then
+    /// release that stream before CreateGame so the byte buffer does not add to
+    /// the client's peak memory and blocking-GC pressure. The binary format and
+    /// GameInit/CreateGame paths are unchanged.
+    /// </summary>
+    private static void CreateClientGameAndReleaseBuffer(object worker)
+    {
+        var owner = ClientWorkerOwnerField.GetValue(worker)
+            ?? throw new InvalidOperationException("The multiplayer client launch worker has no owner.");
+        var buffer = ClientWorkerBufferField.GetValue(worker) as MemoryStream
+            ?? throw new InvalidOperationException("The multiplayer client launch worker has no initialization buffer.");
+
+        GameInit init;
+        using (var reader = new BinaryReader(buffer, Encoding.UTF8, leaveOpen: true))
+        {
+            init = Halfling.App.BinarySerializer.Read<GameInit>(reader);
+        }
+
+        ClientInitField.SetValue(owner, init);
+        buffer.Dispose();
+        ClientWorkerBufferField.SetValue(worker, null);
+
+        var game = init.CreateGame(static root => new MPTempSetupManager(root, isHost: false));
+        ClientGameField.SetValue(owner, game);
     }
 
     private static Exception? Finalizer(Exception? __exception, Scope? __state)
