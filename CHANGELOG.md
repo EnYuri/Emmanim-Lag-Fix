@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.0.14
+
+- Reduced the peak memory and copying cost of initial multiplayer
+  synchronization. The client preallocates its incoming stream from the exact
+  announced payload size, the host preallocates each outgoing stream from the
+  remaining serialized length, and the completed client stream can hand its
+  existing byte array directly to the read-only deserialization stream instead
+  of making a second full-size copy. Exact stream-state and .NET runtime-shape
+  guards fall back to the safe 2.0.13 copy path on any mismatch.
+- Reduced normal whole-game multiplayer integrity hashing from 30 Hz to 6 Hz.
+  Input ticks, player actions and deterministic simulation remain at 30 Hz;
+  normal desync detection can be delayed by at most about 0.167 seconds, while
+  debug-only bucket hashes retain their vanilla cadence. Every participant
+  must use the identical 2.0.14 DLL because peers must produce the same hash
+  sequence.
+- Aligned the host's normal `HostUpdate` construction, serialization and
+  reliable transmission with the same 6 Hz schedule. Input-delay calculation,
+  lockstep ticks and actions remain at 30 Hz, and desync-debug sessions retain
+  vanilla 30 Hz updates.
+- Cached the host's immutable sender-exclusion predicate per session and
+  client. Forwarded `InputTick` cadence, payload, ordering, reliability and
+  recipients are unchanged; after warm-up this removes one closure and one
+  delegate allocation per received client tick.
+- Added exact patch-resolution, tick-schedule, buffer-ownership and forwarding
+  filter smoke coverage. Local host-room startup passed; actual remote-client
+  joining and forwarding validation remains pending.
+
 ## 2.0.13
 
 - Replaced the resource manager's exclusive `PerShipCount` list lock with

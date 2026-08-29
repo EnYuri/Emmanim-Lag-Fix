@@ -119,7 +119,27 @@ During initial multiplayer synchronization, the client now preallocates the
 copied `GameInit` stream to the already-known payload size and releases that
 stream immediately after unchanged deserialization, before constructing the
 simulation. This lowers peak memory and blocking-GC pressure during a large
-join. Every multiplayer participant should install the same 2.0.13 build.
+join.
+
+Version 2.0.14 extends that initial-sync optimization to both ends. The client
+preallocates its incoming stream from the exact announced payload size, the
+host preallocates each outgoing stream from the remaining serialized length,
+and the completed client stream can transfer ownership of its existing byte
+array to the read-only deserializer instead of making another complete copy.
+Strict stream-state and .NET-runtime guards fall back to the safe 2.0.13 path
+if the expected implementation changes.
+
+During normal multiplayer play, whole-game integrity hashing and the host's
+mostly empty `HostUpdate` messages now run at 6 Hz instead of 30 Hz. Input
+ticks, actions, deterministic simulation and host input-delay calculation stay
+at 30 Hz. Normal desync discovery may be delayed by at most about 0.167 seconds;
+debug-only hash checks and debug-session updates retain their vanilla cadence.
+The host also reuses each client's immutable forwarding filter instead of
+allocating a closure and delegate for every received tick. Packet contents,
+input ordering, reliability and recipients remain unchanged. Local host-room
+startup passed, but remote-client join and forwarding validation remains
+pending. Every multiplayer participant must install the identical 2.0.14
+build.
 
 ## Why you drop
 

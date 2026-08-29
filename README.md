@@ -37,6 +37,13 @@ the bundled Harmony library and `EmmanimLagFix.Code.dll`.
   simulation state.
 - Preallocates the client initial-sync stream to its known payload size and
   releases it immediately after deserialization, before game construction.
+- Preallocates both ends of the initial multiplayer data stream and avoids the
+  client's second complete payload copy when guarded stream ownership transfer
+  is available.
+- Reduces normal whole-game integrity hashes and host state updates from 30 Hz
+  to 6 Hz without lowering lockstep input or simulation cadence.
+- Reuses the host's per-client `InputTick` forwarding filters instead of
+  allocating a closure and delegate for every received tick.
 
 The code patches UI aggregation/construction, resource bookkeeping, visual
 updates, and local multiplayer timeout/initialization behavior. It does not

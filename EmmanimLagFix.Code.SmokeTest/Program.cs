@@ -64,8 +64,32 @@ var perShipGetCountTarget = AccessTools.Method(perShipCountType, "GetCount")
     ?? throw new MissingMethodException(perShipCountType.FullName, "GetCount");
 var perShipAddCountTarget = AccessTools.Method(perShipCountType, "AddCount")
     ?? throw new MissingMethodException(perShipCountType.FullName, "AddCount");
+var baseMpManagerType = gameAssembly.GetType("Cosmoteer.Game.Multiplayer.BaseMPManager", throwOnError: true)!;
+var advanceNetworkTimeTarget = AccessTools.Method(baseMpManagerType, "AdvanceNetworkTime")
+    ?? throw new MissingMethodException(baseMpManagerType.FullName, "AdvanceNetworkTime");
+var mpHostManagerType = gameAssembly.GetType("Cosmoteer.Game.Multiplayer.MPHostManager", throwOnError: true)!;
+var hostOnTickTarget = AccessTools.Method(mpHostManagerType, "OnTick")
+    ?? throw new MissingMethodException(mpHostManagerType.FullName, "OnTick");
+var inputTickType = gameAssembly.GetType(
+    "Cosmoteer.Game.Multiplayer.BaseMPManager+InputTick",
+    throwOnError: true)!;
+var serializedInputTickChannelType = typeof(Halfling.Network.SerializedChannel<>).MakeGenericType(inputTickType);
+var forwardInputTickTarget = AccessTools.Method(
+    mpHostManagerType,
+    "ForwardInputTick",
+    new[]
+    {
+        inputTickType,
+        typeof(Halfling.Network.MessengerID),
+        serializedInputTickChannelType
+    }) ?? throw new MissingMethodException(mpHostManagerType.FullName, "ForwardInputTick");
 var streamCopyTarget = AccessTools.Method(typeof(Stream), nameof(Stream.CopyTo), new[] { typeof(Stream) })
     ?? throw new MissingMethodException(typeof(Stream).FullName, "CopyTo(Stream)");
+var clientLaunchFlowType = gameAssembly.GetType(
+    "Cosmoteer.Gui.Multiplayer.GameLaunchFlow+ClientLaunchFlow",
+    throwOnError: true)!;
+var startDataStreamTarget = AccessTools.Method(clientLaunchFlowType, "StartDataStreamRpc", new[] { typeof(long) })
+    ?? throw new MissingMethodException(clientLaunchFlowType.FullName, "StartDataStreamRpc(long)");
 
 const string smokeId = "nayuri.emmanim_lag_fix.smoke_test";
 var harmony = new Harmony(smokeId);
@@ -83,6 +107,89 @@ if (successfulTimeoutTranspilers != 2)
 {
     throw new InvalidOperationException(
         $"Expected both multiplayer timeout transpilers to match, got {successfulTimeoutTranspilers}.");
+}
+
+var hashThrottlePatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.MultiplayerIntegrityHashThrottlePatch",
+    throwOnError: true)!;
+var successfulHashTranspilers = (int)(hashThrottlePatchType.GetField(
+    "SuccessfulTranspilerCount",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingFieldException(hashThrottlePatchType.FullName, "SuccessfulTranspilerCount"))
+    .GetValue(null)!;
+if (successfulHashTranspilers != 1)
+{
+    throw new InvalidOperationException(
+        $"Expected multiplayer integrity-hash transpiler to match once, got {successfulHashTranspilers}.");
+}
+var shouldComputeHash = hashThrottlePatchType.GetMethod(
+    "ShouldComputeHash",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(hashThrottlePatchType.FullName, "ShouldComputeHash");
+var selectedHashTicks = Enumerable.Range(1, 30)
+    .Where(tick => (bool)shouldComputeHash.Invoke(null, new object[] { tick, 30 })!)
+    .ToArray();
+var expectedHashTicks = new[] { 1, 6, 11, 16, 21, 26 };
+if (!selectedHashTicks.SequenceEqual(expectedHashTicks))
+{
+    throw new InvalidOperationException(
+        $"Expected 6 Hz integrity hashes at [{string.Join(", ", expectedHashTicks)}], " +
+        $"got [{string.Join(", ", selectedHashTicks)}].");
+}
+var advanceNetworkTimeInfo = Harmony.GetPatchInfo(advanceNetworkTimeTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch BaseMPManager.AdvanceNetworkTime.");
+if (!advanceNetworkTimeInfo.Transpilers.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("Expected multiplayer integrity-hash transpiler was not installed.");
+}
+var hostUpdatePatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.MultiplayerHostUpdateThrottlePatch",
+    throwOnError: true)!;
+var shouldSendHostUpdate = hostUpdatePatchType.GetMethod(
+    "ShouldSendHostUpdate",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(hostUpdatePatchType.FullName, "ShouldSendHostUpdate");
+var selectedHostUpdateTicks = Enumerable.Range(1, 30)
+    .Where(tick => (bool)shouldSendHostUpdate.Invoke(null, new object[] { tick, 30, false })!)
+    .ToArray();
+if (!selectedHostUpdateTicks.SequenceEqual(expectedHashTicks)
+    || !(bool)shouldSendHostUpdate.Invoke(null, new object[] { 2, 30, true })!)
+{
+    throw new InvalidOperationException(
+        $"HostUpdate throttle mismatch: selected [{string.Join(", ", selectedHostUpdateTicks)}].");
+}
+var hostOnTickInfo = Harmony.GetPatchInfo(hostOnTickTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch MPHostManager.OnTick.");
+if (!hostOnTickInfo.Prefixes.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("Expected multiplayer HostUpdate throttle prefix was not installed.");
+}
+var forwardInputTickInfo = Harmony.GetPatchInfo(forwardInputTickTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch MPHostManager.ForwardInputTick.");
+if (!forwardInputTickInfo.Prefixes.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("Expected multiplayer InputTick allocation prefix was not installed.");
+}
+var inputTickAllocationPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.MultiplayerInputTickAllocationPatch",
+    throwOnError: true)!;
+var getOrCreateInputTickFilter = inputTickAllocationPatchType.GetMethod(
+    "GetOrCreateFilter",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(inputTickAllocationPatchType.FullName, "GetOrCreateFilter");
+var testHost = RuntimeHelpers.GetUninitializedObject(mpHostManagerType);
+var messengerIdType = halflingAssembly.GetType("Halfling.Network.MessengerID", throwOnError: true)!;
+var parseMessengerId = AccessTools.Method(messengerIdType, "Parse", new[] { typeof(string) })
+    ?? throw new MissingMethodException(messengerIdType.FullName, "Parse(string)");
+var senderId = parseMessengerId.Invoke(null, new object[] { "1" })!;
+var otherId = parseMessengerId.Invoke(null, new object[] { "2" })!;
+var firstForwardFilter = (Delegate)getOrCreateInputTickFilter.Invoke(null, new[] { testHost, senderId })!;
+var secondForwardFilter = (Delegate)getOrCreateInputTickFilter.Invoke(null, new[] { testHost, senderId })!;
+if (!ReferenceEquals(firstForwardFilter, secondForwardFilter)
+    || (bool)firstForwardFilter.DynamicInvoke(senderId)!
+    || !(bool)firstForwardFilter.DynamicInvoke(otherId)!)
+{
+    throw new InvalidOperationException("InputTick forwarding filter cache behavior mismatch.");
 }
 
 foreach (var targetInfo in prefixTargets)
@@ -103,22 +210,89 @@ if (!streamCopyInfo.Prefixes.Any(patch => patch.owner == smokeId))
 {
     throw new InvalidOperationException("Expected multiplayer stream-copy capacity prefix was not installed.");
 }
+var receiveCapacityInfo = Harmony.GetPatchInfo(startDataStreamTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch ClientLaunchFlow.StartDataStreamRpc(long).");
+if (!receiveCapacityInfo.Postfixes.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("Expected multiplayer receive-buffer capacity postfix was not installed.");
+}
 
 var channelStreamType = halflingAssembly.GetType("Halfling.Network.ChannelStream", throwOnError: true)!;
 var channelInputBufferField = channelStreamType.GetField(
     "_inBuf",
     BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
     ?? throw new MissingFieldException(channelStreamType.FullName, "_inBuf");
+var channelOutputBufferField = channelStreamType.GetField(
+    "_outBuf",
+    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingFieldException(channelStreamType.FullName, "_outBuf");
 var testChannel = (Stream)RuntimeHelpers.GetUninitializedObject(channelStreamType);
 var testPayload = Enumerable.Range(0, 65553).Select(index => (byte)(index * 31)).ToArray();
 channelInputBufferField.SetValue(testChannel, new MemoryStream(testPayload, writable: false));
+var streamCapacityPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.MultiplayerStreamCopyCapacityPatch",
+    throwOnError: true)!;
+var preallocateIncoming = streamCapacityPatchType.GetMethod(
+    "PreallocateIncoming",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(streamCapacityPatchType.FullName, "PreallocateIncoming");
+var streamCopyPrefix = streamCapacityPatchType.GetMethod(
+    "Prefix",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(streamCapacityPatchType.FullName, "Prefix");
+var expandableInput = new MemoryStream();
+expandableInput.Write(testPayload);
+expandableInput.Position = 0;
+channelInputBufferField.SetValue(testChannel, expandableInput);
+preallocateIncoming.Invoke(null, new object[] { testChannel, 131071L });
+if (expandableInput.Capacity != 131071 || !expandableInput.ToArray().SequenceEqual(testPayload))
+{
+    throw new InvalidOperationException(
+        $"Multiplayer input preallocation mismatch: capacity={expandableInput.Capacity}, length={expandableInput.Length}.");
+}
+var outgoingChannel = (Stream)RuntimeHelpers.GetUninitializedObject(channelStreamType);
+var outgoingBuffer = new MemoryStream();
+outgoingBuffer.Write(new byte[] { 1, 2, 3, 4, 5, 6, 7 });
+channelOutputBufferField.SetValue(outgoingChannel, outgoingBuffer);
+using var serializedGame = new MemoryStream(testPayload, writable: false);
+serializedGame.Position = 17;
+streamCopyPrefix.Invoke(null, new object[] { serializedGame, outgoingChannel });
+var expectedOutgoingCapacity = outgoingBuffer.Length + serializedGame.Length - serializedGame.Position;
+if (outgoingBuffer.Capacity != expectedOutgoingCapacity
+    || !outgoingBuffer.ToArray().SequenceEqual(new byte[] { 1, 2, 3, 4, 5, 6, 7 }))
+{
+    throw new InvalidOperationException(
+        $"Multiplayer output preallocation mismatch: capacity={outgoingBuffer.Capacity}, " +
+        $"expected={expectedOutgoingCapacity}, length={outgoingBuffer.Length}.");
+}
 using (var copied = new MemoryStream())
 {
+    var sourceArray = expandableInput.GetBuffer();
     testChannel.CopyTo(copied);
-    if (copied.Capacity != testPayload.Length || !copied.ToArray().SequenceEqual(testPayload))
+    expandableInput.Dispose();
+    if (copied.Capacity != testPayload.Length
+        || copied.CanWrite
+        || !ReferenceEquals(sourceArray, copied.GetBuffer())
+        || !copied.ToArray().SequenceEqual(testPayload))
     {
         throw new InvalidOperationException(
-            $"Multiplayer stream copy mismatch: capacity={copied.Capacity}, length={copied.Length}.");
+            $"Multiplayer zero-copy receive mismatch: capacity={copied.Capacity}, " +
+            $"length={copied.Length}, writable={copied.CanWrite}.");
+    }
+}
+var unmarkedChannel = (Stream)RuntimeHelpers.GetUninitializedObject(channelStreamType);
+var unmarkedInput = new MemoryStream();
+unmarkedInput.Write(testPayload);
+unmarkedInput.Position = 0;
+channelInputBufferField.SetValue(unmarkedChannel, unmarkedInput);
+using (var ordinaryCopy = new MemoryStream())
+{
+    unmarkedChannel.CopyTo(ordinaryCopy);
+    if (!ordinaryCopy.CanWrite
+        || ReferenceEquals(unmarkedInput.GetBuffer(), ordinaryCopy.GetBuffer())
+        || !ordinaryCopy.ToArray().SequenceEqual(testPayload))
+    {
+        throw new InvalidOperationException("An unmarked ChannelStream did not preserve ordinary copy semantics.");
     }
 }
 
@@ -225,4 +399,4 @@ if (parallelConfirmed != 10 + parallelAdds)
 }
 
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint-network refresh, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource diagnostics, role-priority, multiplayer initialization/session-timeout buffer handling, and toggle-mode delegate cache patches resolved on this game build.");
+Console.WriteLine("PASS: resource, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint-network refresh, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, and toggle-mode delegate cache patches resolved on this game build.");
