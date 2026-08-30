@@ -1,11 +1,273 @@
 # Cosmoteer long-session memory diagnostics
 
-Last updated: 2026-08-27, Cosmoteer 0.30.4c, Emmanim Lag Fix 2.0.5.
+Last updated: 2026-08-31, Cosmoteer 0.30.4c, public Emmanim Lag Fix 2.0.14 plus local experiments.
+
+## Lazy PaintToolbox picker construction, batched build (2026-08-31)
+
+The lazy `PaintToolbox` picker/decal-group work started 2026-08-30 was left
+mid-edit (a `BuildBatch` off-by-one) at the previous session boundary. This
+session finished it as a per-frame batched incremental build rather than the
+earlier one-shot synchronous build: `PendingDecalGroup` now builds at most
+`DecalItemsPerFrame = 128` decal buttons per pre-draw callback via
+`StartIncrementalBuild`/`BuildBatch`, re-scheduling itself while its group tab
+stays open, and only clearing its pending state once every decal in the group
+has been created. `BuildImmediately` (used by `EnsureBuilt`/grab-decal/
+programmatic selection through `EnsureGroupContaining`) still forces the whole
+remaining batch synchronously. `Build()`/`Contains()` in the two lingering
+source mirrors were renamed to `BuildImmediately()`/`ContainsPending()`
+accordingly; the mirrors were out of sync with the compiled implementation and
+have been re-copied from `EmmanimLagFix.Code/PaintToolboxLazyPickerPatch.cs`,
+which remains the single source of truth for this file.
+
+Verified this session: `dotnet build ModLoader.sln -c Release` (0 warnings, 0
+errors) and the smoke test both pass, including the existing
+`PaintToolboxAddDecalsGroupLazyItemsPatch`/`PaintToolboxSelectDecalTypeLazyItemsPatch`
+prefix/postfix-installed assertions and the `AddDecalsLayers`/
+`AddBasePaintLayer`/`OnSelfActivated` transpiler/postfix coverage added in the
+prior session — no new smoke-test targets were needed since group/select
+coverage already existed. Cosmoteer was confirmed not running before deploy.
+Root, `Mod/Code`, and live `Mods/emmanim_lag_fix/Code` DLL SHA-256 (all
+identical):
+
+```
+967407A50ADF373E0C412F3F3E594C0664A7C7B6018774E463CE33E38DDEF2FC
+```
+
+**Not yet live-validated.** This remains uncommitted/unreleased under the
+public 2.0.14 metadata (`CHANGELOG.md`'s `## Unreleased` section covers it).
+Next session should launch Cosmoteer, open paint mode on at least one ship
+class with a large decal group (mods with big decal sets are the interesting
+case), confirm no Harmony/init exception, switch between several groups to
+exercise the per-frame batching and the `SelectDecalType`/grab-decal
+immediate-build path, and check that a favorite toggle on a lazily-built item
+shows the correct default star state (the `SelfActive` deactivate/reactivate
+dance around `AddChild` is what protects this).
+
+## Current handoff summary (2026-08-30 22:44 KST)
+
+The last controlled single-player validation process was PID 7484, started at
+17:14:55. It has exited. Its log is:
+
+```text
+E:\User\Saved Games\Cosmoteer\76561198111307314\Logs\log 2026-08-30 17_14_57.txt
+```
+
+The representative career save `single 2` loaded at 17:16:18. The corrected
+single-player diagnostic then produced uninterrupted one-minute rows from
+17:17 through at least 18:05. The `game` and `sim` identities remained
+`03BC01E1` / `0335DC79`, so this interval contains no GameRoot replacement or
+resync transition.
+
+The live series does **not** currently look like a simple unbounded managed
+leak:
+
+```text
+Interval / event                 Private MiB   GC heap MiB   Ships   Parts       Stasis preloaded
+17:17 first report                    9971          5091       138    44267             0
+17:24 settled paused state            9709          4694       138    44267             0
+17:31 world-population jump          10273          4924       239    63697            48
+17:51 later plateau                  10932          5170       241    48343            75
+18:05 latest                         11001          5193       254    44764            81
+```
+
+The first minutes actually released memory. The major rise at 17:31 coincided
+with 101 additional live ships, about 19,654 additional physical parts and 45
+additional preloaded stasis spawners. From 17:51 to 18:05, private memory rose
+only 69 MiB and GC heap only 23 MiB while handles stayed essentially flat
+(1446 -> 1449). Paint UI counts remained exactly `39/11475` for the entire
+run. This excludes repeated PaintToolbox construction and handle growth in
+this sample and again ties the large state transition to live/stasis ship
+population. Heap fragmentation remained high (roughly 450--830 MiB in the
+later interval) but oscillated instead of rising monotonically.
+
+The strongest remaining single-player issue is allocation churn, not proven
+retention. Active play commonly allocated 100--185 MiB/s process-wide and
+triggered roughly 700--1240 Gen-0 collections per minute. Memory can therefore
+plateau while allocation/GC pressure still causes frame-time instability and
+long-session stutter. A prior corrected-build `gc-verbose` sample had already
+removed the old 814.58 MiB/10 s toggle-delegate storm; its remaining sampled
+types were led by `Vector3` (21.45 MiB), `Matrix` (15.74 MiB), `Single`
+(13.31 MiB), `Vector2` (8.95 MiB) and `Color` (5.90 MiB). The same trace's CPU
+view was dominated by `GraphicsManager.RefreshShaderConstants`, but skipping
+shader refresh is not safe without proving redundant shader transitions and
+render equivalence.
+
+Current conclusions:
+
+- no evidence yet of an old-GameRoot lifecycle leak in this run;
+- no repeated paint GUI retention; the 11,475 items are one stable eager tree;
+- no monotonic process-handle leak;
+- live/stasis ship population explains the largest observed memory step;
+- fragmentation is substantial but not monotonic;
+- sustained allocation/GC churn is the next performance target;
+- lazy per-`ShipRules` and per-decal-group PaintToolbox construction is now
+  deployed as the strongest separately-testable baseline-memory and
+  game-creation-freeze optimization; live UI validation remains pending.
+
+Current local experimental DLL state:
+
+```text
+Public release: 2.0.14 / commit bf9bb4d2df59929316b5cfdeae83d6257f189998
+Local root/package/live DLL SHA-256:
+1333ED39D71285D3C7DEFE031CE0428F95CE0750B2C809D0B48749EFB0FE3464
+```
+
+The local DLL additionally contains resync receive-buffer/timing work and the
+opt-in SP/MP memory reporters. It is uncommitted and unreleased. Both live
+flags currently exist:
+
+```text
+multiplayer-memory-diagnostics.flag
+singleplayer-memory-diagnostics.flag
+```
+
+The first SP reporter build crashed at its first minute because it read
+`StasisSpawner.IsPreloaded` on a non-preloadable spawner. That exact diagnostic
+bug is fixed in the current hash by checking `SupportsPreloading` first in both
+SP and MP reporters. The corrected smoke test constructs a non-preloadable
+stasis spawner and verifies the guarded helper returns false without invoking
+the throwing property. The save itself was not damaged.
+
+### Lazy PaintToolbox picker construction (2026-08-30, post-18:09 session)
+
+Implemented the previously-identified strongest independent baseline-memory
+candidate. `PaintToolboxLazyPickerPatch.cs` first adds two narrowly-scoped
+Harmony transpilers plus one postfix:
+
+- `PaintToolboxAddDecalsLayersLazyPatch` redirects the single call to
+  `PaintToolbox.AddDecalPicker(ShipRules, GameGui, LayoutBox, Func<int>)`
+  inside `AddDecalsLayers`'s per-ShipRules `foreach` loop to a static capture
+  method that only records the (GameGui, LayoutBox, getLayer) construction
+  context — the loop itself still runs once per ShipRules, but each iteration
+  is now cheap instead of building a full decal-tab widget subtree.
+- `PaintToolboxAddBasePaintLayerLazyPatch` does the same for the single call to
+  `AddBaseTexturePicker(ShipRules, LayoutBox)` inside `AddBasePaintLayer`.
+- `PaintToolboxOnSelfActivatedLazyPickerPatch` postfixes `OnSelfActivated` —
+  confirmed to be the only place `_ship` is ever assigned non-null, and there
+  is no code path that changes which ship is being painted without the
+  toolbox deactivating and reactivating first (verified: `_ship =` appears at
+  exactly two sites in the decompiled class, this assignment and the `null`
+  clear in `OnSelfDeactivated`) — and lazily invokes the original, untouched
+  `AddDecalPicker`/`AddBaseTexturePicker` for that ship's `ShipRules` on first
+  use, tracked per-instance via a `HashSet<ShipRules>` so a class already
+  built is never rebuilt.
+
+The follow-up group-level layer reduces the retained graph even after paint
+mode has been opened for a mod-heavy ship class:
+
+- `PaintToolboxAddDecalsGroupLazyItemsPatch` passes a null item list through
+  the original `AddDecalsGroup` call for normal groups. Vanilla still builds
+  and wires the real group button, scroll page, tab selection and draw hooks;
+  only its eager `foreach (decal) AddDecalButton(...)` loop is skipped.
+- The original decal list is retained in patch-owned pending state. Selecting
+  or activating that group invokes the original, untouched `AddDecalButton`
+  once for every item, then releases the list and event hooks. Built groups
+  remain resident and are never rebuilt or torn down.
+- Favorite groups already pass `decals == null` in vanilla and therefore stay
+  entirely on their original immediate/dynamic favorite-add/remove path.
+- `PaintToolboxSelectDecalTypeLazyItemsPatch` first ensures the ship picker and
+  the one pending normal group containing the requested ID exist before
+  vanilla performs its widget search. This preserves grab-decal and other
+  programmatic selection paths even for a group the player has not opened.
+- Live validation exposed one ordering difference: adding a button to an
+  already-active lazy page activates it before vanilla attaches the button's
+  favorite-star refresh handler, leaving every star at its default-visible
+  state. Group construction now temporarily sets only that page's `SelfActive`
+  false, creates all items, then restores it. This reproduces vanilla's
+  create-while-inactive -> attach handler -> activate sequence without
+  changing favorite data or selection state.
+
+This changes no rendered content, no favorite-decal wiring and no per-ship
+`_updatingUIState` toggle logic (each lazy call still runs the real method,
+which still does its own `Delegate.Combine`). `PaintToolbox` is resolved via
+`AccessTools.TypeByName`/`AccessTools.Method`; group state remains outside the
+game object in the patch-owned weak-table context.
+
+Both transpilers require an exact single-call-site match (`replaced != 1`
+throws) and the whole file requires no changes to `_groupBoxes`/
+`_groupButtonsBoxes` or any other original private field — tracking of which
+ShipRules have been built lives entirely in the patch's own
+`ConditionalWeakTable<object, Context>`, keyed on the toolbox instance.
+
+Release build and the extended smoke test (now also asserting both
+transpilers, the `OnSelfActivated` postfix, the group prefix/postfix and the
+`SelectDecalType` prefix are installed) pass with zero warnings/errors.
+Deployed to package (`Mod/Code`,
+`Mod/Source/EmmanimLagFix.Code/PaintToolboxLazyPickerPatch.cs`) and the live
+mod after confirming Cosmoteer (PID 7484) had exited. Root/package/live DLL
+SHA-256:
+
+```text
+1333ED39D71285D3C7DEFE031CE0428F95CE0750B2C809D0B48749EFB0FE3464
+```
+
+**The group-level layer is not yet live-validated.** Next launch should confirm
+no Harmony/init exception, open paint mode on one ship class, switch through
+several normal groups, add/remove a favorite, and use grab-decal on an item in
+an unopened group. A same-state baseline/follow-up diagnostic pair should show
+only the active/visited groups' item counts; that pair has not been captured.
+
+### Extended multiplayer observation (2026-08-30)
+
+The 2.0.14 host process completed about 3 h 15 min of two-player multiplayer
+before the players deliberately left the room. Twenty-nine seconds later, while
+constructing a new creative game's paint/decal GUI, the freeze detector recorded
+11,519,295,488 bytes in use and a stall longer than ten seconds. The main thread
+was creating `TexturePicker.TextureItem` rows through
+`PaintToolbox.AddDecalButton`/`AddDecalsGroup`, not running multiplayer network
+code or a GC frame. High retained memory likely amplified that large GUI
+construction, but the stack does not prove that GC caused the stall.
+
+In a later fresh process, the remote player reportedly became progressively
+slower after about 85 minutes; restarting the room/process restored play. The
+host log cannot measure the remote process's heap and contains no memory sample
+for that interval. Obtain the client's game log and preferably two low-overhead
+`gc-collect` traces from the same client process to prove its growth and compare
+it with the previously established Gen-2/stasis-ship retention pattern.
+
+An opt-in `multiplayer-memory-diagnostics.flag` was subsequently added to
+correlate once-per-minute process/GC memory with MP input, hash, connection and
+recording queue sizes. If those queues stay flat while the client heap rises,
+the symptom is not a multiplayer transport leak even though it appears only
+during long multiplayer sessions. The live host flag alone is useful for a
+control, but the slow client's flag/log is the decisive sample.
 
 This file records the live evidence and the exact continuation point for the
 long-session slowdown investigation. Do not treat the earlier small-heap startup
 sample as evidence that there is no leak; the later same-process comparison below
 shows long-lived retention.
+
+### Opt-in single-player correlation (post-2.0.14 local experiment)
+
+When `singleplayer-memory-diagnostics.flag` exists beside the mod's `Code`
+directory at process start, a read-only `GameRoot.Update(Action)` postfix logs
+one row per wall-clock minute in non-multiplayer games. It records private,
+working, managed and GC heap memory, fragmentation, process handles, Gen-0/1/2
+collection deltas and process-wide allocation MiB/s. The same row records the
+current game/simulation identity, mode and tick, live ship and
+physical/blueprint-part counts, total/preloaded stasis spawners and paint decal
+picker/item counts. It does not run for `BaseMPManager` games, where the separate
+multiplayer diagnostic supplies queue data and the same simulation populations.
+
+Interpretation for a same-process single-player run:
+
+- memory rising with `stasis`/`parts` is live or preloaded world population;
+- flat populations with rising `fragmentedMiB` is GC heap fragmentation;
+- flat retained memory but high `allocatedMiBs` and frequent Gen-0 collections
+  is allocation churn rather than a leak;
+- a changed game/simulation identity followed by memory that never settles can
+  indicate an old-game lifecycle root and justifies a controlled heap dump;
+- stable counts and fragmentation with rising managed/heap memory indicates an
+  unmeasured retained graph and is the strongest reason for another same-state
+  baseline/follow-up dump pair.
+
+The first live attempt exposed an exact diagnostic-only bug at the first
+one-minute report: `StasisSpawner.IsPreloaded` deliberately throws
+`NotSupportedException` for spawners that do not support preloading. Both the
+single-player and multiplayer reporters now test `SupportsPreloading` before
+reading `IsPreloaded`. The save had already loaded and run for 61 seconds at
+about 138 FPS; the exception was in the reporter, not save loading or game
+simulation, and does not indicate save corruption.
 
 ## Freeze evidence
 
@@ -285,6 +547,39 @@ representative-root deltas. That comparison should decide whether the growing
 owner is a persistent toolbox/list, ship GUI reconstruction, or another UI
 lifecycle path before any Harmony cleanup patch is attempted.
 
+Static decompilation later identified why this graph is already enormous at
+baseline. Every `PaintToolbox` constructor calls `AddDecalsLayers`, which loops
+over every entry in `GameApp.Rules.Ships`. For every ship ruleset it constructs
+all decal group tabs and `AddDecalsGroup` immediately constructs one
+`TexturePicker.TextureItem` per decal. Each item owns its sprite/material/text
+renderers, selection state, tooltips, alternate-click handlers, favorite-state
+handlers, and brush-state subscriptions. This happens while the toolbox itself
+is inactive and even if paint mode is never opened.
+
+The corrected-build pair also shows that this is primarily large eager
+baseline retention, not the source of that interval's 436 MiB Gen-2 growth:
+the main shader/sprite/render populations changed by only about one thousand
+objects. A direct `dumpheap -stat -type PaintToolbox` comparison is even more
+decisive: both baseline and 35-minute follow-up contain exactly one
+`PaintToolbox`, 11,475 `DecalTypeInfo` values, 11,475
+`<>c__DisplayClass51_0` button closures and 11,475
+`<>c__DisplayClass51_1` closures. The complete PaintToolbox-named population is
+identical at 34,552 objects / 2,213,360 shallow bytes in both dumps. Its much
+larger transitive sprite/material/widget graph is therefore one stable eager
+tree, not repeated toolbox instances.
+
+A safe memory reduction therefore needs lazy construction per
+`ShipRules`, not global event cleanup. The narrow candidate is to intercept
+`AddDecalPicker` during toolbox construction, retain its original arguments,
+and invoke it only for the selected ship's rules on first toolbox activation.
+`SelectDecalType` is used by the active grab-decal tool, so construction must
+complete before paint input is accepted. Building all buttons incrementally
+would reduce the opening freeze but not final retained memory; true lazy
+per-rules construction addresses both baseline memory and new-game/resync GUI
+construction cost. Keep this as a separately smoke- and UI-tested experiment,
+because favorite subscriptions, tab selection, and the `_updatingUIState`
+delegate are installed inside `AddDecalPicker`.
+
 ### Corrected-build full-heap baseline (2026-08-28)
 
 After loading the representative career save on corrected-build PID 14820, a
@@ -449,19 +744,37 @@ approach/spawn hitches.
 
 ## Continuation checklist
 
-The corrected build is live on PID 14820 and its baseline/follow-up pair has
-been captured. Resume as follows:
-
-1. Keep the current baseline/follow-up dumps until any additional root checks
-   against the simulation/ship graph are complete.
-2. Launch the deployed data-only `StasisPreloadRange = 3000` override at the
-   same saved location, allow preload to settle, and compare the active
-   stasis manager's preloaded count and process memory. Keep
-   `StasisLiveRange = 2500` unchanged.
-3. Do not implement global weak-event, inactive-widget or media-effect cleanup:
-   the current roots lead to active/current or stasis-managed ships, and blind
-   detachment would corrupt live simulation state.
-
-Repository changes at handoff are intentional and uncommitted. In particular,
-keep the source and `Mod/Source` copies of `ToggleModeDelegateCachePatch.cs`
-identical, and do not overwrite unrelated worktree changes.
+1. Preserve and read the remainder of `log 2026-08-30 17_14_57.txt` after the
+   current PID 7484 exits. Compare the last 10--15 rows with the 17:51--18:05
+   plateau before calling any later rise a leak.
+2. For retained-memory proof, use another 15-second low-overhead `gc-collect`
+   window only after holding ship, part and stasis-preload counts reasonably
+   constant. Do not use `gc-verbose` handle deltas as retention evidence.
+3. For allocation attribution, capture a short `gc-verbose` plus CPU trace
+   during a representative 150+ MiB/s interval and resolve stacks beneath the
+   remaining vector/matrix/color samples. This is the primary next
+   single-player performance investigation.
+4. Treat `GraphicsManager.RefreshShaderConstants` as an audit lead, not an
+   approved throttle target. Shader changes can be render-critical.
+5. Design the PaintToolbox experiment separately: defer `AddDecalPicker` per
+   `ShipRules` until first paint-tool activation, build the active ruleset
+   before accepting paint input, and preserve favorites, tab selection,
+   `SelectDecalType` and `_updatingUIState`. Incremental construction alone
+   reduces a freeze but does not reduce final retained memory.
+6. Keep `StasisLiveRange = 2500` and the already-deployed
+   `StasisPreloadRange = 3000`. Do not add a hard ship cap or a long-lived
+   resource/path cache.
+7. Do not globally clear weak events, inactive widgets, media effects or MP
+   queues. Existing heap roots lead to current/stasis-managed objects, and
+   blind cleanup can corrupt UI or simulation state.
+8. For the reported slow multiplayer client, copy the current experimental mod
+   and enable the MP diagnostic on that client. Host-only rows cannot prove the
+   remote heap trend.
+9. Keep both corrected-build full dumps until the lazy-paint and allocation
+   questions are resolved:
+   `memory_heap_threadlocal_baseline_2026-08-28_03-33-49.dmp` and
+   `memory_heap_threadlocal_followup_2026-08-28_04-09-31.dmp`.
+10. The repository is intentionally dirty with post-2.0.14 resync and memory
+    diagnostic work. Do not reset it or overwrite unrelated changes. Keep root
+    source, `Mod/Source`, package DLL and live DLL synchronized after the game
+    exits; never replace the live DLL while Cosmoteer is running.

@@ -6,10 +6,10 @@ using HarmonyLib;
 namespace EmmanimLagFix.Code;
 
 /// <summary>
-/// Multiplayer client launch receives the complete GameInit into a
-/// ChannelStream and then copies it into a fresh MemoryStream. Vanilla lets the
+/// Multiplayer client launch and resync receive the complete game payload into
+/// a ChannelStream and then copy it into a fresh MemoryStream. Vanilla lets the
 /// destination grow geometrically during that copy, repeatedly allocating and
-/// copying large backing arrays. Initial-game streams are marked when their
+/// copying large backing arrays. Complete-game streams are marked when their
 /// exact size arrives, allowing the completed ChannelStream input array to be
 /// handed directly to the fresh read buffer without copying. Any unexpected
 /// stream/runtime shape falls back to the behavior-preserving preallocated copy.
@@ -17,7 +17,7 @@ namespace EmmanimLagFix.Code;
 [HarmonyPatch(typeof(Stream), nameof(Stream.CopyTo), new[] { typeof(Stream) })]
 internal static class MultiplayerStreamCopyCapacityPatch
 {
-    private static readonly ConditionalWeakTable<ChannelStream, object> InitialGameStreams = new();
+    private static readonly ConditionalWeakTable<ChannelStream, object> CompleteGameStreams = new();
 
     private static readonly FieldInfo OutputBufferField = AccessTools.Field(typeof(ChannelStream), "_outBuf")
         ?? throw new MissingFieldException(typeof(ChannelStream).FullName, "_outBuf");
@@ -41,7 +41,7 @@ internal static class MultiplayerStreamCopyCapacityPatch
             && destination is MemoryStream receiveCopy
             && receiveCopy.Length == 0)
         {
-            if (InitialGameStreams.TryGetValue(incoming, out _)
+            if (CompleteGameStreams.TryGetValue(incoming, out _)
                 && TryAdoptIncomingBuffer(incoming, receiveCopy))
             {
                 return false;
@@ -64,7 +64,7 @@ internal static class MultiplayerStreamCopyCapacityPatch
 
     internal static void PreallocateIncoming(ChannelStream stream, long totalBytes)
     {
-        InitialGameStreams.GetValue(stream, static _ => new object());
+        CompleteGameStreams.GetValue(stream, static _ => new object());
         EnsureMemoryStreamCapacity(GetBuffer(stream, InputBufferField), totalBytes);
     }
 
@@ -155,7 +155,7 @@ internal static class MultiplayerStreamCopyCapacityPatch
 }
 
 /// <summary>
-/// StartDataStreamRpc already receives the exact initialization payload size
+/// Both first launch and resync receive the exact complete-game payload size
 /// before constructing the client's ChannelStream. Reserve that size in the
 /// stream's input buffer before the reliable chunks arrive, avoiding repeated
 /// backing-array growth while preserving the unchanged receive path.
@@ -166,18 +166,37 @@ internal static class MultiplayerReceiveBufferCapacityPatch
     private static readonly Type ClientLaunchFlowType = typeof(Cosmoteer.Game.GameRoot).Assembly
         .GetType("Cosmoteer.Gui.Multiplayer.GameLaunchFlow+ClientLaunchFlow", throwOnError: true)!;
 
-    private static readonly FieldInfo ClientStreamField = AccessTools.Field(ClientLaunchFlowType, "_stream")
-        ?? throw new MissingFieldException(ClientLaunchFlowType.FullName, "_stream");
+    private static readonly Type ClientResyncFlowType = typeof(Cosmoteer.Game.GameRoot).Assembly
+        .GetType("Cosmoteer.Game.Multiplayer.GameResyncFlow+ClientResyncFlow", throwOnError: true)!;
 
-    private static MethodBase TargetMethod() =>
-        AccessTools.Method(ClientLaunchFlowType, "StartDataStreamRpc", new[] { typeof(long) })
-        ?? throw new MissingMethodException(ClientLaunchFlowType.FullName, "StartDataStreamRpc(long)");
+    private static readonly IReadOnlyDictionary<Type, FieldInfo> StreamFields =
+        new Dictionary<Type, FieldInfo>
+        {
+            [ClientLaunchFlowType] = AccessTools.Field(ClientLaunchFlowType, "_stream")
+                ?? throw new MissingFieldException(ClientLaunchFlowType.FullName, "_stream"),
+            [ClientResyncFlowType] = AccessTools.Field(ClientResyncFlowType, "_stream")
+                ?? throw new MissingFieldException(ClientResyncFlowType.FullName, "_stream")
+        };
+
+    private static IEnumerable<MethodBase> TargetMethods()
+    {
+        foreach (var type in StreamFields.Keys)
+        {
+            yield return AccessTools.Method(type, "StartDataStreamRpc", new[] { typeof(long) })
+                ?? throw new MissingMethodException(type.FullName, "StartDataStreamRpc(long)");
+        }
+    }
 
     private static void Postfix(object __instance, long totalBytes)
     {
-        if (ClientStreamField.GetValue(__instance) is ChannelStream stream)
+        if (StreamFields[__instance.GetType()].GetValue(__instance) is ChannelStream stream)
         {
             MultiplayerStreamCopyCapacityPatch.PreallocateIncoming(stream, totalBytes);
+            if (__instance.GetType() == ClientResyncFlowType)
+            {
+                Halfling.Logging.Logger.Log(
+                    $"Emmanim Lag Fix preallocated the resync receive buffer for {totalBytes:N0} bytes.");
+            }
         }
     }
 }

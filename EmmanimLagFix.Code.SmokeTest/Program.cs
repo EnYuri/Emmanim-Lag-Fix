@@ -23,6 +23,8 @@ var prefixTargets = new[]
     (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Crew.RoleEditWindow+<>c__DisplayClass19_0", throwOnError: true)!, Method: "<CreatePrioritiesTab>g___AddPart|1"),
     (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Crew.RoleEditWindow+JobPriorityWidget", throwOnError: true)!, Method: "OnUpdatePriorityState"),
     (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Crew.RoleEditWindow+AssignmentPriorityWidget", throwOnError: true)!, Method: "OnUpdatePriorityState"),
+    (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Paint.PaintToolbox", throwOnError: true)!, Method: "AddDecalsGroup"),
+    (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Paint.PaintToolbox", throwOnError: true)!, Method: "SelectDecalType"),
     (Type: gameAssembly.GetType("Cosmoteer.Gui.Multiplayer.GameLaunchFlow+HostLaunchFlow+<>c__DisplayClass7_0", throwOnError: true)!, Method: "<DoHostLaunchFlow>b__1"),
     (Type: gameAssembly.GetType("Cosmoteer.Gui.Multiplayer.GameLaunchFlow+ClientLaunchFlow+<>c__DisplayClass11_0", throwOnError: true)!, Method: "<OnStreamMessageReceived>b__0"),
     (Type: gameAssembly.GetType("Cosmoteer.Modes.LoadGameInit", throwOnError: true)!, Method: "CreateGame")
@@ -42,7 +44,15 @@ var transpilerTargets = new[]
     (Type: gameAssembly.GetType("Cosmoteer.Modes.Career.Comms.CommTradeTab+<>c__DisplayClass23_0", throwOnError: true)!, Method: "<.ctor>b__6"),
     (Type: halflingAssembly.GetType("Halfling.Network.NetworkMessenger", throwOnError: true)!, Method: "ProcessUnresponsiveSessions"),
     (Type: halflingAssembly.GetType("Halfling.Network.NetworkMessenger", throwOnError: true)!, Method: "EnqueueOutgoingAcks"),
+    (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Paint.PaintToolbox", throwOnError: true)!, Method: "AddDecalsLayers"),
+    (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Paint.PaintToolbox", throwOnError: true)!, Method: "AddBasePaintLayer"),
 };
+
+var paintToolboxType = gameAssembly.GetType("Cosmoteer.Game.Gui.Paint.PaintToolbox", throwOnError: true)!;
+var onSelfActivatedTarget = AccessTools.Method(paintToolboxType, "OnSelfActivated")
+    ?? throw new MissingMethodException(paintToolboxType.FullName, "OnSelfActivated");
+var addDecalsGroupTarget = AccessTools.Method(paintToolboxType, "AddDecalsGroup")
+    ?? throw new MissingMethodException(paintToolboxType.FullName, "AddDecalsGroup");
 
 var transferConstructors = new[]
 {
@@ -67,6 +77,14 @@ var perShipAddCountTarget = AccessTools.Method(perShipCountType, "AddCount")
 var baseMpManagerType = gameAssembly.GetType("Cosmoteer.Game.Multiplayer.BaseMPManager", throwOnError: true)!;
 var advanceNetworkTimeTarget = AccessTools.Method(baseMpManagerType, "AdvanceNetworkTime")
     ?? throw new MissingMethodException(baseMpManagerType.FullName, "AdvanceNetworkTime");
+var multiplayerUpdateTarget = AccessTools.Method(baseMpManagerType, "Update")
+    ?? throw new MissingMethodException(baseMpManagerType.FullName, "Update");
+var gameRootType = gameAssembly.GetType("Cosmoteer.Game.GameRoot", throwOnError: true)!;
+var gameRootUpdateTarget = AccessTools.Method(gameRootType, "Update", new[] { typeof(Action) })
+    ?? throw new MissingMethodException(gameRootType.FullName, "Update(Action)");
+var stasisNuggetType = gameAssembly.GetType(
+    "Cosmoteer.Simulation.Stasis.SimStasisManager+StasisNugget",
+    throwOnError: true)!;
 var mpHostManagerType = gameAssembly.GetType("Cosmoteer.Game.Multiplayer.MPHostManager", throwOnError: true)!;
 var hostOnTickTarget = AccessTools.Method(mpHostManagerType, "OnTick")
     ?? throw new MissingMethodException(mpHostManagerType.FullName, "OnTick");
@@ -90,6 +108,29 @@ var clientLaunchFlowType = gameAssembly.GetType(
     throwOnError: true)!;
 var startDataStreamTarget = AccessTools.Method(clientLaunchFlowType, "StartDataStreamRpc", new[] { typeof(long) })
     ?? throw new MissingMethodException(clientLaunchFlowType.FullName, "StartDataStreamRpc(long)");
+var clientResyncFlowType = gameAssembly.GetType(
+    "Cosmoteer.Game.Multiplayer.GameResyncFlow+ClientResyncFlow",
+    throwOnError: true)!;
+var startResyncDataStreamTarget = AccessTools.Method(
+    clientResyncFlowType,
+    "StartDataStreamRpc",
+    new[] { typeof(long) })
+    ?? throw new MissingMethodException(clientResyncFlowType.FullName, "StartDataStreamRpc(long)");
+var hostResyncWorkerType = gameAssembly.GetType(
+    "Cosmoteer.Game.Multiplayer.GameResyncFlow+HostResyncFlow+<>c__DisplayClass7_0",
+    throwOnError: true)!;
+var clientResyncWorkerType = gameAssembly.GetType(
+    "Cosmoteer.Game.Multiplayer.GameResyncFlow+ClientResyncFlow+<>c__DisplayClass9_0",
+    throwOnError: true)!;
+var resyncTimingTargets = new[]
+{
+    AccessTools.Method(hostResyncWorkerType, "<DoHostResyncFlow>b__0")
+        ?? throw new MissingMethodException(hostResyncWorkerType.FullName, "host save worker"),
+    AccessTools.Method(hostResyncWorkerType, "<DoHostResyncFlow>b__2")
+        ?? throw new MissingMethodException(hostResyncWorkerType.FullName, "host load worker"),
+    AccessTools.Method(clientResyncWorkerType, "<OnStreamMessageReceived>b__0")
+        ?? throw new MissingMethodException(clientResyncWorkerType.FullName, "client load worker")
+};
 
 const string smokeId = "nayuri.emmanim_lag_fix.smoke_test";
 var harmony = new Harmony(smokeId);
@@ -141,6 +182,30 @@ var advanceNetworkTimeInfo = Harmony.GetPatchInfo(advanceNetworkTimeTarget)
 if (!advanceNetworkTimeInfo.Transpilers.Any(patch => patch.owner == smokeId))
 {
     throw new InvalidOperationException("Expected multiplayer integrity-hash transpiler was not installed.");
+}
+var multiplayerUpdateInfo = Harmony.GetPatchInfo(multiplayerUpdateTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch BaseMPManager.Update.");
+if (!multiplayerUpdateInfo.Postfixes.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("Expected multiplayer memory-diagnostics postfix was not installed.");
+}
+var gameRootUpdateInfo = Harmony.GetPatchInfo(gameRootUpdateTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch GameRoot.Update(Action).");
+if (!gameRootUpdateInfo.Postfixes.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("Expected single-player memory-diagnostics postfix was not installed.");
+}
+var memoryDiagnosticsCommonType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.MemoryDiagnosticsCommon",
+    throwOnError: true)!;
+var isSpawnerPreloaded = memoryDiagnosticsCommonType.GetMethod(
+    "IsSpawnerPreloaded",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(memoryDiagnosticsCommonType.FullName, "IsSpawnerPreloaded");
+var nonPreloadableSpawner = RuntimeHelpers.GetUninitializedObject(stasisNuggetType);
+if ((bool)isSpawnerPreloaded.Invoke(null, new[] { nonPreloadableSpawner })!)
+{
+    throw new InvalidOperationException("A non-preloadable stasis spawner was reported as preloaded.");
 }
 var hostUpdatePatchType = typeof(EntryPoint).Assembly.GetType(
     "EmmanimLagFix.Code.MultiplayerHostUpdateThrottlePatch",
@@ -215,6 +280,22 @@ var receiveCapacityInfo = Harmony.GetPatchInfo(startDataStreamTarget)
 if (!receiveCapacityInfo.Postfixes.Any(patch => patch.owner == smokeId))
 {
     throw new InvalidOperationException("Expected multiplayer receive-buffer capacity postfix was not installed.");
+}
+var resyncReceiveCapacityInfo = Harmony.GetPatchInfo(startResyncDataStreamTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch ClientResyncFlow.StartDataStreamRpc(long).");
+if (!resyncReceiveCapacityInfo.Postfixes.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("Expected multiplayer resync receive-buffer capacity postfix was not installed.");
+}
+foreach (var target in resyncTimingTargets)
+{
+    var info = Harmony.GetPatchInfo(target)
+        ?? throw new InvalidOperationException($"Harmony did not patch resync worker {target.Name}.");
+    if (!info.Prefixes.Any(patch => patch.owner == smokeId)
+        || !info.Finalizers.Any(patch => patch.owner == smokeId))
+    {
+        throw new InvalidOperationException($"Expected resync timing patches were not installed on {target.Name}.");
+    }
 }
 
 var channelStreamType = halflingAssembly.GetType("Halfling.Network.ChannelStream", throwOnError: true)!;
@@ -308,6 +389,21 @@ foreach (var targetInfo in transpilerTargets)
     }
 }
 
+var onSelfActivatedInfo = Harmony.GetPatchInfo(onSelfActivatedTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch PaintToolbox.OnSelfActivated.");
+if (!onSelfActivatedInfo.Postfixes.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("Expected lazy paint-picker postfix was not installed on PaintToolbox.OnSelfActivated.");
+}
+
+var addDecalsGroupInfo = Harmony.GetPatchInfo(addDecalsGroupTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch PaintToolbox.AddDecalsGroup.");
+if (!addDecalsGroupInfo.Prefixes.Any(patch => patch.owner == smokeId)
+    || !addDecalsGroupInfo.Postfixes.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("Expected lazy decal-group prefix/postfix was not installed on PaintToolbox.AddDecalsGroup.");
+}
+
 foreach (var constructor in transferConstructors)
 {
     var info = Harmony.GetPatchInfo(constructor)
@@ -399,4 +495,4 @@ if (parallelConfirmed != 10 + parallelAdds)
 }
 
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint-network refresh, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, and toggle-mode delegate cache patches resolved on this game build.");
+Console.WriteLine("PASS: resource, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint-network refresh, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, and toggle-mode delegate cache patches resolved on this game build.");

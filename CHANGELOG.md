@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.0.15
+
+- Extended the initial-multiplayer-sync buffer optimizations (exact-size
+  preallocation, zero-copy handoff) from first launch to also cover a
+  mid-session resync, and added opt-in timing logs for a resync's three
+  expensive background phases (host save, host load, client load) so a slow
+  resync can be attributed without changing serialization, scheduling, or
+  game state.
+- Added two opt-in, low-frequency memory/allocation diagnostics (multiplayer
+  and single-player), each gated behind a flag file in the live mod root and
+  otherwise fully inert. Neither ever mutates a queue, the simulation, or any
+  retained collection; they only log process/GC memory, live ship/part counts
+  and stasis-preload counts once per minute for correlating memory growth with
+  world state.
+- Deferred `PaintToolbox`'s per-ShipRules decal-tab and base-roof-texture
+  picker construction from the paint toolbox's constructor (eager for every
+  ShipRules across every installed ship-adding mod) to the first time the
+  player actually opens paint mode on a ship of that class. Measured as one
+  stable eager tree of 11,475 decal widgets on this installation; see
+  `MEMORY_DIAGNOSTICS.md`. Implemented as two narrowly-scoped Harmony
+  transpilers that redirect the single per-ship builder-method call site to a
+  cheap context-capture call, plus a postfix on `OnSelfActivated` (the only
+  place the painted ship is ever assigned) that lazily invokes the original,
+  untouched builder methods. Both transpilers require an exact single-call-site
+  match and disable themselves if the game code shape changes. Favorite
+  decals, per-ship `_updatingUIState` toggle wiring and `SelectDecalType`/
+  grab-decal behavior are preserved. A second lazy layer now creates normal
+  decal buttons only when their group tab is first opened, in batches of at
+  most 128 items per rendered frame while the tab stays open rather than all
+  at once; unopened groups remain as lightweight tabs/pages. Favorite groups
+  retain vanilla's dynamic add/remove path, programmatic decal selection
+  (grab-decal, `SelectDecalType`) forces the remainder of the matching group's
+  batch immediately, and built groups remain resident without unsafe widget
+  teardown. Lazy item creation re-activates only the newly added item after
+  construction, restoring vanilla's activation order so non-favorite items do
+  not incorrectly retain the favorite star's default-visible state.
+
 ## 2.0.14
 
 - Reduced the peak memory and copying cost of initial multiplayer

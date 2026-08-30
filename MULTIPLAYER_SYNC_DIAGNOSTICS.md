@@ -238,5 +238,65 @@ that immutable predicate once per host-session/sender pair in a
 serialized bytes are unchanged. The cache disappears with its host manager.
 This removes one closure plus one delegate allocation per received client tick
 after warm-up (normally 30 pairs per second per client), but is expected to be
-a small GC-pressure improvement rather than a frame-rate fix. Actual multi-peer
-forwarding validation remains pending.
+a small GC-pressure improvement rather than a frame-rate fix. The subsequent
+extended two-player session validated this forwarding path in normal play.
+
+## First extended 2.0.14 multiplayer session and resync (2026-08-30)
+
+Two-player host logs show a 3 h 15 min session, an approximately 1 h 25 min
+session, and a final 56 min session without `WaitingForAck`, connection-loss,
+loader, Harmony, or patch exceptions. This is the first extended real-peer
+validation of 2.0.14's steady multiplayer changes. A SteamNetworkingSockets
+70 ms service-thread starvation assert occurred once immediately before the
+second room started; no equivalent assert occurred during either long active
+session. Two Steam IPC asserts at final process shutdown were pipe-close
+aftermath rather than gameplay failures.
+
+The second room did perform one automatic out-of-sync resynchronization from
+05:12:03 to 05:16:25 (262 seconds), then successfully pushed the rebuilt career
+game and remained usable until the players returned to setup. This proves the
+resync completed, but is not evidence that no desync occurred: vanilla reaches
+the host `ResyncGame` path only through `OnOutOfSyncRpc`. Because a peer running
+a different hash cadence would diverge immediately rather than after about 85
+minutes, the late event does not resemble a 2.0.14 hash-sequence mismatch.
+
+Audit found that the resync flow is separate from the first-launch flow. The
+2.0.14 host output preallocation happened generically, but client resync did
+not mark its `ChannelStream`, so it still grew the receive buffer and copied
+the complete saved game into a second `MemoryStream`. The post-2.0.14 local
+patch now applies the same exact-size preallocation and guarded zero-copy buffer
+adoption to `GameResyncFlow.ClientResyncFlow.StartDataStreamRpc`. Wire format,
+save/load behavior and resync decisions are unchanged; any stream/runtime-shape
+mismatch retains the safe preallocated copy fallback.
+
+The same local experiment logs the announced resync byte count and separately
+times host save serialization, host game reload, and client game reload. A
+future host/client log pair can therefore distinguish serialization/rebuild
+cost from the residual transfer/wait time. The 262-second historical log did
+not contain these phase timers, so it cannot establish which phase dominated.
+
+### Opt-in steady multiplayer memory correlation
+
+The historical host log cannot show the remote client's heap, and the steady
+multiplayer audit found no queue that is unconditionally unbounded: processed
+`InputTick` objects are disposed back to their pool, recordings are written and
+flushed to the `.rec` file, integrity hashes are paired/released, and normal
+serialized message buffers are pooled. Blindly clearing any of these structures
+would lose inputs or create an out-of-sync game.
+
+When `multiplayer-memory-diagnostics.flag` exists beside the mod's `Code`
+directory at process start, `MultiplayerMemoryDiagnosticsPatch` writes one row
+per wall-clock minute. It correlates private/working/managed/GC heap and
+fragmentation, process handles and GC collection deltas with total/max queued
+player input ticks, unsent local inputs, host/client integrity-hash queues,
+connection receive queues, send throughput and recording-file length. The
+postfix never mutates multiplayer state. Each row also records the current game
+and simulation identities, live ship and physical/blueprint part counts,
+total/preloaded stasis spawners, and eagerly retained paint decal picker/item
+counts. These distinguish a multiplayer queue backlog from location-dependent
+stasis growth, a game/resync replacement, or repeated GUI construction. If
+memory rises while queues and these object populations remain bounded,
+fragmentation or another retained graph is the next target; if one population
+rises with memory, patch its exact ownership/release path. Enable the flag on
+the slow client in particular, because a host-only row cannot prove client
+growth.
