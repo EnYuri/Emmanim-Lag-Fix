@@ -22,7 +22,8 @@ namespace EmmanimLagFix.Code;
 [HarmonyPatch]
 internal static class BlueprintNetworkPortRefreshBatchPatch
 {
-    private const int RefreshIntervalTicks = 300;
+    private const int PortRefreshIntervalTicks = 300;
+    private const int StatRefreshIntervalTicks = 30;
     private static readonly ConditionalWeakTable<object, Gate> Gates = new();
     private static readonly Type CallbackType = AccessTools.TypeByName(
         "Cosmoteer.Ships.Parts.PartsManager+UpdateCallbacks")
@@ -31,49 +32,77 @@ internal static class BlueprintNetworkPortRefreshBatchPatch
     [ThreadStatic]
     private static bool? s_allowPortRefresh;
 
+    [ThreadStatic]
+    private static bool? s_allowStatRefresh;
+
     private sealed class Gate
     {
-        public int NextTick;
+        public int NextPortTick;
+        public int NextStatTick;
     }
 
     private static MethodBase TargetMethod() =>
         AccessTools.Method(CallbackType, "Update")
         ?? throw new MissingMethodException(CallbackType.FullName, "Update");
 
-    private static void Prefix(object __instance, SceneRoot root, out bool? __state)
+    private static void Prefix(
+        object __instance,
+        SceneRoot root,
+        out (bool? Port, bool? Stat) __state)
     {
-        __state = s_allowPortRefresh;
+        __state = (s_allowPortRefresh, s_allowStatRefresh);
         if (root is not SimRoot sim || sim.IsPaused.Confirmed)
         {
             s_allowPortRefresh = true;
+            s_allowStatRefresh = true;
             return;
         }
 
         var gate = Gates.GetOrCreateValue(__instance);
         var tick = sim.Tick;
-        if (tick >= gate.NextTick || tick < gate.NextTick - RefreshIntervalTicks)
+        if (tick >= gate.NextPortTick || tick < gate.NextPortTick - PortRefreshIntervalTicks)
         {
-            gate.NextTick = tick + RefreshIntervalTicks;
+            gate.NextPortTick = tick + PortRefreshIntervalTicks;
             s_allowPortRefresh = true;
         }
         else
         {
             s_allowPortRefresh = false;
         }
+
+        if (tick >= gate.NextStatTick || tick < gate.NextStatTick - StatRefreshIntervalTicks)
+        {
+            gate.NextStatTick = tick + StatRefreshIntervalTicks;
+            s_allowStatRefresh = true;
+        }
+        else
+        {
+            s_allowStatRefresh = false;
+        }
     }
 
-    private static void Postfix(bool? __state)
+    private static void Postfix((bool? Port, bool? Stat) __state)
     {
-        s_allowPortRefresh = __state;
+        RestoreState(__state);
     }
 
-    private static Exception? Finalizer(Exception? __exception, bool? __state)
+    private static Exception? Finalizer(
+        Exception? __exception,
+        (bool? Port, bool? Stat) __state)
     {
-        s_allowPortRefresh = __state;
+        RestoreState(__state);
         return __exception;
     }
 
+    private static void RestoreState((bool? Port, bool? Stat) state)
+    {
+        s_allowPortRefresh = state.Port;
+        s_allowStatRefresh = state.Stat;
+    }
+
     internal static bool AllowPortRefresh => s_allowPortRefresh ?? true;
+
+    internal static bool AllowStatRefresh => s_allowStatRefresh ?? true;
 }
 
 [HarmonyPatch]
@@ -88,4 +117,17 @@ internal static class BlueprintNetworkPortRefreshPatch
         ?? throw new MissingMethodException(PortType.FullName, "UpdateOperational");
 
     private static bool Prefix() => BlueprintNetworkPortRefreshBatchPatch.AllowPortRefresh;
+}
+
+/// <summary>
+/// Blueprint stat providers only drive display/planning state, but vanilla
+/// reevaluates every provider on every unpaused scene update. Use the same
+/// per-ship callback gate as the network-port patch, at the more responsive
+/// cadence of once per game second. Paused blueprint editing retains vanilla
+/// per-frame feedback.
+/// </summary>
+[HarmonyPatch(typeof(Cosmoteer.Ships.Blueprints.Logic.Values.BlueprintPartStatProvider), "UpdateOperational")]
+internal static class BlueprintPartStatProviderRefreshPatch
+{
+    private static bool Prefix() => BlueprintNetworkPortRefreshBatchPatch.AllowStatRefresh;
 }

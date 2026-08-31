@@ -17,6 +17,7 @@ var prefixTargets = new[]
     (Type: gameAssembly.GetType("Cosmoteer.Simulation.SimOverlayRenderer", throwOnError: true)!, Method: "<OnDrawCrewUnderlays>g___DrawResourceNuggetPickups|98_3"),
     (Type: gameAssembly.GetType("Cosmoteer.Ships.Parts.PartsManager+UpdateCallbacks", throwOnError: true)!, Method: "Update"),
     (Type: gameAssembly.GetType("Cosmoteer.Source.Ships.Blueprints.BaseBlueprintPartNetworkPort", throwOnError: true)!, Method: "UpdateOperational"),
+    (Type: gameAssembly.GetType("Cosmoteer.Ships.Blueprints.Logic.Values.BlueprintPartStatProvider", throwOnError: true)!, Method: "UpdateOperational"),
     (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Build.Stats.BuildToolboxStatsGui", throwOnError: true)!, Method: "Update"),
     (Type: gameAssembly.GetType("Cosmoteer.Ships.Statuses.Subhandlers.StatusDiffuser", throwOnError: true)!, Method: "PerformDiffusion"),
     (Type: gameAssembly.GetType("Cosmoteer.Ships.Parts.Logic.PartSmoothedValue+SmoothedValueManager", throwOnError: true)!, Method: "Update"),
@@ -46,6 +47,8 @@ var transpilerTargets = new[]
     (Type: halflingAssembly.GetType("Halfling.Network.NetworkMessenger", throwOnError: true)!, Method: "EnqueueOutgoingAcks"),
     (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Paint.PaintToolbox", throwOnError: true)!, Method: "AddDecalsLayers"),
     (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Paint.PaintToolbox", throwOnError: true)!, Method: "AddBasePaintLayer"),
+    (Type: gameAssembly.GetType("Cosmoteer.Ships.Rendering.AtlasQuadManager+InternalManagedAtlasQuad", throwOnError: true)!, Method: "set_Data"),
+    (Type: gameAssembly.GetType("Cosmoteer.Ships.Crew.Pathing.PathContiguityManager+<SearchSetsFrom>d__21", throwOnError: true)!, Method: "MoveNext"),
 };
 
 var paintToolboxType = gameAssembly.GetType("Cosmoteer.Game.Gui.Paint.PaintToolbox", throwOnError: true)!;
@@ -69,6 +72,20 @@ var resourceManagerType = gameAssembly.GetType("Cosmoteer.Ships.Resources.Resour
 var resourceSinkInfoType = gameAssembly.GetType("Cosmoteer.Ships.Resources.ResourceManager+SinkInfo", throwOnError: true)!;
 var resourceSearchTarget = AccessTools.Method(resourceManagerType, "SearchForSources", new[] { resourceSinkInfoType })
     ?? throw new MissingMethodException(resourceManagerType.FullName, "SearchForSources(SinkInfo)");
+var updateSinkJobsTarget = AccessTools.Method(
+    resourceManagerType,
+    "UpdateSinkJobs",
+    new[] { halflingAssembly.GetType("Halfling.Timing.Time", throwOnError: true)! })
+    ?? throw new MissingMethodException(resourceManagerType.FullName, "UpdateSinkJobs(Time)");
+var baseResourceStorageType = gameAssembly.GetType(
+    "Cosmoteer.Ships.Parts.Resources.BaseResourceStorage",
+    throwOnError: true)!;
+var unmetDesiredTarget = AccessTools.Method(
+    baseResourceStorageType,
+    "<GetSortPriority>g___HasUnmetDesired|181_0")
+    ?? throw new MissingMethodException(
+        baseResourceStorageType.FullName,
+        "<GetSortPriority>g___HasUnmetDesired|181_0");
 var perShipCountType = gameAssembly.GetType("Cosmoteer.Ships.Resources.ResourceManager+PerShipCount", throwOnError: true)!;
 var perShipGetCountTarget = AccessTools.Method(perShipCountType, "GetCount")
     ?? throw new MissingMethodException(perShipCountType.FullName, "GetCount");
@@ -389,6 +406,58 @@ foreach (var targetInfo in transpilerTargets)
     }
 }
 
+var resourceSearchPatchInfo = Harmony.GetPatchInfo(resourceSearchTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch ResourceManager.SearchForSources(SinkInfo).");
+if (!resourceSearchPatchInfo.Transpilers.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim traversal transpiler was not installed on ResourceManager.SearchForSources(SinkInfo).");
+}
+
+var updateSinkJobsPatchInfo = Harmony.GetPatchInfo(updateSinkJobsTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch ResourceManager.UpdateSinkJobs(Time).");
+if (!updateSinkJobsPatchInfo.Prefixes.Any(patch => patch.owner == smokeId)
+    || !updateSinkJobsPatchInfo.Finalizers.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim snapshot prefix/finalizer was not installed on ResourceManager.UpdateSinkJobs(Time).");
+}
+var unmetDesiredPatchInfo = Harmony.GetPatchInfo(unmetDesiredTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch BaseResourceStorage unmet-desired helper.");
+if (!unmetDesiredPatchInfo.Prefixes.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim snapshot prefix was not installed on BaseResourceStorage unmet-desired helper.");
+}
+
+var atlasPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.AtlasQuadRedundantWritePatch",
+    throwOnError: true)!;
+var atlasIdentical = atlasPatchType.GetMethod(
+    "AreIdentical",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(atlasPatchType.FullName, "AreIdentical");
+var atlasQuadType = gameAssembly.GetType(
+    "Cosmoteer.Ships.Rendering.AtlasQuad",
+    throwOnError: true)!;
+var leftAtlasQuad = Activator.CreateInstance(atlasQuadType)!;
+var rightAtlasQuad = Activator.CreateInstance(atlasQuadType)!;
+if (!(bool)atlasIdentical.Invoke(null, new[] { leftAtlasQuad, rightAtlasQuad })!)
+{
+    throw new InvalidOperationException("Equal AtlasQuad values were not recognized as identical.");
+}
+var v1Field = AccessTools.Field(atlasQuadType, "V1")
+    ?? throw new MissingFieldException(atlasQuadType.FullName, "V1");
+var alteredVertex = v1Field.GetValue(rightAtlasQuad)!;
+var animClampField = AccessTools.Field(alteredVertex.GetType(), "AnimClamp")
+    ?? throw new MissingFieldException(alteredVertex.GetType().FullName, "AnimClamp");
+animClampField.SetValue(alteredVertex, 1);
+v1Field.SetValue(rightAtlasQuad, alteredVertex);
+if ((bool)atlasIdentical.Invoke(null, new[] { leftAtlasQuad, rightAtlasQuad })!)
+{
+    throw new InvalidOperationException("Different AtlasQuad values were incorrectly treated as identical.");
+}
+
 var onSelfActivatedInfo = Harmony.GetPatchInfo(onSelfActivatedTarget)
     ?? throw new InvalidOperationException("Harmony did not patch PaintToolbox.OnSelfActivated.");
 if (!onSelfActivatedInfo.Postfixes.Any(patch => patch.owner == smokeId))
@@ -495,4 +564,4 @@ if (parallelConfirmed != 10 + parallelAdds)
 }
 
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint-network refresh, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, and toggle-mode delegate cache patches resolved on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, and toggle-mode delegate cache patches resolved on this game build.");

@@ -173,3 +173,47 @@ All paths below are under
 - `four_x_factory_and_warehouse_removed_cockpit_209_cpu_2026-08-28_22-05-48.nettrace`
 - `four_x_empty_factoryless_megawarehouse_209_cpu_2026-08-28_22-12-32.nettrace`
 - `four_x_heat_sources_sinks_disconnected_209_cpu_2026-08-28_22-26-30.nettrace`
+# Exact resource-path tail elimination (local experiment, 2026-08-31)
+
+`ResourceManager.SearchForSources(SinkInfo)` asks `PathManager` for cells in
+traffic-aware nearest-first order and checks the requested resource's tile
+dictionary at each cell. Vanilla continues that cell enumeration even after
+every key in the dictionary has already been visited. On a megastructure this
+can traverse a long, guaranteed-empty remainder of the path network.
+
+The local `ResourceSearchTraversalPatch` redirects only this call and stops
+the iterator after yielding the final registered tile for the current concrete
+resource type. It does not cache a route or resource location across updates,
+does not stop merely because the requested quantity was satisfied, and does
+not omit any possible source. Per-sink capacity, priority, current inventory,
+anticipated pickup, reachability and job validation remain vanilla. Wildcard
+`Stackable` searches retain the full vanilla traversal because their concrete
+resource dictionary can change during enumeration. If any registered source
+tile is unreachable or beyond the iteration cap, the traversal naturally runs
+to the same end as vanilla.
+
+## Fixed-update-local desired-priority snapshot
+
+A post-traversal trace moved the remaining steady resource cost into
+`UpdateSinkJobs`: `IResourceSink.CheckPriority` called
+`BaseResourceStorage.GetSortPriority`, whose local `_HasUnmetDesired` helper
+called `ResourceManager.GetResourceTotal` for every sink/source comparison.
+That request includes `OffShipAssigned`, so the same off-ship crew list could
+be scanned many times in one parallel job-update pass.
+
+`ResourceDesiredPrioritySnapshotPatch` calculates the unmet-desire boolean once
+per relevant concrete resource immediately before `UpdateSinkJobs` starts its
+vanilla parallel work. Only the completed dictionary is published to workers;
+it is cleared in a finalizer as soon as the pass ends. Job creation, validation,
+amounts, sorting and application remain vanilla. This is neither a route cache
+nor a cross-tick resource cache.
+
+## Path-contiguity duplicate hash lookup
+
+The remaining `PathContiguityManager.SearchSetsFrom` breadth-first traversal
+checked every adjacent set with `HashSet.Contains` and, only when absent,
+immediately called `HashSet.Add` for the same value. Because `Add` already
+returns whether insertion occurred, the exact-shape transpiler branches on that
+result directly. It does not cache the graph, change its traversal order, or
+alter the reported iteration distance; it removes one hash-table probe per
+examined adjacency.

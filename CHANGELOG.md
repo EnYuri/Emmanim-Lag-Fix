@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.16
+
+- Stop a resource-source path traversal once it has visited every registered tile for the requested concrete resource. This preserves every source and its vanilla ordering while avoiding the guaranteed-empty tail of very large ship path networks; stackable wildcard searches retain vanilla behavior.
+- Snapshot each relevant resource's ship-wide desired-amount status once for the duration of a sink-job update pass, avoiding repeated off-ship-crew scans for every storage priority comparison. The snapshot is published read-only immediately before the vanilla parallel pass and discarded immediately afterward.
+- Remove the duplicate `HashSet.Contains` probe before `HashSet.Add` in path-contiguity breadth-first searches; traversal membership, order and iteration distances are unchanged.
+- Extend the existing exact sparse-heat implementation to sparse heat bounds from 64x64 upward. Dense fields still use vanilla through the existing density guard, while medium sparse networks avoid rectangular input/output array preparation.
+
+- Suppress byte-for-byte redundant `AtlasQuadManager` writes before they dirty
+  the complete dynamic GPU buffer. Real quad changes retain the vanilla write
+  and change counter; unchanged assignments no longer force a later full
+  `Map`/copy/`Unmap` upload or invalidate the cached ship indicator icon.
+- Refresh blueprint stat-provider operational toggles once per game second
+  during unpaused play, using the existing single gate per ship callback
+  container. Paused simulations retain vanilla per-frame feedback, and no
+  per-component cache or GC handle is created.
+
 ## 2.0.15
 
 - Extended the initial-multiplayer-sync buffer optimizations (exact-size

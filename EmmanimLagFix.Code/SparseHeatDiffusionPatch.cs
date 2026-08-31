@@ -24,7 +24,10 @@ namespace EmmanimLagFix.Code;
 internal static class SparseHeatDiffusionPatch
 {
     private const string HeatStatusId = "cosmoteer.heat";
-    private const int MinimumSparseBoundsArea = 128 * 128;
+    // The density guard below still sends dense fields through vanilla. A
+    // 64x64 lower bound also catches the medium-sized sparse heat networks
+    // that remained visible in post-resource-patch traces.
+    private const int MinimumSparseBoundsArea = 64 * 64;
 
     private static readonly AccessTools.FieldRef<StatusDiffuser, EventHandler<StatusDiffusionArgs>?>
         StatusesDiffused = AccessTools.FieldRefAccess<StatusDiffuser, EventHandler<StatusDiffusionArgs>?>(

@@ -1,6 +1,68 @@
 # Cosmoteer long-session memory diagnostics
 
-Last updated: 2026-08-31, Cosmoteer 0.30.4c, public Emmanim Lag Fix 2.0.14 plus local experiments.
+## Sparse heat threshold follow-up (2026-08-31)
+
+After the resource-search and desired-priority improvements, medium-sized heat
+fields still appeared in `StatusDiffuser.PrepareLists` because the exact sparse
+implementation only activated for bounds of at least 128x128 cells. Its
+existing density guard already falls back to vanilla whenever the active
+frontier is not genuinely sparse, so the lower bound is now 64x64. This avoids
+allocating/growing and clearing vanilla's rectangular `_inputs` and
+`_outputDeltas` buffers for medium sparse heat networks; calculation frequency,
+diffusion values and row-major application order remain unchanged.
+
+Last updated: 2026-08-31, Cosmoteer 0.30.4c, public Emmanim Lag Fix 2.0.15 plus local experiments.
+
+## Live multiplayer render-stutter capture and local mitigation (2026-08-31 03:30 KST)
+
+The active 2-player host session was captured for 20 seconds while the user
+reported visibly worse stutter:
+
+```text
+Logs/multiplayer_lag_live_cpu_2026-08-31_03-30.nettrace
+Logs/multiplayer_lag_live_cpu_2026-08-31_03-30.speedscope.json
+```
+
+MP queues remained healthy (`inputQueued` normally 3--5,
+`connectionQueued=0`, hashes `0/0/0`, 7--10 KiB/s). The trace instead caught
+two ~125 ms main-thread waits in
+`ShipRenderer.DrawLayer -> AtlasQuadManager.DrawForEachTexture ->
+D3D11GraphicsManager.Draw -> DeviceContext.MapSubresource`, plus separate
+~126 ms static-GUI draw, ~125 ms GC-poll, and ~81 ms
+`BlueprintPartStatProvider.GetToggleMode` samples. GPU utilization was only 9%
+and 3.5/6 GiB VRAM was in use immediately afterward, so this was intermittent
+dynamic-buffer synchronization, not sustained GPU saturation or VRAM
+exhaustion. Over the whole 20 seconds, MP host update, receive and integrity
+hash paths remained small.
+
+Two conservative local patches were added from that evidence:
+
+- `AtlasQuadRedundantWritePatch` exact-shape-transpiles the private managed
+  atlas-quad setter. It compares the old/new unmanaged struct bytes and skips
+  both the `GraphicsList` write and `AtlasQuadManager.ChangeCount` increment
+  only when every byte is identical. Any actual position, color, UV,
+  animation, damage or paint change follows vanilla. This targets avoidable
+  full dynamic-buffer dirty uploads and cached ship-indicator invalidations;
+  it does not skip drawing or lower visual frame rate.
+- `BlueprintPartStatProviderRefreshPatch` extends the existing per-ship
+  `PartsManager.UpdateCallbacks` gate with a separate 30-game-tick (one game
+  second) cadence for stat-provider operational-toggle checks. Blueprint
+  network ports retain their existing 300-tick cadence. Paused simulations
+  allow both paths every frame, and the state remains one weak gate per ship
+  callback container rather than one entry per blueprint component.
+
+Release build and smoke coverage pass, including exact transpiler installation,
+both prefixes on `BlueprintPartStatProvider.UpdateOperational`, and identical/
+different `AtlasQuad` comparison behavior. Live effectiveness still requires
+the same save and camera state; compare `MapSubresource`, managed-quad setter,
+ship-indicator, and blueprint-stat samples in a fresh trace.
+
+Cosmoteer was confirmed stopped before deployment. Root build, package DLL and
+live DLL SHA-256 are identical:
+
+```text
+0CBA857E45E0AE07FE72B08BC568A692483F76B66C6801D2773769DE5FBBBD39
+```
 
 ## Lazy PaintToolbox picker construction, batched build (2026-08-31)
 
@@ -33,15 +95,60 @@ identical):
 967407A50ADF373E0C412F3F3E594C0664A7C7B6018774E463CE33E38DDEF2FC
 ```
 
-**Not yet live-validated.** This remains uncommitted/unreleased under the
-public 2.0.14 metadata (`CHANGELOG.md`'s `## Unreleased` section covers it).
-Next session should launch Cosmoteer, open paint mode on at least one ship
-class with a large decal group (mods with big decal sets are the interesting
-case), confirm no Harmony/init exception, switch between several groups to
-exercise the per-frame batching and the `SelectDecalType`/grab-decal
-immediate-build path, and check that a favorite toggle on a lazily-built item
-shows the correct default star state (the `SelfActive` deactivate/reactivate
-dance around `AddChild` is what protects this).
+**Live-validated by the user (2026-08-31)**: normal operation confirmed —
+paint mode opens without a Harmony/init exception, decal groups build
+correctly across tabs. Published as part of release 2.0.15 (see
+`CHANGELOG.md`); the live mod and repository are both at DLL SHA-256
+`967407A50ADF373E0C412F3F3E594C0664A7C7B6018774E463CE33E38DDEF2FC`.
+
+## Residual steady-state multiplayer stutter, correlated with stasis-churn GC (2026-08-31)
+
+A 2.0.15 host session (`log 2026-08-31 00_42_12.txt`, host started 01:04:55)
+was traced for 30 seconds immediately after game creation
+(`Logs/multiplayer_host_steady_cpu_2026-08-31_01-06.nettrace`/
+`.speedscope.json`). That window was genuinely idle — cumulative `CPU_TIME`
+across all threads was only ~51.6 s over a 30 s x ~30-thread window,
+`GameRoot.Update` inclusive was 1.9 s, and MP-specific paths
+(`AdvanceNetworkTime`, `CheckGameSync`, `ForwardInputTick`) were all under
+40 ms total — no bottleneck visible, because the trace missed the interesting
+moment.
+
+The always-on `multiplayer-memory-diagnostics.flag` output (one row/minute,
+opt-in, no simulation/queue mutation) caught what the trace missed. Between
+01:09:25 and 01:12:25, three consecutive minute-rows showed:
+
+```
+01:09→01:10  ships 260->130  parts 51068->27994  gc(gen0/1/2)=656/304/0
+01:10→01:11  ships 130->197  parts 27994->39632  gc=510/191/1
+01:11→01:12  ships 197->158  parts 39632->34914  gc=523/253/1
+01:12→01:13  ships 158->157  parts 34914->35000  gc=332/67/0   (back to baseline)
+```
+
+Gen1 collections were 3-10x the surrounding minutes' 25-80, exactly overlapping
+the interval where `ships`/`parts` swing hardest (large stasis
+preload/unload, presumably a player crossing a sector boundary). `inputQueued`
+also briefly ran above the 2-player count (`inputMax` 3-4) in the same window,
+consistent with the host doing more per-tick work than usual. This lines up
+with the CPU trace's own (idle-window) evidence that `PartsManager.AddPart`/
+`RemovePart` and `BlueprintPartsManager.AddBlueprintPart`/`RemoveBlueprintPart`
+are real, non-trivial costs (~1.8 s and ~0.9 s inclusive respectively, even in
+a quiet 30 s sample) — a large stasis transition multiplies exactly that work.
+
+**User confirmation**: felt only a very slight stutter at this point, and
+explicitly stated this kind of hitch used to be constant/everyday before the
+optimization patches. So the existing patches (sparse heat diffusion, lock-free
+PerShipCount, visual/network throttles, etc.) already removed most of it; what
+remains is this smaller stasis-churn-driven GC spike.
+
+Not yet investigated: whether the win is in `SimStasisManager`'s spawn/despawn
+batching, in `PartsManager`/`BlueprintPartsManager` add/remove churn itself, or
+is simply an acceptable residual (Gen1-only, no Gen2, self-resolving within a
+minute). Do not implement anything here without a CPU trace actually spanning
+a live transition — the 2026-08-31 01:06 trace explicitly did not, and the
+existing `RESOURCE_LOGISTICS_DIAGNOSTICS.md` invalidation-proof requirement
+applies equally to any stasis/parts-manager change. Next step: repeat the
+30-second `dotnet-trace` capture triggered by a sector-transition report from
+the user rather than a fixed time offset after host start.
 
 ## Current handoff summary (2026-08-30 22:44 KST)
 
