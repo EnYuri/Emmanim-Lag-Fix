@@ -5,6 +5,12 @@ using System.Runtime.CompilerServices;
 
 var gameAssembly = Assembly.Load("Cosmoteer");
 var halflingAssembly = Assembly.Load("HalflingCore");
+// Korean IME integration is implemented by the Windows platform assembly,
+// which the game has loaded before input is initialized. Load it explicitly in
+// this standalone smoke host so the same Harmony target types are resolvable.
+var halflingPlatformAssembly = Assembly.LoadFrom(Path.Combine(
+    Path.GetDirectoryName(gameAssembly.Location)!,
+    "HalflingPlatformWDX.dll"));
 
 var prefixTargets = new[]
 {

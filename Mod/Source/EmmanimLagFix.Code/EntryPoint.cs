@@ -8,8 +8,15 @@ public static class EntryPoint
 
     public static void AssemblyLoadInitializer()
     {
+        KoreanImeInputPatch.ForceImm32Backend();
         var harmony = new Harmony(HarmonyId);
         harmony.PatchAll(typeof(EntryPoint).Assembly);
-        Halfling.Logging.Logger.Log("Emmanim Lag Fix code patches initialized.");
+        Halfling.Logging.Logger.Log(
+            "Emmanim Lag Fix code patches initialized (Windows IME backend: "
+            + KoreanImeInputPatch.BackendName
+            + ", result-string delivery: "
+            + (KoreanImeResultStringPatch.Available ? "on" : "UNAVAILABLE")
+            + (KoreanImeDiagnostics.Enabled ? ", input diagnostics ON" : "")
+            + ").");
     }
 }

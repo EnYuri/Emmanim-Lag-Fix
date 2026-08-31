@@ -141,6 +141,27 @@ startup passed, but remote-client join and forwarding validation remains
 pending. Every multiplayer participant must install the identical 2.0.14
 build.
 
+Version 2.0.17 fixes duplicate or resurrected Hangul text in the Windows text
+input path. Microsoft Korean IME can commit a syllable before reporting that
+its composition ended; the code layer now recognizes when that exact syllable
+is already rendered instead of inserting it twice. Composition bookkeeping is
+also cleared on composition end and text-field focus changes so canceled text
+cannot leak into the next edit. This is a local UI/input fix and does not alter
+simulation or multiplayer state.
+
+Version 2.0.18 records every visible player chat message in Cosmoteer's normal
+game log as `[Chat][Global] Name: text` or `[Chat][Team] Name: text`. Messages
+hidden by the local mute list or by team visibility are not recorded, and a
+message delivered to multiple chat widgets is logged only once. Logger-provided
+timestamps and the normal log-file rotation continue to apply.
+
+Version 2.0.19 replaces the first Korean-input workaround with ImeSharp's
+supported IMM32-only backend. The TSF path could deliver Korean composition
+updates and text callbacks together, leaving intermediate states such as
+`ㅇ아안나` when typing `아나`. IMM32 supplies composition replacements and
+the final committed text through the event sequence expected by Cosmoteer's
+keyboard adapter. Chat logging from 2.0.18 remains enabled.
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.20
+
+- Fixed Microsoft Korean IME text entry through ImeSharp's IMM32 backend. The
+  code layer now delivers the committed `GCS_RESULTSTR` text that ImeSharp
+  otherwise drops, replaces only a still-visible composition preview, and
+  preserves already-committed syllables when `WM_IME_ENDCOMPOSITION` arrives
+  before the final result string. This is a local input/UI change and does not
+  affect simulation or multiplayer state.
+- Added an opt-in Korean-IME event trace for diagnosing future input-method
+  differences. It is inactive unless a local diagnostic flag is created and is
+  excluded from the release payload.
+- Log each visible global or team chat message once in Cosmoteer's regular log;
+  muted and locally invisible messages remain omitted.
+
 ## 2.0.16
 
 - Stop a resource-source path traversal once it has visited every registered tile for the requested concrete resource. This preserves every source and its vanilla ordering while avoiding the guaranteed-empty tail of very large ship path networks; stackable wildcard searches retain vanilla behavior.

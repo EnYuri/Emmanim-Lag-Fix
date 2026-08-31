@@ -15,5 +15,8 @@
     <Reference Include="HalflingCore" Private="true">
       <HintPath>$(CosmoteerBin)\HalflingCore.dll</HintPath>
     </Reference>
+    <Reference Include="HalflingPlatformWDX" Private="true">
+      <HintPath>$(CosmoteerBin)\HalflingPlatformWDX.dll</HintPath>
+    </Reference>
   </ItemGroup>
 </Project>
