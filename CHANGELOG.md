@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.0.21
+
+- Removed the closure allocated on every resource-ID comparison. Vanilla
+  `ResourceIDComparer` looks cached but its index lookup captures its parameter
+  in a lambda, so Roslyn constructs a display class in the method prologue and
+  every call allocates even at a 100% cache hit rate. It is reached twice per
+  sorted-dictionary comparison, for every part, on every input frame, because
+  the build toolbox re-aggregates the whole blueprint's cost. Returned values
+  are identical to vanilla, including the cached `-1` for an unknown ID, so
+  ordering, cost aggregation and lockstep state are unchanged.
+- Measured in blueprint mode at 35,000 parts against a 23,741-part baseline:
+  total allocation fell from 1,053 MiB to 269 MiB per ten seconds (-74%) and
+  Gen0 collections from 1,993--2,402 to 448--539 per minute (-80%). The
+  comparison path itself fell from 55.3% of all allocation to zero.
+
 ## 2.0.20
 
 - Fixed Microsoft Korean IME text entry through ImeSharp's IMM32 backend. The

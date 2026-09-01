@@ -569,5 +569,54 @@ if (parallelConfirmed != 10 + parallelAdds)
         $"Lock-free PerShipCount lost a concurrent update: expected {10 + parallelAdds}, got {parallelConfirmed}.");
 }
 
+// ResourceIDComparer.Compare must be transpiled, and the transpiler must have
+// matched the real shape rather than silently falling back: _vanillaGetIndex is
+// only assigned once every guard passed and the index local function resolved.
+var comparerType = AccessTools.TypeByName("Cosmoteer.Resources.ResourceIDComparer")
+    ?? throw new InvalidOperationException("Cosmoteer.Resources.ResourceIDComparer was not found.");
+var compareTarget = AccessTools.DeclaredMethod(comparerType, "Compare")
+    ?? throw new InvalidOperationException("ResourceIDComparer.Compare was not found.");
+var compareInfo = Harmony.GetPatchInfo(compareTarget)
+    ?? throw new InvalidOperationException("ResourceIDComparer.Compare was not patched.");
+if (!compareInfo.Transpilers.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("ResourceIDComparer.Compare transpiler was not installed.");
+}
+
+var comparerPatchType = typeof(EntryPoint).Assembly
+    .GetType("EmmanimLagFix.Code.ResourceIdComparerAllocationPatch", throwOnError: true)!;
+if (AccessTools.Field(comparerPatchType, "_vanillaGetIndex").GetValue(null) == null)
+{
+    throw new InvalidOperationException(
+        "ResourceIDComparer.Compare fell back to vanilla: the method shape or its index "
+        + "local function did not match on this game build.");
+}
+
+// Seed the cache so the miss path, which needs a loaded GameApp.Rules, is never
+// taken, then confirm the replaced body still orders purely by cached index.
+var resourceIdType = compareTarget.GetParameters()[0].ParameterType;
+var comparerCacheType = comparerPatchType
+    .GetNestedType("Cache`1", BindingFlags.NonPublic)!
+    .MakeGenericType(resourceIdType);
+var comparerIndexes = comparerCacheType
+    .GetField("Indexes", BindingFlags.NonPublic | BindingFlags.Static)!
+    .GetValue(null)!;
+var resourceIdCtor = resourceIdType.GetConstructor(new[] { typeof(string) })!;
+var smokeIdA = resourceIdCtor.Invoke(new object[] { "emmanim_smoke_resource_a" });
+var smokeIdB = resourceIdCtor.Invoke(new object[] { "emmanim_smoke_resource_b" });
+var comparerTryAdd = comparerIndexes.GetType().GetMethod("TryAdd")!;
+comparerTryAdd.Invoke(comparerIndexes, new[] { smokeIdA, (object)5 });
+comparerTryAdd.Invoke(comparerIndexes, new[] { smokeIdB, (object)2 });
+
+var comparerInstance = AccessTools.Field(comparerType, "Instance").GetValue(null);
+var compareAB = (int)compareTarget.Invoke(comparerInstance, new[] { smokeIdA, smokeIdB })!;
+var compareBA = (int)compareTarget.Invoke(comparerInstance, new[] { smokeIdB, smokeIdA })!;
+var compareAA = (int)compareTarget.Invoke(comparerInstance, new[] { smokeIdA, smokeIdA })!;
+if (compareAB <= 0 || compareBA >= 0 || compareAA != 0)
+{
+    throw new InvalidOperationException(
+        $"ResourceIDComparer ordering changed: a-b={compareAB}, b-a={compareBA}, a-a={compareAA}.");
+}
+
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, and toggle-mode delegate cache patches resolved on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, and allocation-free resource-ID comparison patches resolved on this game build.");
