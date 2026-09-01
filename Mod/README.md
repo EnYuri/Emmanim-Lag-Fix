@@ -204,6 +204,8 @@ traced to an Extended Tech Tree beam rather than crew throughput.
 | ResourceSearchesPerSecond | 120 | 1000 | 90 |
 | ManualTransferJobExpensiveCheckInterval | 1.0 | – | 0.5 |
 | SalvageJobExpensiveCheckInterval | 1.0 | – | 0.5 |
+| MaxCrewSearchIterations | 50 | – | 100 |
+| EqualPriorityJobDistanceThreshold | 10 | – | 20 |
 | MaxInputTickDelay | 60 (2 s) | – | 180 (6 s) |
 | InputTickDelayLatencyFactor | 1 | – | 1.5 |
 
@@ -244,13 +246,45 @@ outstanding request to whatever the crew is already carrying — it cancels the 
 Running it twice as often as vanilla showed up in game as crew being pulled off a delivery and
 swapped for someone else, wasting the walk they had already made.
 
+### Crew search reach
+
+`MaxCrewSearchIterations` is not a frequency. It is the point at which the crew search gives up, and
+it is spent in **cells, not distance or time**:
+
+```csharp
+for (int k = 0; k < maxIterations; k++) { _openQueue.Dequeue(); ... }
+```
+
+(`Halfling.Pathfinding.AStarGridPathfinder.FindAllNodeDistancePairs`.) One dequeue is one tile, so
+vanilla's 50 reaches 50 tiles of geometry and no further, however the ship is built.
+
+Two facts make that bind on a very large ship. The search starts at the **source**, not at the part
+being supplied — `ResourceTransferJob.GetSearchOrigin` returns `Source.GetCrewSearchOrigin()` — so
+every job drawing on one central store competes inside the same 50-tile bubble, and crew idling next
+to the starved part are never even enumerated. And a moving walkway does not help: `CrewSpeedFactor`
+lowers path cost, which changes *which* 50 tiles are visited, never how many. A fast 150-tile spine
+is still 150 dequeues away.
+
+Version 2.0.23 raises it one step, to 100. The cost is self-limiting: `GetCrewForJob` exits early
+through `_HasBestPossibleCrew()` as soon as the job is filled at top priority, so a search that
+already succeeds never spends the extra budget. Only the searches that currently fail pay for it.
+
+`EqualPriorityJobDistanceThreshold` moves with it, 10 to 20, and has to.
+`JobManager._TestAndInsert` keeps an incumbent only while
+`job2.GetRemainingDistance(crew) <= dist`, and `ResourceTransferJob.GetRemainingDistance` adds the
+whole source→sink leg for a crew not yet carrying anything. A crew recruited from far away is
+therefore trivial to displace, walks half the ship and delivers nothing. This field is the
+incumbent's protection margin, added uniformly to every candidate the on-ship search finds; doubling
+the reach without doubling the margin converts idle crew into pointless walking.
+
+Lowering either one is still wrong for the original reason: it truncates the candidate scan, so crew
+stand idle beside work they never scanned.
+
 ### What is deliberately left alone
 
-`MaxCrewSearchIterations` and `SourceRefreshesPerTick` stay at vanilla, and this is intentional.
-They are not frequencies — they are the point at which a search gives up and how much of the
-resource source list gets refreshed. Lowering them does not make crew slower, it makes them **stop
-looking**, so crew can stand idle beside work they never scanned. That risk grows with ship size,
-which is exactly what Huge Ships creates. The idle-crew cost outweighs the CPU saved.
+`SourceRefreshesPerTick` stays at vanilla 10. It is a give-up point too — how much of the resource
+source list gets refreshed — and starving it makes crew act on stale information and mis-route
+deliveries. The idle-crew cost outweighs the CPU saved.
 
 `CrewUpdatesPerSecond` stays at 6. Below that, crew get stuck inside airlocks.
 

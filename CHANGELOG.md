@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.0.23
+
+- Raised the crew search reach one step, `MaxCrewSearchIterations` 50 to 100.
+  It is not a frequency and not a distance: the budget is spent in dequeued
+  cells, one per tile, so vanilla's 50 reaches 50 tiles of geometry however the
+  ship is built. The search also starts at the resource **source**, not at the
+  part being supplied, so every job drawing on one central store competes inside
+  the same bubble while crew idling beside the starved part are never
+  enumerated. A moving walkway cannot compensate — `CrewSpeedFactor` changes
+  which tiles are visited, never how many. The extra budget is self-limiting
+  because `GetCrewForJob` exits early through `_HasBestPossibleCrew()`, so only
+  searches that currently fail pay for it.
+- Raised `EqualPriorityJobDistanceThreshold` 10 to 20 with it, deliberately.
+  `JobManager._TestAndInsert` keeps an incumbent only while its remaining
+  distance is within this margin, and `ResourceTransferJob.GetRemainingDistance`
+  adds the whole source-to-sink leg for a crew not yet carrying anything, so a
+  crew recruited from further away is trivial to displace and walks half the
+  ship for nothing. Widening the reach without widening the margin would convert
+  idle crew into pointless walking.
+- Both fields feed deterministic crew assignment, so every player in a
+  multiplayer session must run this version.
+- Stopped shipping the opt-in diagnostic switches. Three `.flag` files had been
+  committed since 2.0.20 and were packaged into the release archive, so every
+  installation had multiplayer, single-player and Korean IME diagnostics turned
+  on; the IME capture alone accounted for 99.3% of the log lines in one session.
+  They are now local-only, and the release workflow refuses to publish when any
+  `.flag` is present rather than checking one filename.
+
 ## 2.0.22
 
 - Stopped building a throwaway per-thruster activation dictionary on every

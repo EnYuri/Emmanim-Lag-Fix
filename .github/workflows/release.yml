@@ -43,8 +43,9 @@ jobs:
               throw "Committed release payload is missing: $path"
             }
           }
-          if (Test-Path -LiteralPath '.\Mod\resource-search-diagnostics.flag') {
-            throw 'Refusing to publish with resource-search diagnostics enabled.'
+          $flags = @(Get-ChildItem -LiteralPath '.\Mod' -Filter '*.flag' -File -ErrorAction SilentlyContinue)
+          if ($flags.Count -gt 0) {
+            throw ('Refusing to publish with diagnostics enabled: ' + ($flags.Name -join ', '))
           }
 
       - name: Build one-click archive
@@ -71,8 +72,8 @@ jobs:
               throw "Archive is missing: $requiredEntry"
             }
           }
-          if ($entries -match 'resource-search-diagnostics\.flag$') {
-            throw 'Archive unexpectedly contains the resource-search diagnostics flag.'
+          if ($entries -match '\.flag$') {
+            throw 'Archive unexpectedly contains a diagnostics flag.'
           }
 
           $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash

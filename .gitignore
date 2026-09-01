@@ -436,3 +436,8 @@ artifacts/
 
 # Emmanim: native doorstop output and packed release archives
 /build/
+
+# Opt-in diagnostic switches. Local only: shipping one turns diagnostics on
+# for every player, and the Korean IME capture alone produced 99.3% of the
+# log lines in one session.
+Mod/*.flag

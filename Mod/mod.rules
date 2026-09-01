@@ -38,7 +38,7 @@
 
 ID = nayuri.emmanim_lag_fix
 Name = "Emmanim Lag Fix"
-Version = 2.0.22
+Version = 2.0.23
 
 ModifiesGameplay = true
 ModifiesMultiplayer = true
@@ -135,19 +135,52 @@ Actions
 			ManualTransferJobExpensiveCheckInterval = 0.5    // vanilla 1.0
 			SalvageJobExpensiveCheckInterval = 0.5           // vanilla 1.0
 
+			// --- Crew search reach: raised one step for very large ships ---
+			// This is not a frequency either. It is the point at which the crew
+			// search gives up, and it is spent in CELLS, not in distance or time:
+			//
+			//     for (int k = 0; k < maxIterations; k++) { _openQueue.Dequeue(); ... }
+			//
+			// (Halfling.Pathfinding.AStarGridPathfinder.FindAllNodeDistancePairs.)
+			// One dequeue is one tile, so vanilla 50 reaches 50 tiles of geometry
+			// and no further, however the ship is built.
+			//
+			// Two facts make that bind on a big ship. The search starts at the
+			// SOURCE, not at the part being supplied -- ResourceTransferJob.
+			// GetSearchOrigin returns Source.GetCrewSearchOrigin() -- so every
+			// job drawing on one central store competes inside the same 50-tile
+			// bubble, and crew idling next to the starved part are never even
+			// enumerated. And a conveyor does not help: CrewSpeedFactor lowers
+			// path cost, which changes WHICH 50 tiles are visited, never how many.
+			// So a fast 150-tile spine is still 150 dequeues away.
+			//
+			// Lowering it is still wrong for the reason recorded before: it
+			// truncates the candidate scan and crew stand idle next to work they
+			// never looked at. 100 is one step up, not a free-for-all -- the cost
+			// is self-limiting because GetCrewForJob exits early via
+			// _HasBestPossibleCrew() as soon as the job is filled at top
+			// priority, so a search that already succeeds never spends the extra
+			// budget. Only the searches that currently fail pay for it.
+			MaxCrewSearchIterations = 100                    // vanilla 50
+
+			// Raised WITH the reach above, and it must move with it.
+			// JobManager._TestAndInsert keeps an incumbent only when
+			// `job2.GetRemainingDistance(crew) <= dist`, and ResourceTransferJob.
+			// GetRemainingDistance adds the whole source->sink leg for a crew not
+			// yet carrying anything. So a crew recruited from far away is trivial
+			// to displace, walks half the ship and delivers nothing. This value
+			// is the incumbent's protection margin, added uniformly to every
+			// candidate the on-ship search finds. Doubling the reach without
+			// doubling the margin converts idle crew into pointless walking.
+			EqualPriorityJobDistanceThreshold = 20           // vanilla 10
+
 			// --- Deliberately left at vanilla ---
-			// MaxCrewSearchIterations (50) is not a frequency, it is the point at
-			// which a search gives up. Lowering it does not slow crew down, it
-			// truncates the candidate scan, so crew can stand idle next to work
-			// they never looked at. The risk grows with ship size, which is
-			// exactly what Huge Ships creates. Left alone.
 			//
-			// SourceRefreshesPerTick (10) behaves the same way. Starving the
-			// resource source list makes crew act on stale information and
-			// mis-route deliveries.
-			//
-			// The idle-crew cost of trimming these outweighs the CPU saved.
-			// If squeezing further is unavoidable, 40 and 8 look like the floor.
+			// SourceRefreshesPerTick (10) is a give-up point too, and starving
+			// the resource source list makes crew act on stale information and
+			// mis-route deliveries. The idle-crew cost of trimming it outweighs
+			// the CPU saved; 8 looks like the floor if that ever becomes
+			// unavoidable.
 			//
 			// CrewUpdatesPerSecond is left alone too. Below vanilla 6 the crew get
 			// stuck inside airlocks. (Confirmed by Hailstorm46 Reduce Crew Lag.)
