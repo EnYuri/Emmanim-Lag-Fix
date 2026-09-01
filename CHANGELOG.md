@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.0.22
+
+- Stopped building a throwaway per-thruster activation dictionary on every
+  uncacheable acceleration query. Vanilla
+  `ThrusterManager.CalculateMaximumAccelerationAndRampTimeCached` fills that
+  dictionary to the ship's thruster count *before* checking whether the
+  direction may be cached at all, and discards it when it may not. The dominant
+  caller, `MoveCommand.SetThrusterActivations`, passes an arbitrary vector
+  toward a move target, which is never one of the six axis directions or the
+  fixed flight angles, so the discarded path is the common one for every moving
+  ship on every tick. It measured 13.1% of all allocation.
+- The repair hoists vanilla's own guard by cloning its existing
+  `ldsfld/ldarg/Contains` triple in front of the construction and branching to
+  the target the original test already uses. Simulation state, thruster
+  activation levels and lockstep are unchanged; when the direction is cacheable
+  the only difference is a second HashSet lookup.
+
 ## 2.0.21
 
 - Removed the closure allocated on every resource-ID comparison. Vanilla

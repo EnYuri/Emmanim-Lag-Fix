@@ -618,5 +618,48 @@ if (compareAB <= 0 || compareBA >= 0 || compareAA != 0)
         $"ResourceIDComparer ordering changed: a-b={compareAB}, b-a={compareBA}, a-a={compareAA}.");
 }
 
+// ThrusterManager's acceleration cache must have its guard hoisted in front of
+// the activation-snapshot construction. Applied is only set once every shape
+// check passed, so it distinguishes a real rewrite from the silent fallback.
+var thrusterManagerType = AccessTools.TypeByName("Cosmoteer.Ships.Parts.Thrusters.ThrusterManager")
+    ?? throw new InvalidOperationException("Cosmoteer.Ships.Parts.Thrusters.ThrusterManager was not found.");
+var thrusterCacheTarget = AccessTools.DeclaredMethod(
+        thrusterManagerType, "CalculateMaximumAccelerationAndRampTimeCached")
+    ?? throw new InvalidOperationException(
+        "ThrusterManager.CalculateMaximumAccelerationAndRampTimeCached was not found.");
+var thrusterCacheInfo = Harmony.GetPatchInfo(thrusterCacheTarget)
+    ?? throw new InvalidOperationException(
+        "ThrusterManager.CalculateMaximumAccelerationAndRampTimeCached was not patched.");
+if (!thrusterCacheInfo.Transpilers.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException(
+        "ThrusterManager.CalculateMaximumAccelerationAndRampTimeCached transpiler was not installed.");
+}
+
+var thrusterPatchType = typeof(EntryPoint).Assembly
+    .GetType("EmmanimLagFix.Code.ThrusterAccelerationCacheAllocationPatch", throwOnError: true)!;
+if (AccessTools.Field(thrusterPatchType, "Applied").GetValue(null) is not true)
+{
+    throw new InvalidOperationException(
+        "ThrusterManager's cache guard was not hoisted: the method shape did not match "
+        + "on this game build, so the throwaway activation snapshot is still built.");
+}
+
+// Rewritten IL only fails when the method is compiled, which would otherwise be
+// on a moving ship mid-game. Force it here so a malformed branch or an
+// unbalanced stack is an immediate InvalidProgramException instead.
+foreach (var rewritten in new[] { thrusterCacheTarget, compareTarget })
+{
+    try
+    {
+        System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(rewritten.MethodHandle);
+    }
+    catch (Exception e)
+    {
+        throw new InvalidOperationException(
+            $"Rewritten {rewritten.DeclaringType?.Name}.{rewritten.Name} failed to compile: {e.Message}", e);
+    }
+}
+
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, and allocation-free resource-ID comparison patches resolved on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, and hoisted thruster-cache guard patches resolved and compiled on this game build.");
