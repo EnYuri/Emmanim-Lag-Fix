@@ -1,5 +1,96 @@
 # Changelog
 
+## 2.0.25
+
+- Removed the box allocated on every shader-constant update. Halfling's
+  `D3D11BufferConstant` has eight non-generic `Update(gfx, value)` overloads,
+  all funnelling into one `IsDataDirty<T>(in T value) where T : unmanaged`. The
+  type parameter carries no `IEquatable<T>` constraint, so the only `Equals` in
+  scope is `object.Equals(object)` and the compiler emits `box !!T` before every
+  comparison — one heap allocation per constant, per shader, per draw call. A
+  fifteen-second allocation trace on a two-player session put 28.1% of all
+  process allocation (196 MiB) under `RefreshShaderConstants`, and an earlier
+  capture 44.9%. All eight value types implement `IEquatable<T>` and each one's
+  `Equals(object)` override delegates to that same typed comparison, so calling
+  it directly is semantics-preserving: the boxed operand is always exactly `T`,
+  so no other branch of an `Equals(object)` override is reachable. Only the
+  `call IsDataDirty<T>` instruction changes; the evaluation stack there is
+  already `(this, ref T)`, so no control flow and no local is touched, and the
+  slot address is vanilla's own `_bufState.Data + _bufOffset`.
+- Stopped building an XML reader for UI text that contains no markup.
+  `TextBuilder.BuildLines` picks between `AddTextToLines(list, Text, ...)` and
+  `XmlReader.Create(new StringReader(Text), ...)` plus `ParseXmlToLines`, and
+  almost every widget sets `XmlFormatting`, so almost every text refresh built
+  an `XmlTextReaderImpl` with its own character and node buffers. In the same
+  trace `WidgetTextRenderer.OnRefresh` was 28.6% of all allocation (199 MiB), of
+  which `XmlTextReaderImpl.FinishInitTextReader` was 12.2% (85 MiB) and the
+  reader constructor a further 2.1% (15 MiB). For a string with no markup the
+  XML branch's loop body reduces to a single
+  `AddTextToLines(lines, reader.Value, ...)` with the same format state and the
+  same null `prevChar`, and nothing runs after the loop, so the two branches
+  produce the same lines. Only the branch condition changes: plain text now
+  takes vanilla's own plain-text path. The test is deliberately narrow —
+  anything containing `<`, `&`, a carriage return (XML normalises line endings
+  inside text nodes), a character illegal in XML 1.0, a surrogate, or more than
+  1024 characters (`XmlTextReaderImpl` may split long text across several nodes)
+  keeps vanilla's XML path. Nothing is cached or reused across frames, and
+  wrapping, ellipsing, fonts and geometry are untouched.
+- Stopped each part's colour handler from unsubscribing itself out of a
+  thousand-entry multicast event. `PartGraphics` subscribes `UpdateColor` to
+  `Ship.Renderer.BeforeDraw` when a colour goes dirty, applies the colour on the
+  next draw, and on the draw after that — finding itself no longer dirty —
+  removes itself. The two halves are wildly asymmetric: `Delegate.Combine`
+  allocates an array one longer and copies pointers, while `Delegate.Remove`
+  walks the invocation list comparing delegates. On a twenty-second capture of a
+  degraded session the combine side totalled 2.1 ms and the remove side
+  1,469 ms — 19.9% of all CPU spent drawing, every sample of it arriving through
+  `SceneRoot.Draw -> PartGraphics.UpdateColor -> remove_BeforeDraw ->
+  MulticastDelegate.RemoveImpl`. With the list in the thousands and dozens of
+  parts settling per frame, that is a full linear scan per settling part per
+  frame. The self-unsubscribe is now removed: a settled part stays subscribed
+  and returns immediately. Its sibling `PartToggledBlendSprites.UpdateColor`
+  already works exactly this way in vanilla — permanently subscribed, guarded by
+  a plain `bool` — so this is the engine's own pattern rather than a new one.
+  The same rewrite also drops the flag clear that went with the unsubscribe, so
+  `Registered` keeps meaning "this handler is in the invocation list":
+  `OnColorChanged` correctly skips the resubscribe, and `OnPartDetaching` still
+  removes the handler exactly once, so nothing is leaked and each part
+  contributes at most one entry. What moves to the other side is one no-op
+  invocation per settled part per frame against a linear scan per settling part;
+  detaching still pays one scan, but that happens per part destroyed or
+  deconstructed, far below the churn measured here.
+- The same method's dirty test is `_colorUpdateStatus.HasFlag(Dirty)`, and
+  `Enum.HasFlag` takes an `Enum`, so the IL boxes both operands — two
+  allocations per handler call per frame. It becomes an `and` against the same
+  literal. This half is required: without it, leaving handlers subscribed would
+  trade a burst of scans for a permanent allocation rate, which is the opposite
+  of the intent, so the two rewrites are applied together or not at all. The
+  smoke test checks the substitution's arithmetic against the real type rather
+  than the IL — that `ColorUpdateFlags` is backed by `int32` and that `Dirty` is
+  the single bit 1, which is what makes a mask exactly `HasFlag` — and asserts
+  that `OnPartDetaching` was left at vanilla, since that unsubscribe is what
+  bounds the list.
+- None of these patches changes simulation state, so lockstep and multiplayer
+  hashing are unaffected; all are render/GUI-path only. Both are guarded by exact
+  shape checks that fall back to vanilla instructions and log once, and both
+  expose a flag set only when the rewrite actually happened, which the smoke
+  test asserts — a transpiler that installed but fell back to vanilla is still
+  installed. The smoke test additionally verifies the two substitutions'
+  semantic assumptions directly: that each shader-constant type's boxing
+  `Equals(object)` agrees with its typed `Equals` on real values, and that a
+  real `XmlReader` with the game's own settings returns exactly one text node
+  holding the identical string for every input the plain-text test accepts.
+- Motivation. The problem being attacked is stutter, not average framerate. In
+  that session median frame work was healthy (draw 2.0 ms, update 2.6 ms, fixed
+  update 5.5 ms) while p99 was 23.9 / 34.4 / 35.0 ms — a 30-60 ms frame roughly
+  every hundred frames. The main thread alone spent 2,075 ms of a 20-second
+  window across 908 separate `Thread.PollGCWorker` events, about 45 stops per
+  second, because sixteen `FastParallel` workers spin rather than block and must
+  rendezvous at every collection. Allocation rate is the lever on that, which is
+  why these two sites were picked. They do not address the other two stall
+  causes in the same trace, synchronous stasis ship spawning (36.9 ms) and
+  render submission (55.7 ms); neither is GC-related.
+
 ## 2.0.24
 
 - Stopped `StatusValueRegulator` re-deriving its affected-cell list on every

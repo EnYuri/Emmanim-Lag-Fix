@@ -646,10 +646,282 @@ if (AccessTools.Field(thrusterPatchType, "Applied").GetValue(null) is not true)
         + "on this game build, so the throwaway activation snapshot is still built.");
 }
 
+// Every D3D11 shader-constant Update overload must have its boxing dirty check
+// replaced by the typed one. PatchedCount is only incremented once every shape
+// check passed, so it distinguishes a real rewrite from the silent fallback.
+var shaderConstantType = halflingPlatformAssembly.GetType(
+        "Halfling.Graphics.D3D11.D3D11Shader+D3D11BufferConstant", throwOnError: true)!;
+var shaderConstantUpdates = shaderConstantType
+    .GetMethods(BindingFlags.Public | BindingFlags.NonPublic
+        | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+    .Where(m => m.Name == "Update" && m.ReturnType == typeof(void)
+        && m.GetParameters().Length == 2)
+    .ToArray();
+if (shaderConstantUpdates.Length != 8)
+{
+    throw new InvalidOperationException(
+        $"Expected 8 shader-constant Update overloads, found {shaderConstantUpdates.Length}.");
+}
+
+foreach (var update in shaderConstantUpdates)
+{
+    var info = Harmony.GetPatchInfo(update)
+        ?? throw new InvalidOperationException(
+            $"Shader constant Update({update.GetParameters()[1].ParameterType.Name}) was not patched.");
+    if (!info.Transpilers.Any(patch => patch.owner == smokeId))
+    {
+        throw new InvalidOperationException(
+            $"Shader constant Update({update.GetParameters()[1].ParameterType.Name}) "
+            + "transpiler was not installed.");
+    }
+}
+
+var shaderPatchType = typeof(EntryPoint).Assembly
+    .GetType("EmmanimLagFix.Code.ShaderConstantBoxingPatch", throwOnError: true)!;
+var shaderPatchedCount = (int)AccessTools.Field(shaderPatchType, "PatchedCount").GetValue(null)!;
+if (shaderPatchedCount != 8)
+{
+    throw new InvalidOperationException(
+        $"Only {shaderPatchedCount} of 8 shader-constant dirty checks were rewritten: the "
+        + "method shape did not match on this game build, so the per-update box remains.");
+}
+
+// The substitution's one assumption is that each constant type's boxing
+// Equals(object) agrees with its typed IEquatable<T>.Equals. Check it on real
+// values of the actual types this build uses, rather than trusting the shape.
+var shaderPatchedTypes = (List<Type>)AccessTools.Field(shaderPatchType, "PatchedValueTypes").GetValue(null)!;
+foreach (var constantValueType in shaderPatchedTypes)
+{
+    var equatable = typeof(IEquatable<>).MakeGenericType(constantValueType);
+    if (!equatable.IsAssignableFrom(constantValueType))
+    {
+        throw new InvalidOperationException(
+            $"{constantValueType.FullName} does not implement IEquatable<T>; the typed "
+            + "comparison substituted for the boxing one does not exist.");
+    }
+
+    var typedEquals = AccessTools.Method(constantValueType, "Equals", new[] { constantValueType })
+        ?? constantValueType.GetInterfaceMap(equatable).TargetMethods
+            .Single(m => m.GetParameters()[0].ParameterType == constantValueType);
+
+    var size = System.Runtime.InteropServices.Marshal.SizeOf(constantValueType);
+    var buffer = System.Runtime.InteropServices.Marshal.AllocHGlobal(size);
+    try
+    {
+        for (var offset = 0; offset < size; offset++)
+        {
+            System.Runtime.InteropServices.Marshal.WriteByte(buffer, offset, 0);
+        }
+
+        var zero = System.Runtime.InteropServices.Marshal.PtrToStructure(buffer, constantValueType)!;
+        var sameAsZero = System.Runtime.InteropServices.Marshal.PtrToStructure(buffer, constantValueType)!;
+        for (var offset = 0; offset < size; offset++)
+        {
+            System.Runtime.InteropServices.Marshal.WriteByte(buffer, offset, 0x3F);
+        }
+
+        var other = System.Runtime.InteropServices.Marshal.PtrToStructure(buffer, constantValueType)!;
+        foreach (var (left, right) in new[]
+        {
+            (zero, sameAsZero), (zero, other), (other, zero), (other, other)
+        })
+        {
+            var boxed = left.Equals(right);
+            var typed = (bool)typedEquals.Invoke(left, new[] { right })!;
+            if (boxed != typed)
+            {
+                throw new InvalidOperationException(
+                    $"{constantValueType.FullName}: boxing Equals(object) returned {boxed} but "
+                    + $"the typed Equals returned {typed}; the shader-constant substitution "
+                    + "would change which updates are considered dirty.");
+            }
+        }
+    }
+    finally
+    {
+        System.Runtime.InteropServices.Marshal.FreeHGlobal(buffer);
+    }
+}
+
+// TextBuilder.BuildLines must take the plain-text branch for text with no
+// markup. Applied is only set once the branch condition was really rewritten.
+var textBuilderType = halflingAssembly.GetType("Halfling.Graphics.Text.TextBuilder", throwOnError: true)!;
+var buildLinesTarget = AccessTools.DeclaredMethod(textBuilderType, "BuildLines")
+    ?? throw new InvalidOperationException("TextBuilder.BuildLines was not found.");
+var buildLinesInfo = Harmony.GetPatchInfo(buildLinesTarget)
+    ?? throw new InvalidOperationException("TextBuilder.BuildLines was not patched.");
+if (!buildLinesInfo.Transpilers.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("TextBuilder.BuildLines transpiler was not installed.");
+}
+
+var textPatchType = typeof(EntryPoint).Assembly
+    .GetType("EmmanimLagFix.Code.TextBuilderPlainTextPatch", throwOnError: true)!;
+if (AccessTools.Field(textPatchType, "Applied").GetValue(null) is not true)
+{
+    throw new InvalidOperationException(
+        "TextBuilder.BuildLines was not rewritten: the branch shape did not match on this "
+        + "game build, so plain text still builds an XmlReader.");
+}
+
+// The substitution's assumption is that for the strings it accepts, the XML
+// reader hands back one text node holding the identical string. Check that
+// against a real XmlReader with the game's own reader settings, rather than
+// trusting the character test.
+var isPlainText = AccessTools.DeclaredMethod(textPatchType, "IsPlainText")
+    ?? throw new InvalidOperationException("TextBuilderPlainTextPatch.IsPlainText was not found.");
+var xmlReaderSettings = (System.Xml.XmlReaderSettings)AccessTools
+    .Field(textBuilderType, "XML_READER_SETTINGS").GetValue(null)!;
+
+const char tab = (char)9;
+const char lf = (char)10;
+const char cr = (char)13;
+const char quote = (char)34;
+const char soh = (char)1;
+
+// Strings the plain-text branch must reproduce exactly.
+var plainSamples = new[]
+{
+    string.Empty,
+    " ",
+    "Hello",
+    "Hello, world!",
+    "12,345 / 67,890",
+    "자원 전송 중",
+    "line one" + lf + "line two",
+    "tab" + tab + "here",
+    "a > b",
+    "100%",
+    "'quoted'",
+    quote + "quoted" + quote
+};
+
+// Strings that must keep vanilla's XML path.
+var xmlSamples = new[]
+{
+    "<b>bold</b>",
+    "a &amp; b",
+    "crlf" + cr + lf + "here",
+    soh + "control",
+    char.ConvertFromUtf32(0x1F680) + " rocket",
+    new string('x', 4096)
+};
+
+foreach (var sample in plainSamples)
+{
+    if (isPlainText.Invoke(null, new object?[] { sample }) is not true)
+    {
+        throw new InvalidOperationException(
+            "IsPlainText rejected a string with no markup, so it still builds an XmlReader: "
+            + System.Text.Json.JsonSerializer.Serialize(sample));
+    }
+
+    var nodes = new List<string>();
+    using (var reader = System.Xml.XmlReader.Create(new StringReader(sample), xmlReaderSettings))
+    {
+        while (reader.Read())
+        {
+            if (reader.NodeType is System.Xml.XmlNodeType.Text
+                or System.Xml.XmlNodeType.Whitespace)
+            {
+                nodes.Add(reader.Value);
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    "IsPlainText accepted a string the XML reader turns into a "
+                    + reader.NodeType + " node, so the plain branch would drop formatting: "
+                    + System.Text.Json.JsonSerializer.Serialize(sample));
+            }
+        }
+    }
+
+    var parsed = string.Concat(nodes);
+    if (parsed != sample && sample.Length != 0)
+    {
+        throw new InvalidOperationException(
+            "IsPlainText accepted "
+            + System.Text.Json.JsonSerializer.Serialize(sample)
+            + " but the XML reader returns "
+            + System.Text.Json.JsonSerializer.Serialize(parsed)
+            + "; the plain branch would render different text.");
+    }
+}
+
+foreach (var sample in xmlSamples)
+{
+    if (isPlainText.Invoke(null, new object?[] { sample }) is true)
+    {
+        throw new InvalidOperationException(
+            "IsPlainText accepted a string that must keep vanilla's XML path: "
+            + System.Text.Json.JsonSerializer.Serialize(sample));
+    }
+}
+
+// PartGraphics.UpdateColor must lose both its boxing dirty test and its
+// self-unsubscribe. Applied is set only when both rewrites really happened.
+var partGraphicsType = gameAssembly.GetType(
+    "Cosmoteer.Ships.Parts.Graphics.PartGraphics", throwOnError: true)!;
+var updateColorTarget = AccessTools.DeclaredMethod(partGraphicsType, "UpdateColor")
+    ?? throw new InvalidOperationException("PartGraphics.UpdateColor was not found.");
+var updateColorInfo = Harmony.GetPatchInfo(updateColorTarget)
+    ?? throw new InvalidOperationException("PartGraphics.UpdateColor was not patched.");
+if (!updateColorInfo.Transpilers.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException("PartGraphics.UpdateColor transpiler was not installed.");
+}
+
+var colorPatchType = typeof(EntryPoint).Assembly
+    .GetType("EmmanimLagFix.Code.PartGraphicsColorEventPatch", throwOnError: true)!;
+if (AccessTools.Field(colorPatchType, "Applied").GetValue(null) is not true)
+{
+    throw new InvalidOperationException(
+        "PartGraphics.UpdateColor was not rewritten, so every settling part still scans the "
+        + "whole BeforeDraw invocation list: "
+        + (AccessTools.Field(colorPatchType, "FailureReason").GetValue(null) ?? "no reason recorded"));
+}
+
+// The rewrite rests on two claims about the flags enum that the IL does not
+// state: that it is backed by int32, and that Dirty is the single bit 1 so a
+// mask is exactly HasFlag. Check them against the real type.
+var colorUpdateFlags = partGraphicsType.GetNestedType(
+        "ColorUpdateFlags", BindingFlags.NonPublic | BindingFlags.Public)
+    ?? throw new InvalidOperationException("PartGraphics.ColorUpdateFlags was not found.");
+if (Enum.GetUnderlyingType(colorUpdateFlags) != typeof(int))
+{
+    throw new InvalidOperationException(
+        "PartGraphics.ColorUpdateFlags is backed by "
+        + Enum.GetUnderlyingType(colorUpdateFlags).Name
+        + ", not int32; the substituted `and` would read the wrong width.");
+}
+
+var dirtyValue = Convert.ToInt32(Enum.Parse(colorUpdateFlags, "Dirty"));
+var registeredValue = Convert.ToInt32(Enum.Parse(colorUpdateFlags, "Registered"));
+if (dirtyValue != 1 || registeredValue != 2)
+{
+    throw new InvalidOperationException(
+        $"PartGraphics.ColorUpdateFlags has Dirty={dirtyValue}, Registered={registeredValue}; "
+        + "the rewrite assumes Dirty=1 (a single bit, so `and` equals HasFlag) and "
+        + "Registered=2 (so vanilla's clear mask is -3).");
+}
+
+// Leaving handlers subscribed is only safe because detaching still removes
+// them, which it does by testing the Registered flag this patch preserves.
+var detaching = AccessTools.DeclaredMethod(partGraphicsType, "OnPartDetaching")
+    ?? throw new InvalidOperationException(
+        "PartGraphics.OnPartDetaching was not found, so nothing would ever unsubscribe a "
+        + "settled colour handler.");
+if (Harmony.GetPatchInfo(detaching)?.Transpilers.Any(patch => patch.owner == smokeId) == true)
+{
+    throw new InvalidOperationException(
+        "PartGraphics.OnPartDetaching was rewritten; it must keep vanilla's unsubscribe.");
+}
+
 // Rewritten IL only fails when the method is compiled, which would otherwise be
 // on a moving ship mid-game. Force it here so a malformed branch or an
 // unbalanced stack is an immediate InvalidProgramException instead.
-foreach (var rewritten in new[] { thrusterCacheTarget, compareTarget })
+foreach (var rewritten in new MethodBase[] { thrusterCacheTarget, compareTarget, buildLinesTarget, updateColorTarget }
+    .Concat(shaderConstantUpdates))
 {
     try
     {
@@ -663,4 +935,4 @@ foreach (var rewritten in new[] { thrusterCacheTarget, compareTarget })
 }
 
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, and status-regulator affected-cell cache patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, and status-regulator affected-cell cache patches resolved and compiled on this game build.");

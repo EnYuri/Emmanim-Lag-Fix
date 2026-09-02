@@ -885,3 +885,248 @@ approach/spawn hitches.
     diagnostic work. Do not reset it or overwrite unrelated changes. Keep root
     source, `Mod/Source`, package DLL and live DLL synchronized after the game
     exits; never replace the live DLL while Cosmoteer is running.
+
+## 2026-09-02 20:48 KST — 2.0.24 멀티플레이 종료 직전 측정 (다음 세션 시작점)
+
+같은 프로세스 PID 16300 을 68분 시점과 135분 시점에 각각 20초 CPU + 15초 gc-verbose 로 측정.
+
+부하가 2.6~3.7배 늘었는데 tick 은 절반만 떨어졌다. **이 세션에서 프로세스 노화는 원인이 아니다.**
+
+| | 19:42 (68분) | 20:48 (135분) |
+| --- | ---: | ---: |
+| 함선 / 파츠 | 216–333 / 25.7k–37.7k | 400–646 / 67.7k–95.1k |
+| tick/s (목표 30) | 14.4–18.2 | 9.7–12.6 |
+| private / heap | 9.02 / 2.89 GiB | 10.75 / 3.99 GiB |
+| 할당률 | 50 MiB/s | 46.4 MiB/s |
+
+### 버벅거림은 평균이 아니라 꼬리에 있다
+
+사용자 표현: "프레임과 별개로 버벅거림이 심한 게 문제". 메인 스레드 구간 분포가 정확히 그 모양이다.
+
+```
+GameRoot.Draw       n=2227  p50=2.0ms  p90=3.9  p99=23.9  max=59.2
+GameRoot.Update     n= 717  p50=2.6ms  p90=9.0  p99=34.4  max=44.3
+SimRoot.FixedUpdate n= 331  p50=5.5ms  p90=9.0  p99=35.0  max=42.2
+```
+
+중앙값 2~5ms 는 정상이고 p99 가 그 10~15배다. 평균 FPS 를 지표로 삼으면 이 문제는 보이지 않는다.
+메인 스레드 배타적 시간 상위: `PollGCWorker` 2,075ms / n=908 (초당 45회 정지),
+`Monitor.Enter_Slowpath` 1,316ms / n=618, `set_Shader` 573ms, `OnCurrentTextureConstantChanged` 567ms.
+
+30ms 이상 스톨의 원인은 서로 다른 세 갈래다. 할당을 전부 잡아도 2·3번은 남는다.
+
+1. 할당이 GC 를 부르고 그 GC 가 메인 스레드를 세움 — 스택 말단이
+   `Dictionary.Resize` / `List.CopyTo` / `List<Vector2>.AddWithResize -> Array.Copy` -> `PollGCWorker` (29~36ms).
+2. 스타시스 함선 동기 스폰 — `SimStasisManager.UpdateStasis -> StasisDoodadSpawner.Spawn ->
+   SimShipsManager.Add -> PolygonCollider.AddCollider` 36.9ms. `stasis=11307`, 4분에 함선 400->646.
+3. 렌더 제출 — `OnScenePreDrawCallback` 55.7/44.2ms, `ShipPrimitiveBatch.Draw -> DrawInterleaved` 53.9ms.
+
+### 할당 표적은 둘이고 크기가 거의 같다
+
+15초 7,129 샘플 ≈ 696 MiB. 할당하는 메서드 기준:
+
+```
+28.1%  196 MiB  GraphicsManager.RefreshShaderConstants
+12.2%   85 MiB  XmlTextReaderImpl.FinishInitTextReader
+ 5.6%   39 MiB  ShaderConstantCollection..ctor
+ 3.0%   21 MiB  TextBuilder.BuildLines
+ 2.9%   20 MiB  List<TextChar>.AddWithResize
+ 2.7%   19 MiB  List<Quad>.AddWithResize
+ 2.1%   15 MiB  XmlTextReaderImpl..ctor
+```
+
+- **셰이더 상수** — 기준선 44.9% 에서 28.1% 로 비중은 내려갔지만 여전히 단일 1위.
+  원인은 `D3D11BufferConstant.IsDataDirty<T>` 의 `box !!T` + `constrained. callvirt object::Equals(object)`
+  (IL 로 확인 완료). 수정안은 비제네릭 `Update(...)` 8개 오버로드에 프리픽스를 걸어
+  타입드 `Equals(in T)` 를 호출하는 것. 관련 값 타입은 모두 `Equals(object)` 를 `Equals(in T)` 로 위임하므로
+  의미 보존이 자명하고, 렌더 경로 전용이라 락스텝과 무관하다.
+- **GUI 텍스트 XML 재파싱** — 호출자는 `TextBuilder.ParseXmlToLines`. Halfling 이 UI 텍스트 마크업을
+  매 위젯 갱신마다 `XmlTextReader` 를 새로 만들어 파싱한다. `WidgetTextRenderer.OnRefresh` 포함 기준
+  28.6% / 199 MiB 로 셰이더 상수와 동급. 착수 전에 `TextBuilder` 를 디컴파일해
+  캐시 무효화 조건(텍스트/폰트/폭 변경)을 먼저 확정할 것.
+
+### 다음 세션 순서
+
+1. 셰이더 상수 박싱 패치 — 원인이 확정돼 있으므로 바로 구현 가능. 트랜스파일러가 아니라
+   오버로드별 프리픽스이므로 `PrepareMethod` 검증은 불필요하지만, 가드 통과 플래그는 스모크에서 확인할 것.
+2. `TextBuilder` 디컴파일 후 텍스트 파싱 캐시.
+3. 1·2 이후에도 남을 스타시스 동기 스폰(36ms)과 렌더 제출(55ms)은 별도 과제.
+
+기준선 메모는 임시 폴더 `scratchpad/mp_baseline_1942.md` 에 있었고 트레이스 파일
+(`mp_end.nettrace`, `mp_end_alloc.nettrace`) 도 같은 폴더라 정리되면 사라진다. 위 수치가 보존본이다.
+
+## 2026-09-02 23:20 KST — 2.0.25 두 할당 지점 구현 (미배포)
+
+위 두 표적을 모두 구현했다. **저장소에만 반영했고 패키지/라이브 모드에는 배포하지 않았다.**
+공개 릴리스는 여전히 2.0.24 이며, 배포 전에 Cosmoteer 프로세스 종료를 먼저 확인해야 한다.
+
+### `ShaderConstantBoxingPatch`
+
+- 대상은 `Halfling.Graphics.D3D11.D3D11Shader+D3D11BufferConstant` 의 비제네릭
+  `Update(...)` 8개. 타입 인자는 `RawBool`(SharpDX), `int`, `float`,
+  `Halfling.Geometry.Vector2/3/4`, `Halfling.Graphics.Color`, `Halfling.Geometry.Matrix`
+  로 IL 에서 확인했다.
+- 프리픽스가 아니라 **트랜스파일러**로 갔다. 선언 타입이 `internal` 클래스의 중첩 타입이고
+  그 어셈블리(`HalflingPlatformWDX`)를 이 프로젝트가 참조하지 않으므로 C# 에서
+  `__instance` 도 파라미터 타입도 이름 지을 수 없다. 트랜스파일러는 `call IsDataDirty<T>`
+  한 줄만 바꾸고, `T` 는 호출부 자신의 제네릭 인자에서 가져온다. 그 지점의 평가 스택은
+  이미 `(this, ref T)` 라 대체 대상의 시그니처와 정확히 일치한다 — 제어 흐름도 지역 변수도
+  건드리지 않는다.
+- 슬롯 주소 `_bufState.Data + _bufOffset` 은 바닐라와 같은 식을 `DynamicMethod` 로
+  한 번만 컴파일해 쓴다. 호출마다 리플렉션으로 읽으면 없애려는 박싱보다 비싸다.
+- `PatchedCount` 는 모든 형태 검사를 통과해 실제로 재작성된 오버로드 수. 스모크가 8 을 단언한다.
+  설치 여부만 보는 검사는 무의미하다 — 폴백한 트랜스파일러도 설치는 되어 있다.
+- 스모크는 의미 동등성도 직접 검증한다. 재작성된 각 타입에 대해 0 바이트/0x3F 바이트로 채운
+  실제 값 네 쌍을 만들어 박싱 `Equals(object)` 와 타입드 `Equals` 의 결과가 일치하는지 본다.
+  8개 전부 통과.
+
+### `TextBuilderPlainTextPatch`
+
+- `TextBuilder` 에는 캐시가 **없다**. `BuildLines` 는 매번 새로 만든다. 다만
+  `WidgetTextRenderer.OnRefresh` 는 이미 `_needsRefresh` 로 게이트돼 있으므로
+  "매 프레임 전부 다시" 가 아니라 "갱신이 매우 잦다" 가 맞다. 그래서 캐시가 아니라
+  **분기 조건**을 고쳤다.
+- `BuildLines(bool xmlFormatting)` 의 IL 에서 `ldarg.1` 은 정확히 한 번, 분기 테스트로만
+  읽힌다(`IL_003e: ldarg.1 / IL_003f: brtrue.s`). 그 뒤에 `ldarg.0`, `call NeedsXmlParse`
+  두 명령을 끼워 `xmlFormatting && !IsPlainText(Text)` 로 바꾼다.
+- 동등성 근거: `ParseXmlToLines` 는 루프 뒤에 아무 코드도 없고(디컴파일로 확인),
+  텍스트 노드 하나뿐인 입력에서 실행되는 본문은
+  `AddTextToLines(lines, reader.Value, stateStack.Peek(), maxWidth, ref prevChar)`
+  단 한 줄이다. 스택 최상단은 평문 분기가 넘기는 바로 그 상태이고 `prevChar` 는 양쪽 다 null 로 시작한다.
+- `IsPlainText` 는 의도적으로 좁다. 거부하면 바닐라 경로로 갈 뿐이라 비용이 없고,
+  틀리면 화면이 깨진다. 거부 조건: `<`, `&`, `\r`(XML 은 텍스트 노드 안의 줄바꿈을 정규화한다),
+  XML 1.0 불법 문자, 서로게이트, 1024자 초과(`XmlTextReaderImpl` 이 긴 텍스트를 여러 노드로
+  쪼갤 수 있다).
+- 스모크는 실제 `XmlReader` 를 게임 자신의 `XML_READER_SETTINGS` 로 돌려, 통과시킨 모든 문자열이
+  정말 텍스트 노드 하나로 원문 그대로 돌아오는지 확인한다. 한국어/탭/개행/따옴표/`>`/`%` 통과,
+  마크업·엔티티·CRLF·제어문자·이모지·4096자 거부.
+
+### 상태
+
+- `dotnet build -c Release` 경고 0 / 오류 0, 스모크 PASS.
+- 재작성된 메서드는 `RuntimeHelpers.PrepareMethod` 강제 컴파일 목록에 추가했다
+  (`Update` 8개 + `BuildLines`). 잘못된 IL 은 게임 안이 아니라 스모크에서 터진다.
+- 아직 하지 않은 것: 패키지/라이브 DLL 교체, `Mod/mod.rules` 버전 표기, 실측 재트레이스.
+  배포 후 같은 세이브·같은 위치에서 15초 `gc-verbose` 를 떠서
+  `RefreshShaderConstants` 와 `XmlTextReaderImpl` 이 상위에서 사라졌는지 확인할 것.
+  비교 전에 진단 로그의 `parts=` 를 먼저 읽어 장면 규모가 맞는지 확인한다 —
+  규모가 다른 트레이스는 아무것도 증명하지 못한다.
+
+## 2026-09-03 — 렌더 제출 경로: `PartGraphics` 색상 이벤트 (미배포)
+
+스타시스 스폰을 먼저 검토했으나 **표적으로 기각**했다. 근거:
+
+- 무거운 절반은 이미 비동기다. `ShipDoodadRules.StartAsyncSpawn` 이 `CreateShip`
+  (역직렬화 / 청사진 로드 / `MatchPhysicalToBlueprints` / `InitializeToMax`) 을
+  `SingleThreadTaskQueue` 에서 돌린다. 메인 스레드에 남는 건 `SpawnShip` →
+  `sim.Ships.Add` → `ship.Parent = Sim` 의 씬 활성화뿐이고, 그 안의
+  `PolygonCollider.AddCollider` → `ShipPhysics.AddCustomCollider` 는 콜라이더마다
+  `new PolygonShape` + `_fixtureTree.AddGetKey` 하나씩인 실제 설정 작업이다.
+  셀 픽스처는 `ProcessUpdatedParts` 가 이미 10×10 까지 탐욕적 사각형 병합을 한다.
+  없앨 낭비가 없고, 씬 활성화는 스레드 안전하지 않아 옮길 수도 없다.
+- `UpdateStasis` 는 `SimStasisManager.FixedUpdate` 에서 돈다. 결정론적 락스텝
+  상태이므로 무엇이 언제 스폰되는지를 바꾸면 무결성 해시가 바뀐다.
+- 틱 분산(스폰 개수 상한)은 안전하지 않다. `StasisUpdateInterval = 1.0` 이라
+  1초 단위 팝인이 되고, 더 결정적으로 `ForceSpawnsNear(dest)` 는 반환 즉시 그
+  지점 주변이 전부 라이브라고 가정한다 — FTL 로컬 점프가 이를 `using` 으로 감싸고
+  안에서 `GetJumpInLoc(destCircle, ...)` 으로 착지점을 고르며, 섹터 진입 경로도
+  같다. 상한을 두면 아직 뜨지 않은 함선 위로 착지할 수 있다.
+
+### 측정: 드로우 CPU의 19.9%가 델리게이트 제거
+
+`Logs/mp_servergc_long_cpu_2026-09-01.speedscope.json` (20초, 5.7시간 경과 프로세스,
+전체 CPU_TIME 118,781 ms, `Director.DoDraw` 7,379 ms). Speedscope 내보내기는
+**이벤트 형식**이므로 스택을 유지하며 걸어야 하고, 리프가 `CPU_TIME` 인 구간만
+집계해야 한다. 드로우 서브트리 self 시간 상위:
+
+```
+1,469.5 ms  19.9%  MulticastDelegate.RemoveImpl
+  834.4 ms  11.3%  SceneComponent.IRenderableSceneObject.Draw
+  660.1 ms   8.9%  RuntimeTypeHandle.InternalAllocNoChecksWorker
+  406.1 ms   5.5%  Monitor.Enter_Slowpath
+  353.9 ms   4.8%  CastHelpers.ChkCastClass
+```
+
+`RemoveImpl` 의 **100%** 가 단일 경로다:
+
+```
+SceneRoot.Draw -> SceneComponent.Draw -> PartGraphics.UpdateColor
+  -> SceneComponent.remove_BeforeDraw -> MulticastDelegate.RemoveImpl
+```
+
+반대편 `CombineImpl` 은 같은 창에서 **2.1 ms** 뿐이다 (경로:
+`PartGraphics.OnColorChanged -> add_BeforeDraw`). 700배 비대칭의 원인은
+`Combine` 이 memcpy 인 반면 `Remove` 는 호출 목록을 델리게이트 동등 비교로
+선형 탐색하기 때문이다. `Delegate.Equals` 107.5 ms + `MulticastDelegate.Equals`
+70.5 ms 가 그 비교 비용이고, 합치면 드로우의 약 22%다.
+
+역산: 비교 하나 ~5 ns, 목록 길이 N ≈ 수천이면 제거 하나 ≈ 25 µs → 20초에 약
+58,000 회, 초당 2,900 회, 프레임당 약 58 부품이 "정착"한다는 뜻이다. 즉 목록은
+이미 길고 바닐라도 이미 그 N 개를 매 프레임 호출하고 있다.
+
+### 상태 기계와 불변식
+
+`_colorUpdateStatus` 를 건드리는 곳은 `PartGraphics` 안에 정확히 네 군데뿐이다
+(`OnColorChanged`, `UpdateColor` 의 정착 분기, `UpdateColor` 끝의 Dirty 해제,
+`OnPartDetaching`). 불변식은 `Registered ⟺ 핸들러가 호출 목록에 있음`.
+
+`PartGraphicsColorEventPatch` 는 `UpdateColor` 에 두 가지 정확한 재작성을
+**전부 아니면 전무**로 적용한다.
+
+(a) 더티 검사 디박싱. `Enum.HasFlag` 는 `Enum` 을 받으므로 IL 이 양쪽 피연산자를
+    박싱한다 (`IL_0006`, `IL_000c`) — 프레임마다 핸들러 호출당 두 할당. 같은
+    리터럴에 대한 `and` 로 바꾼다.
+
+(b) 자기 구독 해제 블록(`IL_0018`–`IL_0043`) 삭제. 조기 `ret` 은 남는다.
+
+(b) 만 하면 정착한 핸들러가 영구히 프레임마다 두 번 박싱하므로, 탐색 폭주를
+영구 할당률과 맞바꾸는 셈이 된다 — 의도의 정반대다. 그래서 둘은 함께 적용된다.
+
+(b) 가 플래그 해제까지 같이 지우므로 불변식이 유지된다. `OnColorChanged` 는
+`Registered` 가 여전히 서 있는 것을 보고 재구독을 건너뛴다 — 핸들러가 실제로
+아직 목록에 있으므로 옳다. `OnPartDetaching` 은 여전히 `Registered` 를 보고
+정확히 한 번 제거하므로 누수가 없고, 부품 하나가 기여하는 항목은 최대 하나라
+목록 길이는 함선 부품 수로 유계다.
+
+**바닐라 자신이 이미 이 패턴을 쓴다.** 형제 클래스
+`PartToggledBlendSprites.UpdateColor` 는 구독을 아예 해제하지 않고 평범한
+`bool _needsColorUpdate` 로 조기 반환한다(IL 55바이트, `remove_BeforeDraw` 없음).
+따라서 "구독을 남긴다" 는 새 발명이 아니라 엔진 자신의 관용구다.
+
+분리 비용에 대한 반론 검토: `OnPartDetaching` 은 `Part.RemoveComponent(s)` 와
+`Part.OnDetaching` 에서 오고, 후자는 개별 부품 제거(파괴/해체/교체) 경로다.
+함선 통째 폐기는 렌더러와 그 이벤트 딕셔너리를 함께 버리므로 부품별 제거를
+돌지 않는다. 파괴 속도는 위에서 잰 초당 2,900 회 churn 보다 훨씬 낮다.
+
+### 스모크
+
+- `Applied` 는 두 재작성이 모두 성공했을 때만 선다. 설치 여부만 보는 검사는
+  무의미하다 — 폴백한 트랜스파일러도 설치는 되어 있다.
+- IL 이 말해주지 않는 산술 가정을 실제 타입에 대고 확인한다:
+  `ColorUpdateFlags` 의 기반 타입이 `int32` 인지, `Dirty == 1`(단일 비트라
+  마스크가 곧 `HasFlag`), `Registered == 2`(바닐라 해제 마스크가 -3).
+- `OnPartDetaching` 이 바닐라로 남았는지 단언한다. 그 구독 해제가 목록 길이를
+  유계로 만드는 유일한 장치다.
+- 재작성된 `UpdateColor` 를 `RuntimeHelpers.PrepareMethod` 강제 컴파일 목록에
+  넣었다. 잘못된 분기나 스택 불균형은 게임 안이 아니라 스모크에서 터진다.
+- 형태 불일치 사유는 `FailureReason` 에 남고 스모크 메시지에 그대로 나온다.
+  `Logger.Log` 는 게임 없이 초기화되지 않으므로 try/catch 로 감쌌다.
+
+### 상태
+
+- `dotnet build -c Release` 경고 0 / 오류 0, 스모크 PASS.
+- **저장소에만 반영. 패키지/라이브 모드 미배포, 공개 릴리스는 여전히 2.0.24.**
+- 아직 하지 않은 것: 패키지/라이브 DLL 교체, `Mod/mod.rules` 버전 표기, 재측정.
+  재측정은 같은 세이브·같은 위치에서 20초 CPU 트레이스를 떠서 `RemoveImpl` 이
+  드로우 서브트리 상위에서 사라졌는지 본다. 프로세스 경과 시간이 비슷한
+  트레이스끼리만 비교할 것 — Harmony 의 `CompileMethodHook` 이 3분 시점 8.2%,
+  11분 시점 7.2% 로 초반 트레이스를 오염시킨다.
+
+### 같은 트레이스에 남은 드로우 비용 (미착수)
+
+`InternalAllocNoChecksWorker` 660 ms(할당 자체), `Monitor.Enter_Slowpath`
+406 ms, `ChkCastClass` 354 ms, `GraphicsManager.set_Shader` 260 ms,
+`CreateGraphicsArray` 244 ms. 그리고 프로세스 전체로는 `SpinWait.SpinOnce`
+30,734 ms + `PollGCWorker` 46,365 ms 가 여전히 지배적이다 — 16개 `FastParallel`
+워커가 블록하지 않고 스핀하므로 모든 GC 정지가 그 수만큼 곱해진다. 레버는
+여전히 할당률이다.
