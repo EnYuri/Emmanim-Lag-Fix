@@ -957,8 +957,8 @@ SimRoot.FixedUpdate n= 331  p50=5.5ms  p90=9.0  p99=35.0  max=42.2
 
 ## 2026-09-02 23:20 KST — 2.0.25 두 할당 지점 구현 (미배포)
 
-위 두 표적을 모두 구현했다. **저장소에만 반영했고 패키지/라이브 모드에는 배포하지 않았다.**
-공개 릴리스는 여전히 2.0.24 이며, 배포 전에 Cosmoteer 프로세스 종료를 먼저 확인해야 한다.
+위 두 표적을 모두 구현했다. 이후 `PartGraphics` 색상 이벤트와 함께
+2.0.25 로 게시되었다 — 아래 2026-09-03 항목의 릴리스 기록을 볼 것.
 
 ### `ShaderConstantBoxingPatch`
 
@@ -1115,7 +1115,26 @@ SceneRoot.Draw -> SceneComponent.Draw -> PartGraphics.UpdateColor
 ### 상태
 
 - `dotnet build -c Release` 경고 0 / 오류 0, 스모크 PASS.
-- **저장소에만 반영. 패키지/라이브 모드 미배포, 공개 릴리스는 여전히 2.0.24.**
+- 릴리스 2.0.25 게시. 커밋 `65136f1`, 태그 `v2.0.25`, Actions 실행
+  33652438058 이 태그/페이로드 검증, 아카이브 구성, 아카이브 검사, 릴리스 게시를
+  모두 통과했다. 자산은 `Emmanim-Lag-Fix-2.0.25.zip` (1,317,618 바이트), SHA-256
+  `C78417763F34F760018C0E93E6DA3CCE59B84058DF8B47FFF9907C51019F811C`.
+  공개 주소: `https://github.com/EnYuri/Emmanim-Lag-Fix/releases/tag/v2.0.25`.
+  패키지 `Mod/Code/EmmanimLagFix.Code.dll` SHA-256
+  `2D29F9CF430FACAABCB9A66421FD3C62BC8F470D2732E09500145AFF5513A160`.
+- **라이브 모드는 아직 2.0.24 다.** 게시 시점에 Cosmoteer PID 11568 이 실행 중
+  (워킹셋 약 6.99 GiB) 이라 로드된 DLL 을 교체할 수 없었다. 게임 종료 후
+  `Mod/Code/EmmanimLagFix.Code.dll` 과 `.pdb` 를
+  `Mods/emmanim_lag_fix/Code/` 로 복사하고, 세 개의 새 `.cs` 를 라이브 소스
+  번들로 미러링하고, 라이브 `mod.rules` 의 `Version` 을 2.0.25 로 올릴 것.
+- **이 릴리스는 실제 게임에서 검증되지 않았다.** 세 패치 모두 형태 가드와
+  스모크(의미 동등성 + `PrepareMethod` 강제 컴파일)를 통과했지만 실행 중인
+  게임에서 한 번도 돌지 않았다. 배포 후 첫 실행에서 로더/Harmony 예외가 없는지,
+  선박 색상(손상/건조/토글)과 GUI 텍스트가 정상인지 먼저 눈으로 확인할 것.
+  그 다음 같은 세이브·같은 위치에서 20초 CPU 트레이스와 15초 `gc-verbose` 를
+  떠서 `MulticastDelegate.RemoveImpl`, `RefreshShaderConstants`,
+  `XmlTextReaderImpl` 이 상위에서 사라졌는지 본다. 비교 전에 진단 로그의
+  `parts=` 와 프로세스 경과 시간을 먼저 맞출 것.
 - 아직 하지 않은 것: 패키지/라이브 DLL 교체, `Mod/mod.rules` 버전 표기, 재측정.
   재측정은 같은 세이브·같은 위치에서 20초 CPU 트레이스를 떠서 `RemoveImpl` 이
   드로우 서브트리 상위에서 사라졌는지 본다. 프로세스 경과 시간이 비슷한
