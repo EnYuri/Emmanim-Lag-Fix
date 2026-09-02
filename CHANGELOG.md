@@ -1,5 +1,57 @@
 # Changelog
 
+## 2.0.28
+
+- Stopped the tutorial/lore codex from running its IronPython show-conditions on
+  every frame. `CodexHudGui.OnUpdatingUIState` is subscribed to
+  `BeforeFrameInput`, so it walks every codex page once per frame, and
+  `CodexPageRules.UpdateState` returns early only for a page that is already
+  shown or has no condition. Every other page builds a fresh script scope, sets
+  three variables on it and evaluates Python - vanilla ships 67 such conditions,
+  some of which ask the simulation real questions such as
+  `sim.HasShipWithLabelInSight('abandoned')` and `sim.StationInSight`.
+- The cost is not mainly CPU. A fresh scope per page per frame makes IronPython
+  rebind through the DLR, so `BuiltinFunction.BindToInstance`,
+  `ScopeStorage.GetMemberNames` and `DynamicOperations.TryGetMember` emit dynamic
+  methods that become garbage the moment the scope is disposed, and they come
+  back on the finalizer thread as `DynamicResolver+DestroyScout.Finalize`, which
+  frees JIT-compiled code. On a 20-second capture of a two-player host session
+  that finalizer accounted for 2,403.8 ms - 5.7% of all real (spin-excluded)
+  process CPU, and 56.1% of all worker-thread CPU spent inside frames longer
+  than 20 ms. Every sample of it landed inside such a frame and none outside
+  one. In the paired allocation trace every stack that created dynamic code ran
+  through IronPython, the largest through `CodexPageRules.UpdateState`, and the
+  codex subsystem allocated about 14.6 MiB in ten seconds against 136 MiB for
+  the whole process.
+- The conditions now run four times a second instead of sixty, removing about
+  93% of that churn. In full, what the delay can cost: a codex page appears up
+  to 250 ms later, its button is added or removed up to 250 ms later, and a page
+  carrying `AutoPause` enqueues its pause input up to 250 ms later. That last is
+  an ordinary queued player input, the same kind the pause button sends, so it
+  stays ordered by the lockstep protocol; no ship, crew, resource or
+  integrity-hash state is touched. The gate is one weak entry per `CodexHudGui`,
+  and the smoke test checks that the first update runs, an immediate second one
+  is skipped, and a second GUI keeps its own gate.
+- This was found by auditing everything added since 2.0.22 against a live
+  session rather than by reasoning about it. Measured there, the crew-search
+  reach raised in 2.0.23 costs at most 0.38% of real CPU, the part-colour
+  subscription change in 2.0.25 costs 0.01%, and the status-regulator cache in
+  2.0.24 costs 0.01%; the mod's entire code footprint is 1.85%. None of them is
+  the stutter, and none was changed.
+- Both this and the 2.0.27 queue sharding were confirmed on a live 31-minute
+  single-player session (62,000 parts, 312 ships) before release, with no
+  exception and no shape-guard fallback in the log. `DestroyScout.Finalize` fell
+  from 2,403.8 ms to 0.0 ms and disappeared from the profile entirely;
+  `SimRoot.EnqueueNonDeterministic` fell from 1,433.9 ms (7.5% of real CPU) to
+  12.5 ms (0.02%), with the whole sharding mechanism - `ShardedEnqueue` plus the
+  `Drain` postfix - costing 43.3 ms where vanilla's single queue tail cost
+  1,433.9 ms. The effect-anchor subtree fell from 2,839.5 ms to 305.6 ms and the
+  codex and IronPython paths to about 10 ms combined. Frame durations are not
+  comparable across the two captures because the scenes differ, but the ratio of
+  the 99th percentile to the median - how spiky a frame time is, which is what a
+  player feels as stutter - improved on all three roots: update 3.9x to 3.0x,
+  draw 8.2x to 4.8x, fixed update 6.4x to 3.1x.
+
 ## 2.0.27
 
 - Removed the multi-producer contention on the simulation's single

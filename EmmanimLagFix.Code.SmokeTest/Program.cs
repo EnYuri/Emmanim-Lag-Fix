@@ -1037,6 +1037,43 @@ if (ranPerThread.Values.Sum(posted => posted.Count) != ranTotal)
     throw new InvalidOperationException("Sharded queue ran a callback twice.");
 }
 
+// The codex evaluates every unshown page's IronPython show-condition against a
+// fresh script scope once per frame, and the dynamic methods that rebinding
+// emits come back on the finalizer thread inside long frames.
+var codexHudType = AccessTools.TypeByName("Cosmoteer.Codex.CodexHudGui")
+    ?? throw new InvalidOperationException("Cosmoteer.Codex.CodexHudGui was not found.");
+var codexUpdateTarget = AccessTools.Method(codexHudType, "OnUpdatingUIState")
+    ?? throw new MissingMethodException(codexHudType.FullName, "OnUpdatingUIState");
+if (Harmony.GetPatchInfo(codexUpdateTarget)?.Prefixes.Any(patch => patch.owner == smokeId) != true)
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim prefix was not installed on CodexHudGui.OnUpdatingUIState.");
+}
+// The page loop must still be reached, just not on every frame: the first call
+// runs, an immediate second call is skipped, and a separate GUI keeps its own
+// gate rather than inheriting another instance's.
+var codexPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.CodexConditionThrottlePatch",
+    throwOnError: true)!;
+var codexPrefix = AccessTools.DeclaredMethod(codexPatchType, "Prefix")
+    ?? throw new MissingMethodException(codexPatchType.FullName, "Prefix");
+var codexGuiA = new object();
+var codexGuiB = new object();
+if (codexPrefix.Invoke(null, new[] { codexGuiA }) is not true)
+{
+    throw new InvalidOperationException("The codex throttle skipped its very first update.");
+}
+if (codexPrefix.Invoke(null, new[] { codexGuiA }) is not false)
+{
+    throw new InvalidOperationException(
+        "The codex throttle ran twice in the same frame, so it throttles nothing.");
+}
+if (codexPrefix.Invoke(null, new[] { codexGuiB }) is not true)
+{
+    throw new InvalidOperationException(
+        "One CodexHudGui's update suppressed another instance's; the gate is not per-instance.");
+}
+
 // Rewritten IL only fails when the method is compiled, which would otherwise be
 // on a moving ship mid-game. Force it here so a malformed branch or an
 // unbalanced stack is an immediate InvalidProgramException instead.
@@ -1058,4 +1095,4 @@ foreach (var rewritten in new MethodBase[]
 }
 
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, and sharded non-deterministic callback queue patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, and throttled codex show-conditions patches resolved and compiled on this game build.");
