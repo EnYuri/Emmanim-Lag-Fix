@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.0.27
+
+- Removed the multi-producer contention on the simulation's single
+  non-deterministic callback queue. `SimRoot` holds one
+  `ConcurrentQueue<Action> _queuedNonDeterministic`; anything that runs on a
+  FastParallel worker but must touch the scene graph posts to it, and the main
+  thread drains it in `ExecuteQueued`. A 20-second CPU trace on a 170-minute
+  two-player host session measured 1,433.9 ms in `EnqueueNonDeterministic` -
+  7.5% of all real (spin-excluded) process CPU, and 50.5% of the whole
+  effect-anchor subtree, more than the anchor's own vector maths. Every sampled
+  call came from `MultiMediaEffectNode.EffectAnchor.Update`, which runs in
+  update bucket 8 under `SimRoot.ParallelUpdate`: one anchor per playing media
+  effect, every frame, across sixteen threads. Draining the queue on the main
+  thread cost only 507.9 ms, so the expense was entirely on the producer side -
+  sixteen cores contending for one queue tail at roughly ten times the latency
+  of an uncontended enqueue. A transpiler now shards that queue by thread. Each
+  thread always maps to the same shard, so a given thread's callbacks still run
+  in the order it posted them, which is the only ordering vanilla actually
+  establishes; ordering between threads is not preserved and carries no
+  happens-before, because two workers enqueuing concurrently already race for
+  the tail. Callbacks are neither reordered within a thread, deduplicated,
+  dropped nor delayed by a frame, the main-thread inline branch is untouched,
+  and the drain runs inside the same `ExecuteQueued` call at the same point in
+  the tick. `Applied` is set only once the enqueue site matched its exact
+  expected shape, and the smoke test asserts that flag, forces the rewritten
+  method through `RuntimeHelpers.PrepareMethod`, and checks that 2,000
+  callbacks posted from eight threads each run exactly once and in per-thread
+  order.
+
 ## 2.0.26
 
 - Stopped a starved audio thread from crashing the whole game.

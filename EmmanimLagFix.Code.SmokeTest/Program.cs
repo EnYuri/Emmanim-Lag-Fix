@@ -963,10 +963,87 @@ foreach (var (start, total, expected) in new[]
     }
 }
 
+// SimRoot posts every worker-thread scene-graph write to one ConcurrentQueue,
+// which sixteen FastParallel threads contend for. Applied is set only once the
+// enqueue site was really rewritten to the sharded one.
+var shardingPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.NonDeterministicQueueShardingPatch",
+    throwOnError: true)!;
+if (AccessTools.Field(shardingPatchType, "Applied").GetValue(null) is not true)
+{
+    throw new InvalidOperationException(
+        "The non-deterministic queue sharding fell back to vanilla behaviour, so every "
+        + "worker still contends for one queue tail.");
+}
+var simRootType = AccessTools.TypeByName("Cosmoteer.Simulation.SimRoot")
+    ?? throw new InvalidOperationException("Cosmoteer.Simulation.SimRoot was not found.");
+var enqueueTarget = AccessTools.DeclaredMethod(simRootType, "EnqueueNonDeterministic")
+    ?? throw new MissingMethodException(simRootType.FullName, "EnqueueNonDeterministic");
+if (Harmony.GetPatchInfo(enqueueTarget)?.Transpilers.Any(patch => patch.owner == smokeId) != true)
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim transpiler was not installed on SimRoot.EnqueueNonDeterministic.");
+}
+var executeQueuedTarget = AccessTools.DeclaredMethod(simRootType, "ExecuteQueued")
+    ?? throw new MissingMethodException(simRootType.FullName, "ExecuteQueued");
+if (Harmony.GetPatchInfo(executeQueuedTarget)?.Postfixes.Any(patch => patch.owner == smokeId) != true)
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim postfix was not installed on SimRoot.ExecuteQueued, so sharded "
+        + "callbacks would never run.");
+}
+
+// Every callback must run exactly once, and each thread's own callbacks must
+// still run in the order that thread posted them - the only ordering vanilla's
+// single queue actually establishes between concurrent producers.
+var shardedEnqueue = AccessTools.DeclaredMethod(shardingPatchType, "ShardedEnqueue")
+    ?? throw new MissingMethodException(shardingPatchType.FullName, "ShardedEnqueue");
+var shardedDrain = AccessTools.DeclaredMethod(shardingPatchType, "Drain")
+    ?? throw new MissingMethodException(shardingPatchType.FullName, "Drain");
+var fakeSim = new object();
+var ranPerThread = new System.Collections.Concurrent.ConcurrentDictionary<int, List<int>>();
+Parallel.For(0, 8, _ =>
+{
+    for (var i = 0; i < 250; i++)
+    {
+        var ordinal = i;
+        var poster = Environment.CurrentManagedThreadId;
+        shardedEnqueue.Invoke(null, new object?[]
+        {
+            fakeSim,
+            new Action(() => ranPerThread.GetOrAdd(poster, static _ => new List<int>()).Add(ordinal)),
+        });
+    }
+});
+shardedDrain.Invoke(null, new object?[] { fakeSim });
+var ranTotal = ranPerThread.Values.Sum(posted => posted.Count);
+if (ranTotal != 8 * 250)
+{
+    throw new InvalidOperationException(
+        $"Sharded queue ran {ranTotal} callbacks, expected {8 * 250}.");
+}
+foreach (var posted in ranPerThread.Values)
+{
+    if (!posted.SequenceEqual(posted.OrderBy(ordinal => ordinal)))
+    {
+        throw new InvalidOperationException(
+            "Sharded queue reordered one thread's own callbacks, which vanilla does not.");
+    }
+}
+// A second drain must find nothing left behind.
+shardedDrain.Invoke(null, new object?[] { fakeSim });
+if (ranPerThread.Values.Sum(posted => posted.Count) != ranTotal)
+{
+    throw new InvalidOperationException("Sharded queue ran a callback twice.");
+}
+
 // Rewritten IL only fails when the method is compiled, which would otherwise be
 // on a moving ship mid-game. Force it here so a malformed branch or an
 // unbalanced stack is an immediate InvalidProgramException instead.
-foreach (var rewritten in new MethodBase[] { thrusterCacheTarget, compareTarget, buildLinesTarget, updateColorTarget }
+foreach (var rewritten in new MethodBase[]
+{
+    thrusterCacheTarget, compareTarget, buildLinesTarget, updateColorTarget, enqueueTarget,
+}
     .Concat(shaderConstantUpdates))
 {
     try
@@ -981,4 +1058,4 @@ foreach (var rewritten in new MethodBase[] { thrusterCacheTarget, compareTarget,
 }
 
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, and streaming-sound start guard patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, and sharded non-deterministic callback queue patches resolved and compiled on this game build.");
