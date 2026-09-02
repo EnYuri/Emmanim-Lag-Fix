@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.0.26
+
+- Stopped a starved audio thread from crashing the whole game.
+  `XA2StreamingSoundInstance.UpdateBuffers` computes
+  `num5 = (int)(totalSubmittedSamples - samplesPlayed)` from a
+  `_totalSubmittedSamples` snapshot taken before its release loop and a
+  `samplesPlayed` value read from the live voice, then derives
+  `sampleStart = (num2 + num5) % TotalSamples`. When the audio updater thread is
+  starved long enough for the voice to play past everything submitted, `num5`
+  goes negative; C#'s `%` keeps the sign of its dividend, so `sampleStart`
+  follows, and `XA2StreamingSound.ReadSamples` throws
+  `ArgumentOutOfRangeException` on the audio thread with no handler above it.
+  That is a hard process crash. It was observed on a four-core client after
+  2h43m of multiplayer, which then deadlocked in `XA2AudioManager.Dispose`'s
+  `Thread.Join` during shutdown and only left the session when the host's ack
+  timeout expired. A guarded prefix maps an out-of-range start back into the
+  sound with the wrap-around the caller already intended. In range - including
+  the end-of-sound value vanilla itself accepts - it changes nothing; out of
+  range, one buffer is read from the wrapped position instead of terminating the
+  process, and the first correction is logged. No simulation, network or
+  lockstep state is touched.
+
 ## 2.0.25
 
 - Removed the box allocated on every shader-constant update. Halfling's

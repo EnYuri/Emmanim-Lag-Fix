@@ -1,4 +1,4 @@
-﻿using EmmanimLagFix.Code;
+using EmmanimLagFix.Code;
 using HarmonyLib;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -917,6 +917,52 @@ if (Harmony.GetPatchInfo(detaching)?.Transpilers.Any(patch => patch.owner == smo
         "PartGraphics.OnPartDetaching was rewritten; it must keep vanilla's unsubscribe.");
 }
 
+// XA2StreamingSound.ReadSamples throws on a negative start sample, which kills
+// the whole process from the audio thread. Applied is set only once every shape
+// guard passed, so an installed-but-fallen-back patch still fails here.
+var streamingPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.StreamingSoundSampleStartPatch",
+    throwOnError: true)!;
+if (AccessTools.Field(streamingPatchType, "Applied").GetValue(null) is not true)
+{
+    throw new InvalidOperationException(
+        "The streaming-sound start guard fell back to vanilla behaviour, so a starved "
+        + "audio thread would still crash the game.");
+}
+var streamingSoundType = AccessTools.TypeByName("Halfling.Audio.XA2.XA2StreamingSound")
+    ?? throw new InvalidOperationException("Halfling.Audio.XA2.XA2StreamingSound was not found.");
+var readSamplesTarget = AccessTools.Method(streamingSoundType, "ReadSamples")
+    ?? throw new MissingMethodException(streamingSoundType.FullName, "ReadSamples");
+if (Harmony.GetPatchInfo(readSamplesTarget)?.Prefixes.Any(patch => patch.owner == smokeId) != true)
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim prefix was not installed on XA2StreamingSound.ReadSamples.");
+}
+// The correction must reproduce the wrap-around UpdateBuffers intended, which is
+// what C#'s sign-preserving % gets wrong, and must leave in-range starts alone
+// - including the end-of-sound value vanilla itself accepts.
+var streamingInRange = AccessTools.Method(streamingPatchType, "InRange")
+    ?? throw new MissingMethodException(streamingPatchType.FullName, "InRange");
+foreach (var (start, total, expected) in new[]
+{
+    (-1L, 1000L, 999L),
+    (-1500L, 1000L, 500L),
+    (-1000L, 1000L, 0L),
+    (0L, 1000L, 0L),
+    (999L, 1000L, 999L),
+    (1000L, 1000L, 1000L),
+    (1001L, 1000L, 1L),
+    (-1L, 0L, 0L),
+})
+{
+    var corrected = (long)streamingInRange.Invoke(null, new object?[] { start, total })!;
+    if (corrected != expected)
+    {
+        throw new InvalidOperationException(
+            $"Start sample {start} of {total} became {corrected}, expected {expected}.");
+    }
+}
+
 // Rewritten IL only fails when the method is compiled, which would otherwise be
 // on a moving ship mid-game. Force it here so a malformed branch or an
 // unbalanced stack is an immediate InvalidProgramException instead.
@@ -935,4 +981,4 @@ foreach (var rewritten in new MethodBase[] { thrusterCacheTarget, compareTarget,
 }
 
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, and status-regulator affected-cell cache patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, and streaming-sound start guard patches resolved and compiled on this game build.");
