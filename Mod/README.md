@@ -162,6 +162,18 @@ updates and text callbacks together, leaving intermediate states such as
 the final committed text through the event sequence expected by Cosmoteer's
 keyboard adapter. Chat logging from 2.0.18 remains enabled.
 
+Version 2.0.24 removes a stutter source rather than a throughput one.
+`StatusValueRegulator.GetAffectedCells()` re-walked the part's region and then
+re-sorted every cell by distance from the part centre each time the regulator
+fired, although both the region and the sort key depend only on the part's own
+fixed geometry. The list is now built once per part and copied out of a cache,
+in the same order and with the same contents, so status application and lockstep
+state are unchanged. It matters because a thread inside a tight sort loop cannot
+reach a garbage-collection safe point: a 60-second trace on a large save caught
+single spans of up to 146 ms in that sort, during which every other thread sits
+spinning. In single player that is a dropped frame; in multiplayer both peers
+freeze together and acks go out late.
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:

@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.0.24
+
+- Stopped `StatusValueRegulator` re-deriving its affected-cell list on every
+  trigger. `GetAffectedCells()` walked the part's region with
+  `Rules.Region.GetExactArea` and then sorted the result by squared distance to
+  `Part.LocalCenter`, so a shield or similar regulator paid a region scan plus an
+  O(n log n) sort each time it fired. Both halves are pure functions of the
+  part's own fixed geometry — the region rules are static and `LocalCenter` does
+  not move — so the list is invariant for the life of the instance and is now
+  built once and copied out of a per-instance cache.
+- The returned cells are byte-identical in the same sorted order, so status
+  application, its callbacks and lockstep state are unchanged.
+- This is a stall fix, not a throughput fix. A 60-second CPU trace on a large
+  save recorded individual spans up to 146 ms whose leaf frame was
+  `List<IntVector2>.Sort` inside `GetAffectedCells`. A thread inside a tight sort
+  loop cannot reach a GC safe point, so a collection requested during one of
+  those spans waits for it while every other thread burns CPU in
+  `SpinWait.SpinOnce`/`Thread.PollGCWorker`. In single player that costs a frame;
+  in lockstep multiplayer it freezes both peers and feeds the documented
+  ack-delay path behind `WaitingForAck`.
+
 ## 2.0.23
 
 - Raised the crew search reach one step, `MaxCrewSearchIterations` 50 to 100.
