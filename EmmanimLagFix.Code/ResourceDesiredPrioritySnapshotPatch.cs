@@ -16,6 +16,13 @@ namespace EmmanimLagFix.Code;
 /// include a full scan of off-ship assigned crew. Capture each relevant result
 /// once immediately before ResourceManager's parallel sink-job pass, publish
 /// the completed dictionary read-only, and discard it when the pass ends.
+///
+/// The snapshot covers the ship's own resource desires, which are a handful of
+/// entries, rather than being discovered by walking every sink and source. That
+/// walk cost 222 ms of a 20-second host profile on a large ship - more than the
+/// work it was preparing - while the totals it feeds cost about 4 ms. Desires
+/// are a superset of the types the old walk could reach, so every lookup that
+/// resolved before still resolves, with the same value.
 /// </summary>
 [HarmonyPatch]
 internal static class ResourceDesiredPrioritySnapshotPatch
@@ -40,14 +47,13 @@ internal static class ResourceDesiredPrioritySnapshotPatch
         state.Types.Clear();
         state.Values.Clear();
 
-        foreach (var source in __instance._sources)
+        var desires = __instance.Ship.Metadata.ResourceDesires;
+        if (desires is not null)
         {
-            AddIfDesired(source.Source.ResourceType);
-        }
-        foreach (var sink in __instance._sinks)
-        {
-            AddIfDesired(sink.Sink.ResourceType);
-            AddIfDesired(sink.SourceType);
+            foreach (var desire in desires)
+            {
+                AddIfDesired(desire.Key);
+            }
         }
 
         foreach (var resourceType in state.Types)

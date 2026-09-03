@@ -1002,11 +1002,16 @@ var shardedDrain = AccessTools.DeclaredMethod(shardingPatchType, "Drain")
     ?? throw new MissingMethodException(shardingPatchType.FullName, "Drain");
 var fakeSim = new object();
 var ranPerThread = new System.Collections.Concurrent.ConcurrentDictionary<int, List<int>>();
+// Parallel.For may run several iterations on one thread, so the ordinal has to
+// be globally increasing rather than restarting per iteration; otherwise a
+// thread that ran two iterations records a legitimately ordered drain as
+// unsorted.
+var postOrdinal = 0;
 Parallel.For(0, 8, _ =>
 {
     for (var i = 0; i < 250; i++)
     {
-        var ordinal = i;
+        var ordinal = Interlocked.Increment(ref postOrdinal);
         var poster = Environment.CurrentManagedThreadId;
         shardedEnqueue.Invoke(null, new object?[]
         {
@@ -1094,5 +1099,96 @@ foreach (var rewritten in new MethodBase[]
     }
 }
 
+// The contiguous-set breadth-first search now runs an Emmanim replacement whose
+// visited set is emptied in proportion to the sets actually visited, instead of
+// zeroing a pooled hash set's whole bucket array on every search. Applied is set
+// only when the vanilla target resolved with the expected signature and return
+// type.
+var searchSetsPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.PathContiguitySearchSetsPatch",
+    throwOnError: true)!;
+if (AccessTools.Property(searchSetsPatchType, "Applied")!.GetValue(null) is not true)
+{
+    throw new InvalidOperationException(
+        "The contiguous-set search patch did not resolve its target, so every search still "
+        + "clears the whole pooled bucket array.");
+}
+
+var pathContiguityType = gameAssembly.GetType(
+    "Cosmoteer.Ships.Crew.Pathing.PathContiguityManager", throwOnError: true)!;
+var contiguousSetType = gameAssembly.GetType(
+    "Cosmoteer.Ships.Crew.Pathing.ContiguousPathSet", throwOnError: true)!;
+var intRectType = halflingAssembly.GetType("Halfling.Geometry.IntRect", throwOnError: true)!;
+var searchOriginsType = typeof(IReadOnlyList<>).MakeGenericType(
+    typeof(ValueTuple<,>).MakeGenericType(contiguousSetType, intRectType));
+var searchSetsTarget = pathContiguityType.GetMethod(
+    "SearchSetsFrom",
+    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+    binder: null,
+    new[] { searchOriginsType, typeof(Nullable<>).MakeGenericType(intRectType) },
+    modifiers: null)
+    ?? throw new MissingMethodException(pathContiguityType.FullName, "SearchSetsFrom");
+if (Harmony.GetPatchInfo(searchSetsTarget)?.Prefixes.Any(patch => patch.owner == smokeId) != true)
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim prefix was not installed on PathContiguityManager.SearchSetsFrom.");
+}
+
+// Dropping a visited mark would turn the breadth-first walk into an infinite
+// one, so prove both emptying branches leave the set genuinely empty and that
+// a recycled scratch treats previously seen sets as unseen. Reference equality
+// is all the game's sets use, so uninitialized instances are valid keys.
+var scratchType = searchSetsPatchType.GetNestedType("SearchScratch", BindingFlags.NonPublic)!;
+var scratchRent = AccessTools.Method(scratchType, "Rent")!;
+var scratchAdd = AccessTools.Method(scratchType, "Add")!;
+var scratchRelease = AccessTools.Method(scratchType, "Release")!;
+var visitedField = AccessTools.Field(scratchType, "_visited")!;
+
+var sets = Enumerable.Range(0, 1024)
+    .Select(_ => RuntimeHelpers.GetUninitializedObject(contiguousSetType))
+    .ToArray();
+
+foreach (var visitCount in new[] { sets.Length, 3 })
+{
+    var scratch = scratchRent.Invoke(null, null)!;
+    for (var i = 0; i < visitCount; i++)
+    {
+        if (scratchAdd.Invoke(scratch, new[] { sets[i] }) is not true)
+        {
+            throw new InvalidOperationException(
+                $"Visiting set {i} of {visitCount} was reported as already visited.");
+        }
+
+        if (scratchAdd.Invoke(scratch, new[] { sets[i] }) is not false)
+        {
+            throw new InvalidOperationException(
+                $"Set {i} of {visitCount} was accepted twice, so the search would not terminate.");
+        }
+    }
+
+    scratchRelease.Invoke(scratch, null);
+    var visited = visitedField.GetValue(scratch)!;
+    var remaining = (int)visited.GetType().GetProperty("Count")!.GetValue(visited)!;
+    if (remaining != 0)
+    {
+        throw new InvalidOperationException(
+            $"Releasing a scratch that visited {visitCount} sets left {remaining} behind.");
+    }
+
+    var reused = scratchRent.Invoke(null, null)!;
+    if (!ReferenceEquals(reused, scratch))
+    {
+        throw new InvalidOperationException("The released search scratch was not pooled for reuse.");
+    }
+
+    if (scratchAdd.Invoke(reused, new object[] { sets[0] }) is not true)
+    {
+        throw new InvalidOperationException(
+            "A recycled search scratch still considered a previously visited set as visited.");
+    }
+
+    scratchRelease.Invoke(reused, null);
+}
+
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, and throttled codex show-conditions patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, and throttled codex show-conditions patches resolved and compiled on this game build.");

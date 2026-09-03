@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.0.29
+
+- Replaced the contiguous-set breadth-first search's visited marker. Vanilla
+  `PathContiguityManager.SearchSetsFrom` marks visited sets in a pooled
+  `TempHashSet<ContiguousPathSet>`, and that pool is global per type: once a
+  single whole-ship search has grown it, every later search pays a
+  `HashSet.Clear` that zeroes the entire bucket array no matter how few sets
+  were actually visited. The resource source search runs this thousands of times
+  per second, and a 20-second host profile of a two-player session attributed
+  647 ms - about 41% of all source-search time - to that one `Array.Clear`.
+  The search now empties its visited set in proportion to the sets it really
+  visited, falling back to a plain clear when the set was filled densely enough
+  that clearing is the cheaper of the two.
+- That replacement is behaviour-identical rather than an approximation: the seed
+  loop, queue order, yielded values, deferred execution and exception behaviour
+  are preserved, including vanilla's unconditional enqueue of a repeated search
+  origin. The visited set is only ever probed with `Add` and never enumerated,
+  so nothing can depend on its internal layout. A peer running a different build
+  therefore still simulates identically.
+- Narrowed the resource-desire snapshot's own preparation. It discovered which
+  resource types to snapshot by walking every sink and every source on the ship,
+  which on a large ship cost 222 ms of the same profile - more than the work it
+  was preparing, whose totals cost about 4 ms. It now reads the ship's own
+  resource desires directly, a few dozen entries. Desires are a superset of the
+  types that walk could reach, so every lookup that resolved before still
+  resolves, with the same value.
+- The multiplayer diagnostic log line now carries a per-player breakdown when
+  `multiplayer-memory-diagnostics.flag` is present: each player's queued input
+  ticks, the fraction of frames vanilla itself recorded them as delaying the
+  game, and their latency. The existing summed `inputQueued` cannot say which
+  peer is failing to supply inputs, which is exactly the question an input-tick
+  stall poses. It is read-only and changes no queue or simulation state.
+
 ## 2.0.28
 
 - Stopped the tutorial/lore codex from running its IronPython show-conditions on

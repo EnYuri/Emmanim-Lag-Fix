@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Text;
 using Cosmoteer.Game.Multiplayer;
 using HarmonyLib;
 
@@ -20,6 +21,26 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         "..",
         "multiplayer-memory-diagnostics.flag")));
 
+    /// <summary>
+    /// Per-frame samples of each player's lockstep input queue. The summed
+    /// <c>inputQueued</c> field cannot say which peer is failing to supply
+    /// inputs; vanilla's own <see cref="MPPlayer.IsDelayingGame"/> can, but it
+    /// is only meaningful at the instant the readiness gate ran, so it is
+    /// sampled every frame and reported as a fraction. Read-only.
+    /// </summary>
+    private sealed class PlayerSample
+    {
+        public string Name = string.Empty;
+        public bool IsLocal;
+        public long Frames;
+        public long DelayingFrames;
+        public long QueueSum;
+        public int LastQueue;
+        public double LatencyMs;
+    }
+
+    private static readonly Dictionary<object, PlayerSample> Samples = new();
+
     private static long _nextReport = Stopwatch.GetTimestamp() + ReportIntervalTicks;
     private static int _lastGen0 = GC.CollectionCount(0);
     private static int _lastGen1 = GC.CollectionCount(1);
@@ -32,6 +53,8 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             return;
         }
 
+        SamplePlayers(__instance);
+
         var now = Stopwatch.GetTimestamp();
         var next = Volatile.Read(ref _nextReport);
         if (now < next || Interlocked.CompareExchange(ref _nextReport, now + ReportIntervalTicks, next) != next)
@@ -40,6 +63,56 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         }
 
         WriteReport(__instance);
+    }
+
+    private static void SamplePlayers(BaseMPManager manager)
+    {
+        var localID = manager.LocalPlayerID;
+        foreach (var player in manager._playerInfos.Values)
+        {
+            if (!Samples.TryGetValue(player, out var sample))
+            {
+                sample = new PlayerSample();
+                Samples.Add(player, sample);
+            }
+
+            sample.Name = player.Name;
+            sample.IsLocal = player.PlayerID == localID;
+            sample.Frames++;
+            if (player.IsDelayingGame)
+            {
+                sample.DelayingFrames++;
+            }
+
+            sample.LastQueue = player.QueuedInputTicks;
+            sample.QueueSum += sample.LastQueue;
+            sample.LatencyMs = player.Latency.Milliseconds;
+        }
+    }
+
+    private static string FormatPlayerSamples()
+    {
+        var text = new StringBuilder();
+        foreach (var sample in Samples.Values)
+        {
+            if (text.Length > 0)
+            {
+                text.Append('|');
+            }
+
+            var name = sample.Name.Replace(' ', '_').Replace('|', '_').Replace('=', '_');
+            var delaying = sample.Frames > 0 ? sample.DelayingFrames * 100d / sample.Frames : 0d;
+            var averageQueue = sample.Frames > 0 ? sample.QueueSum / (double)sample.Frames : 0d;
+            text.Append(name)
+                .Append(sample.IsLocal ? ":local" : ":remote")
+                .Append(",q=").Append(sample.LastQueue)
+                .Append(",avg=").Append(averageQueue.ToString("F1"))
+                .Append(",delay=").Append(delaying.ToString("F1")).Append('%')
+                .Append(",lat=").Append(sample.LatencyMs.ToString("F0")).Append("ms");
+        }
+
+        Samples.Clear();
+        return text.Length > 0 ? text.ToString() : "none";
     }
 
     private static void WriteReport(BaseMPManager manager)
@@ -116,7 +189,8 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"sentKiBs={bytesPerSecond / 1024d:F1} recordingMiB={ToMiB(recordingBytes):F1} " +
             $"game={RuntimeHelpers.GetHashCode(manager.Game):X8} sim={RuntimeHelpers.GetHashCode(sim):X8} " +
             $"ships={sim.Ships.Count} parts={liveParts}/{blueprintParts} " +
-            $"stasis={sim.Stasis.Count}/{preloadedStasis} decals={decalPickers}/{decalItems}");
+            $"stasis={sim.Stasis.Count}/{preloadedStasis} decals={decalPickers}/{decalItems} " +
+            $"perPlayer=[{FormatPlayerSamples()}]");
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;
