@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.0.30
+
+- Applied 2.0.29's visited-set fix to the place it turned out to cost the most.
+  `ResourceManager.SearchForSources` marks the sources it has already considered
+  in a pooled `TempHashSet<SourceInfo>`; the pool is global per closed type, so
+  once one sink on a large ship has grown the set, every later sink pays a
+  `HashSet.Clear` that zeroes the whole bucket array however few sources it
+  actually saw. This runs once per sink per fixed update, in parallel, inside
+  `ResourceManager.FixedUpdate` - 52.9% of all `ParallelFixedUpdate` time on a
+  421-ship host - and a 20-second profile attributed 613.4 ms to that single
+  `Array.Clear`, the largest zeroing cost anywhere in the process.
+- The method is far too large to reimplement safely, so it is repaired in place:
+  a transpiler routes its allocation and its three `Add` calls through helpers
+  that record what was added, and a replacement pool deinitializer empties the
+  set in proportion to that record instead of to its capacity. The set is only
+  ever probed with `Add` and never enumerated, so nothing observable can depend
+  on its internal layout, and an emptied set is indistinguishable from a cleared
+  one. Any round the patch did not see from allocation to disposal - a nested
+  allocation, a set recycled by another call site, a shape that stopped matching
+  - falls back to Halfling's own deinitializer, so behaviour is identical to
+  vanilla in every case and a peer on a different build still simulates the same.
+- Verified 2.0.29's two optimizations on a live 20-second host trace: the
+  contiguity search's 647 ms `Array.Clear` is gone, and the resource-desire
+  snapshot's preparation fell from 277 ms to nothing.
+
 ## 2.0.29
 
 - Replaced the contiguous-set breadth-first search's visited marker. Vanilla

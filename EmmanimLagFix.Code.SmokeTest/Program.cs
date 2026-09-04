@@ -1,4 +1,4 @@
-using EmmanimLagFix.Code;
+﻿using EmmanimLagFix.Code;
 using HarmonyLib;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -1190,5 +1190,99 @@ foreach (var visitCount in new[] { sets.Length, 3 })
     scratchRelease.Invoke(reused, null);
 }
 
+// The resource source search now records what it marked as visited and empties
+// its pooled set in proportion to that record, instead of zeroing the whole
+// bucket array once per sink per fixed update.
+var sourceVisitedPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.ResourceSourceVisitedSetPatch",
+    throwOnError: true)!;
+if (AccessTools.Property(sourceVisitedPatchType, "Applied")!.GetValue(null) is not true)
+{
+    throw new InvalidOperationException(
+        "The resource source visited-set patch did not match its target, so every sink still "
+        + "clears the whole pooled bucket array.");
+}
+
+if (Harmony.GetPatchInfo(resourceSearchTarget)?.Transpilers.Any(patch => patch.owner == smokeId) != true)
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim transpiler was not installed on ResourceManager.SearchForSources(SinkInfo).");
+}
+
+try
+{
+    RuntimeHelpers.PrepareMethod(resourceSearchTarget.MethodHandle);
+}
+catch (Exception e)
+{
+    throw new InvalidOperationException(
+        $"Rewritten ResourceManager.SearchForSources failed to compile: {e.Message}", e);
+}
+
+// A source left behind would be treated as already considered by the next sink
+// that happened to reuse the pooled set, silently dropping it from that sink's
+// candidates. Prove both emptying branches and the untracked fallback all leave
+// the set genuinely empty. The game's sets use reference equality only, so
+// uninitialized instances are valid keys.
+var sourceInfoType = resourceManagerType.GetNestedType("SourceInfo", BindingFlags.NonPublic)
+    ?? throw new TypeLoadException("ResourceManager.SourceInfo was not found.");
+var allocTracked = AccessTools.Method(sourceVisitedPatchType, "AllocTracked")!;
+var trackedAdd = AccessTools.Method(sourceVisitedPatchType, "TrackedAdd")!;
+var setCountProperty = typeof(HashSet<>).MakeGenericType(sourceInfoType).GetProperty("Count")!;
+
+var sources = Enumerable.Range(0, 1024)
+    .Select(_ => RuntimeHelpers.GetUninitializedObject(sourceInfoType))
+    .ToArray();
+
+// Dense first so the pooled set's capacity is grown, then sparse, which is the
+// case the patch exists for; the second round reuses the same grown instance.
+foreach (var visitCount in new[] { sources.Length, 3, 0 })
+{
+    var trackedSet = allocTracked.Invoke(null, null)!;
+    for (var i = 0; i < visitCount; i++)
+    {
+        if (trackedAdd.Invoke(null, new[] { trackedSet, sources[i] }) is not true)
+        {
+            throw new InvalidOperationException(
+                $"Source {i} of {visitCount} was reported as already considered.");
+        }
+
+        if (trackedAdd.Invoke(null, new[] { trackedSet, sources[i] }) is not false)
+        {
+            throw new InvalidOperationException(
+                $"Source {i} of {visitCount} was accepted twice, so the sink would double-count it.");
+        }
+    }
+
+    ((IDisposable)trackedSet).Dispose();
+    var leftOver = (int)setCountProperty.GetValue(trackedSet)!;
+    if (leftOver != 0)
+    {
+        throw new InvalidOperationException(
+            $"Disposing a set that considered {visitCount} sources left {leftOver} behind.");
+    }
+}
+
+// A round the patch never saw allocated must still be emptied by Halfling's own
+// deinitializer, which is the fallback for every shape it does not recognize.
+var tempHashSetType = halflingAssembly.GetType("Halfling.Pooling.TempHashSet`1", throwOnError: true)!
+    .MakeGenericType(sourceInfoType);
+var untrackedSet = tempHashSetType.GetMethod("Alloc", BindingFlags.Public | BindingFlags.Static, binder: null, Type.EmptyTypes, modifiers: null)!
+    .Invoke(null, null)!;
+var plainAdd = tempHashSetType.GetMethod("Add", new[] { sourceInfoType })!;
+for (var i = 0; i < 5; i++)
+{
+    plainAdd.Invoke(untrackedSet, new[] { sources[i] });
+}
+
+((IDisposable)untrackedSet).Dispose();
+var untrackedLeftOver = (int)setCountProperty.GetValue(untrackedSet)!;
+if (untrackedLeftOver != 0)
+{
+    throw new InvalidOperationException(
+        $"An untracked set kept {untrackedLeftOver} sources, so the vanilla fallback was lost.");
+}
+
+
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, and throttled codex show-conditions patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, and throttled codex show-conditions patches resolved and compiled on this game build.");
