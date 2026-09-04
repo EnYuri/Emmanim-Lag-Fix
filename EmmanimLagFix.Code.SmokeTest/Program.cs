@@ -1284,5 +1284,168 @@ if (untrackedLeftOver != 0)
 }
 
 
+// Every status dictionary the game enumerates through an interface now goes
+// through a pooled wrapper around the dictionary's own struct enumerator.
+// Applied is set only once every one of the thirteen target methods resolved
+// and really had a call rewritten.
+var statusPoolPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.StatusEnumeratorPoolPatch",
+    throwOnError: true)!;
+if (AccessTools.Property(statusPoolPatchType, "Applied")!.GetValue(null) is not true)
+{
+    throw new InvalidOperationException(
+        "The status enumerator pool patch did not resolve its targets, so every status "
+        + "lookup still boxes a dictionary enumerator.");
+}
+
+// The rewrite moves an interface call to a static one of the same shape inside
+// a try/finally, so malformed IL has to fail here rather than on the first shot
+// that lands on a part.
+foreach (var statusTarget in new (Type Type, string Method)[]
+{
+    (gameAssembly.GetType("Cosmoteer.Ships.Parts.Part", throwOnError: true)!, "GetDamageResistance"),
+    (gameAssembly.GetType("Cosmoteer.Ships.Parts.Part", throwOnError: true)!, "GetStatusResistance"),
+    (gameAssembly.GetType("Cosmoteer.Ships.Parts.Part", throwOnError: true)!, "ModifyPenetrationResistance"),
+    (gameAssembly.GetType("Cosmoteer.Ships.Parts.Crew.PartCrew", throwOnError: true)!, "IsBlockedByStatuses"),
+})
+{
+    var resolved = AccessTools.Method(statusTarget.Type, statusTarget.Method)
+        ?? throw new MissingMethodException(statusTarget.Type.FullName, statusTarget.Method);
+    if (Harmony.GetPatchInfo(resolved)?.Transpilers.Any(patch => patch.owner == smokeId) != true)
+    {
+        throw new InvalidOperationException(
+            $"Expected Emmanim transpiler was not installed on {statusTarget.Type.Name}.{statusTarget.Method}.");
+    }
+
+    RuntimeHelpers.PrepareMethod(resolved.MethodHandle);
+}
+
+// Both HitEffectParams.Alloc overloads carry a rewritten call, so neither can
+// be addressed by name alone.
+foreach (var allocOverload in AccessTools
+    .GetDeclaredMethods(gameAssembly.GetType("Cosmoteer.Simulation.HitEffects.HitEffectParams", throwOnError: true)!)
+    .Where(method => method.Name == "Alloc"))
+{
+    if (Harmony.GetPatchInfo(allocOverload)?.Transpilers.Any(patch => patch.owner == smokeId) != true)
+    {
+        throw new InvalidOperationException(
+            "Expected Emmanim transpiler was not installed on a HitEffectParams.Alloc overload.");
+    }
+
+    RuntimeHelpers.PrepareMethod(allocOverload.MethodHandle);
+}
+
+// A pooled enumerator that skipped or repeated an entry would silently corrupt
+// resistance and status-effect results, and one handed out twice would make two
+// loops share a cursor. StatusType only has to be a key here, so uninitialized
+// instances are enough - the dictionary compares them by reference.
+{
+    var statusTypeType = gameAssembly.GetType("Cosmoteer.Ships.Statuses.StatusType", throwOnError: true)!;
+    var dictionaryType = typeof(Dictionary<,>).MakeGenericType(statusTypeType, typeof(object));
+    var dictionary = Activator.CreateInstance(dictionaryType)!;
+    var add = dictionaryType.GetMethod("Add")!;
+    var expected = new List<object>();
+    for (var i = 0; i < 64; i++)
+    {
+        var value = new object();
+        expected.Add(value);
+        add.Invoke(dictionary, new[] { RuntimeHelpers.GetUninitializedObject(statusTypeType), value });
+    }
+
+    var values = dictionaryType.GetProperty("Values")!.GetValue(dictionary)!;
+    var rentValues = AccessTools.Method(statusPoolPatchType, "RentValues")!
+        .MakeGenericMethod(typeof(object));
+    var rentPairs = AccessTools.Method(statusPoolPatchType, "RentPairs")!
+        .MakeGenericMethod(typeof(object));
+
+    static List<object> Drain(IEnumerator<object> enumerator)
+    {
+        var seen = new List<object>();
+        try
+        {
+            while (enumerator.MoveNext())
+            {
+                seen.Add(enumerator.Current);
+            }
+        }
+        finally
+        {
+            enumerator.Dispose();
+        }
+
+        return seen;
+    }
+
+    var first = (IEnumerator<object>)rentValues.Invoke(null, new[] { values })!;
+    var seenValues = Drain(first);
+    if (!seenValues.SequenceEqual(expected))
+    {
+        throw new InvalidOperationException(
+            $"The pooled value enumerator yielded {seenValues.Count} of {expected.Count} values, "
+            + "or yielded them in a different order than the dictionary does.");
+    }
+
+    // Disposal must hand the instance back, or the patch allocates exactly as
+    // much as the boxing it replaced.
+    var second = (IEnumerator<object>)rentValues.Invoke(null, new[] { values })!;
+    if (!ReferenceEquals(first, second))
+    {
+        throw new InvalidOperationException(
+            "A disposed pooled value enumerator was not reused, so nothing is being pooled.");
+    }
+
+    // A nested enumeration must never be handed the instance the outer loop is
+    // still walking.
+    var nested = (IEnumerator<object>)rentValues.Invoke(null, new[] { values })!;
+    if (ReferenceEquals(second, nested))
+    {
+        throw new InvalidOperationException(
+            "Two live pooled value enumerators are the same instance, so they share a cursor.");
+    }
+
+    nested.Dispose();
+    second.Dispose();
+    // Disposing twice must not put the same instance on the free list twice.
+    second.Dispose();
+    var afterDoubleDispose = (IEnumerator<object>)rentValues.Invoke(null, new[] { values })!;
+    var alsoAfterDoubleDispose = (IEnumerator<object>)rentValues.Invoke(null, new[] { values })!;
+    if (ReferenceEquals(afterDoubleDispose, alsoAfterDoubleDispose))
+    {
+        throw new InvalidOperationException(
+            "A double disposal put one pooled value enumerator on the free list twice.");
+    }
+
+    afterDoubleDispose.Dispose();
+    alsoAfterDoubleDispose.Dispose();
+
+    var pairs = (IEnumerator<KeyValuePair<object, object>>?)null;
+    var pairEnumerator = rentPairs.Invoke(null, new[] { dictionary })!;
+    var pairValues = new List<object>();
+    var pairMoveNext = pairEnumerator.GetType().GetMethod("MoveNext")!;
+    var pairCurrent = pairEnumerator.GetType().GetProperty("Current")!;
+    while ((bool)pairMoveNext.Invoke(pairEnumerator, null)!)
+    {
+        var pair = pairCurrent.GetValue(pairEnumerator)!;
+        pairValues.Add(pair.GetType().GetProperty("Value")!.GetValue(pair)!);
+    }
+
+    ((IDisposable)pairEnumerator).Dispose();
+    _ = pairs;
+    if (!pairValues.SequenceEqual(expected))
+    {
+        throw new InvalidOperationException(
+            $"The pooled pair enumerator yielded {pairValues.Count} of {expected.Count} entries, "
+            + "or yielded them in a different order than the dictionary does.");
+    }
+
+    // Anything that is not the expected dictionary has to fall through to
+    // vanilla's own enumerator rather than being dropped.
+    var fallback = (IEnumerator<object>)rentValues.Invoke(null, new object[] { expected })!;
+    if (!Drain(fallback).SequenceEqual(expected))
+    {
+        throw new InvalidOperationException(
+            "A non-dictionary source did not fall back to its own enumerator.");
+    }
+}
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, and throttled codex show-conditions patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, and pooled status-dictionary enumeration patches resolved and compiled on this game build.");

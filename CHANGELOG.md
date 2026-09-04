@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.0.32
+
+- Stopped boxing a dictionary enumerator on every status lookup. A part keeps
+  its statuses in a `Dictionary<StatusType, IStatusLocationInfo>` but exposes it
+  as `IReadOnlyDictionary`, and the ship status manager exposes its handler
+  dictionaries as `IEnumerable`; enumerating either through the interface boxes
+  the struct enumerator. `Part` shows this was unintended - its two loops that
+  read the private field allocate nothing, while the three that go through the
+  public property allocate one each, on the damage-resistance,
+  status-resistance and penetration-resistance paths.
+- A ten-second allocation trace on a 900-ship host made these the two largest
+  entries in the whole profile: 21.24 MiB of `Enumerator<StatusType,
+  IStatusLocationInfo>` and 9.96 MiB of `Enumerator<StatusType,
+  TileStatusHandler>`, together 19% of everything the process allocated. That
+  matters more than its own cost, because the same session spent 40% of all CPU
+  in `PollGCWorker` and 24% in `SpinOnce`: Halfling's parallel workers spin
+  rather than block, so every stop-the-world pause is multiplied by the worker
+  count and the lever is the allocation rate, not the hotspot.
+- A transpiler replaces only the interface `GetEnumerator` call with a pooled
+  wrapper around the dictionary's own struct enumerator, so the iteration, its
+  order and its collection-modified check are unchanged and the result is
+  bit-identical. The wrapper returns itself to a per-thread free list when the
+  foreach disposes it; a nested enumeration gets its own instance and a double
+  disposal cannot put one on the list twice. Anything that is not the expected
+  dictionary falls through to vanilla's boxed enumerator.
+- The fifteen call sites are the complete set in `Cosmoteer.dll`, across
+  thirteen methods: three on `Part`, `PartCrew.IsBlockedByStatuses`, both
+  `HitEffectParams.Alloc` overloads, both `PopulateStatuses` overloads on each
+  status effect data provider plus the tile provider's local function, and
+  `ShipStatusManager`'s player-source and junked-ship clears. Every target is
+  required to yield at least one rewrite, so a shape change disables the patch
+  rather than silently covering less than it claims.
+
 ## 2.0.31
 
 - The two memory diagnostics switches now ship enabled. They were gitignored, so
