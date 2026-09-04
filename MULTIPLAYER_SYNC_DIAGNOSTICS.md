@@ -412,3 +412,58 @@ samples, and two calls separated by less than a sample interval merge into one.
 Percentiles computed from them approximate frame time only loosely, and counts
 of dispatch operations such as `FastParallel.RunParallelBatch` are sample counts
 that undercount short calls. Do not quote them as rates.
+
+## 2026-09-04: the client is the lockstep limiter (resolved)
+
+The `perPlayer=[...]` field added in 2.0.29 answers, from the host log alone, the
+question this document previously said needed a client-side log. A two-player
+host session (log `2026-09-04 20_13_16.txt`, six one-minute rows) reads:
+
+```
+perPlayer=[Nayuri:local,q=3,avg=3.0,delay=0.0%,lat=0ms|MIMMIMME:remote,q=0,avg=0.1,delay=37.9%,lat=79ms]
+perPlayer=[Nayuri:local,q=4,avg=3.4,delay=0.0%,lat=0ms|MIMMIMME:remote,q=1,avg=0.1,delay=51.2%,lat=65ms]
+```
+
+The local host never delays a tick and keeps its input queue full (avg 3.0-7.8).
+The remote peer holds an essentially empty queue (avg 0.0-0.4) and is the player
+`IsReadyForTick` is waiting on for 38-52% of frames. Latency stays at 46-79 ms
+throughout, so this is not the network path: the client's own simulation cannot
+produce input ticks fast enough. **The stutter is client-side CPU, not host
+scene size and not transport.**
+
+One row lists four entries rather than two. `Samples` is keyed by the `MPPlayer`
+object, and a resync constructs new ones, so both generations appear in the
+minute that spans the resync. That is a reading artifact, not double counting.
+
+## 2026-09-04: 2.0.29 optimizations measured live
+
+Same-session 20-second CPU trace, host, 421-444 ships, `ParallelFixedUpdate`
+5,117.7 ms (baseline 6,680 ms at comparable scene size).
+
+| target | 2.0.28 | 2.0.29 |
+| --- | --- | --- |
+| `Array.Clear` under the contiguity path search | 647 ms | absent |
+| whole `SearchSetsFrom` subtree | — | 196.3 ms, half of it `HashSet.AddIfNotPresent` |
+| `ResourceDesiredPrioritySnapshotPatch.Prefix` | 277 ms | 0.0 ms |
+
+Both landed. The path search's remaining cost is the hashing itself, which is
+the work the search actually has to do.
+
+### The same bug is now the largest single item elsewhere
+
+`ZeroMemoryInternal` still totals 679.0 ms, and **613.4 ms of it is one stack**:
+
+```
+ResourceManager.SearchForSources_Patch2
+  -> Halfling.Pooling.ObjectPool`1.Recycle
+    -> Halfling.Pooling.TempHashSet`1+<>c.<.cctor>b__0_1
+      -> System.Buffer.ZeroMemoryInternal
+```
+
+That is the identical failure mode 2.0.29 fixed for path contiguity — a pooled
+`TempHashSet` whose deinitializer calls `Clear()`, zeroing the whole grown bucket
+array on every recycle rather than the few entries actually added. It is now the
+top candidate, and it sits inside `ResourceManager.FixedUpdate`, which is 2,704.8
+ms (52.9%) of `ParallelFixedUpdate` — squarely on the lockstep-critical path.
+`PathManager.SearchPartsFrom`'s own `TempHashSet` recycle is down to 4.1 ms and
+is not worth touching.
