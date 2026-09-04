@@ -91,7 +91,8 @@ $required = @(
     'mod.rules', 'README.md', 'logo.png',
     'Install.bat', 'Install.ps1', 'Uninstall.bat', 'Uninstall.ps1',
     'Loader\winmm.dll', 'Loader\ModLoader.dll', 'Loader\LICENSE.LGPL-2.1.txt',
-    'Code\EmmanimLagFix.Code.dll', 'Code\0Harmony.dll', 'Code\LICENSE.Harmony.txt'
+    'Code\EmmanimLagFix.Code.dll', 'Code\0Harmony.dll', 'Code\LICENSE.Harmony.txt',
+    'multiplayer-memory-diagnostics.flag', 'singleplayer-memory-diagnostics.flag'
 )
 foreach ($name in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $mod $name))) { throw "Package file missing: $name" }
@@ -108,6 +109,12 @@ Copy-Item -LiteralPath $mod -Destination $payload -Recurse -Force
 # .workshop pins a Steam Workshop item id and means nothing in a GitHub release.
 $workshop = Join-Path $payload '.workshop'
 if (Test-Path -LiteralPath $workshop) { Remove-Item -LiteralPath $workshop -Force }
+
+# The memory switches ship enabled; the Korean IME capture does not. It logs
+# every composition event and produced 99.3% of one session's log lines, so a
+# developer's local copy must never reach a release.
+$ime = Join-Path $payload 'korean-ime-diagnostics.flag'
+if (Test-Path -LiteralPath $ime) { Remove-Item -LiteralPath $ime -Force }
 
 $zip = Join-Path $OutputDir "Emmanim-Lag-Fix-$version.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }

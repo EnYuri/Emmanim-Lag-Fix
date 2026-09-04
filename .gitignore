@@ -437,7 +437,8 @@ artifacts/
 # Emmanim: native doorstop output and packed release archives
 /build/
 
-# Opt-in diagnostic switches. Local only: shipping one turns diagnostics on
-# for every player, and the Korean IME capture alone produced 99.3% of the
-# log lines in one session.
-Mod/*.flag
+# The Korean IME capture stays local: it alone produced 99.3% of the log lines
+# in one session. The two memory switches ship enabled - they write one line a
+# minute, and a multiplayer stall can only be attributed by comparing the same
+# minute on both peers, which needs the remote side reporting too.
+Mod/korean-ime-diagnostics.flag

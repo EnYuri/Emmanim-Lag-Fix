@@ -1,0 +1,5 @@
+Delete this file to stop the single-player diagnostics line.
+
+While it is present, one line a minute is written to your Cosmoteer log
+(Saved Games\Cosmoteer\<id>\Logs\log <date>.txt) recording memory, GC counts
+and simulation size. It is read-only.

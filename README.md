@@ -74,6 +74,20 @@ memory peak, frame-coupled ACK path, implemented timeout/buffer mitigations and
 the constraints for a future dedicated ACK pump are documented in
 [MULTIPLAYER_SYNC_DIAGNOSTICS.md](MULTIPLAYER_SYNC_DIAGNOSTICS.md).
 
+## Diagnostics logging
+
+The mod ships two switches enabled, `multiplayer-memory-diagnostics.flag` and
+`singleplayer-memory-diagnostics.flag` in the mod folder. While a switch is
+present, one line a minute is written to the Cosmoteer log
+(`Saved Games\Cosmoteer\<id>\Logs\log <date>.txt`) recording memory, GC
+counts, simulation size and, in multiplayer, each player's lockstep input queue
+and whether that player is the one holding the readiness gate. The sampling is
+read-only: it never touches a queue, a resource or the simulation.
+
+Both peers need the multiplayer switch. The host's line names which player is
+delaying the game, but only the same minute in that player's own log says
+whether the cause is on their side. Delete a flag file to turn its line off.
+
 ## Repository layout
 
 ```text

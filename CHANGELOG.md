@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.0.31
+
+- The two memory diagnostics switches now ship enabled. They were gitignored, so
+  a clean CI checkout built every release without them and the release workflow
+  additionally refused to publish if one was present - which meant nobody who
+  installed from a release ever produced a diagnostics line. Nothing about the
+  logging changed; only whether the file that turns it on reaches a player.
+- This matters for multiplayer specifically. The patch is role-agnostic and the
+  host's line already names which player is holding the lockstep readiness gate,
+  but it cannot say why. That needs the same minute in that player's own log,
+  which needs the switch on their install. A recent host capture showed the
+  remote peer holding the gate 40-79% of frames with an empty queue and normal
+  latency; the other half of that evidence was unobtainable.
+- The Korean IME capture stays local and is now excluded explicitly rather than
+  by the blanket rule: it logs every composition event and produced 99.3% of one
+  session's log lines. `Pack.ps1` drops it from the payload, the release workflow
+  fails on any flag that is not one of the two memory switches, and both flag
+  files were rewritten as player-facing notes explaining what is logged, where it
+  is written, and that deleting the file turns it off.
+
 ## 2.0.30
 
 - Applied 2.0.29's visited-set fix to the place it turned out to cost the most.

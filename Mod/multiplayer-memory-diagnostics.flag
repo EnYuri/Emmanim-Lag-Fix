@@ -1,0 +1,9 @@
+Delete this file to stop the multiplayer diagnostics line.
+
+While it is present, one line a minute is written to your Cosmoteer log
+(Saved Games\Cosmoteer\<id>\Logs\log <date>.txt) recording memory, GC counts,
+simulation size and each player's lockstep input queue. It is read-only: it
+never touches a queue, a resource or the simulation.
+
+Both peers need this file. A stall can only be attributed to one side by
+comparing the same minute in both logs.

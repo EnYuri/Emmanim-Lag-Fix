@@ -43,9 +43,19 @@ jobs:
               throw "Committed release payload is missing: $path"
             }
           }
-          $flags = @(Get-ChildItem -LiteralPath '.\Mod' -Filter '*.flag' -File -ErrorAction SilentlyContinue)
+          # The two memory switches ship enabled - one log line a minute, and a
+          # multiplayer stall can only be attributed by comparing both peers.
+          # Anything else, the Korean IME capture above all, must stay local.
+          $shipped = @('multiplayer-memory-diagnostics.flag', 'singleplayer-memory-diagnostics.flag')
+          foreach ($name in $shipped) {
+            if (-not (Test-Path -LiteralPath (Join-Path '.\Mod' $name))) {
+              throw "Committed release payload is missing: Mod\$name"
+            }
+          }
+          $flags = @(Get-ChildItem -LiteralPath '.\Mod' -Filter '*.flag' -File -ErrorAction SilentlyContinue |
+            Where-Object { $shipped -notcontains $_.Name })
           if ($flags.Count -gt 0) {
-            throw ('Refusing to publish with diagnostics enabled: ' + ($flags.Name -join ', '))
+            throw ('Refusing to publish with extra diagnostics enabled: ' + ($flags.Name -join ', '))
           }
 
       - name: Build one-click archive
@@ -66,14 +76,19 @@ jobs:
             'emmanim_lag_fix/Install.ps1',
             'emmanim_lag_fix/mod.rules',
             'emmanim_lag_fix/Code/EmmanimLagFix.Code.dll',
-            'emmanim_lag_fix/Loader/winmm.dll'
+            'emmanim_lag_fix/Loader/winmm.dll',
+            'emmanim_lag_fix/multiplayer-memory-diagnostics.flag',
+            'emmanim_lag_fix/singleplayer-memory-diagnostics.flag'
           )) {
             if ($entries -notcontains $requiredEntry) {
               throw "Archive is missing: $requiredEntry"
             }
           }
-          if ($entries -match '\.flag$') {
-            throw 'Archive unexpectedly contains a diagnostics flag.'
+          $unexpected = @($entries | Where-Object {
+            $_ -like '*.flag' -and $_ -notlike '*-memory-diagnostics.flag'
+          })
+          if ($unexpected.Count -gt 0) {
+            throw ('Archive unexpectedly contains: ' + ($unexpected -join ', '))
           }
 
           $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
