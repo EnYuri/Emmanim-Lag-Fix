@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using Cosmoteer.Ships.Parts;
 using Cosmoteer.Ships.Parts.Crew;
 using Cosmoteer.Ships.Statuses;
@@ -71,6 +72,32 @@ internal static class StatusEnumeratorPoolPatch
             ?? throw new MissingMethodException(
                 typeof(StatusEnumeratorPoolPatch).FullName, nameof(RentPairs)))
         .MakeGenericMethod(value);
+
+    /// <summary>
+    /// Harmony moves a patched method's body into a dynamic method owned by
+    /// another type, which removes the runtime's implicit static-constructor
+    /// trigger that a call to a static method carried. <c>HitEffectParams</c>
+    /// installs its pool's allocator from its own static constructor and its
+    /// <c>Alloc</c> is static, so 2.0.32 left
+    /// <c>ObjectPool&lt;HitEffectParams&gt;.Allocator</c> null and the first beam
+    /// hit after unpausing threw "Must first set the static Allocator property
+    /// before calling Alloc()". Running the constructor here restores what the
+    /// call site used to guarantee; a type that has none is a no-op, and running
+    /// one twice is too. Only static targets can lose the trigger - an instance
+    /// method cannot be reached before its type is initialized.
+    /// </summary>
+    private static bool Prepare()
+    {
+        foreach (var target in TargetMethods())
+        {
+            if (target.IsStatic && target.DeclaringType is { } declaring)
+            {
+                RuntimeHelpers.RunClassConstructor(declaring.TypeHandle);
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// Every method in the game that enumerates one of those dictionaries

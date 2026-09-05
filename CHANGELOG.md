@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.0.33
+
+- Fixed the crash 2.0.32 introduced. The first beam weapon to hit anything after
+  unpausing threw `InvalidOperationException: Must first set the static Allocator
+  property before calling Alloc()` from `HitEffectParams.Alloc`, taking the game
+  down.
+- Harmony moves a patched method's body into a dynamic method owned by another
+  type, which removes the implicit static-constructor trigger that a call to a
+  static method carried. `HitEffectParams` installs its own pool's `Allocator`,
+  `Initializer` and `Deinitializer` from its static constructor, and its `Alloc`
+  is static, so patching it left `ObjectPool<HitEffectParams>.Allocator` null and
+  nothing ever ran the constructor.
+- `Prepare` now runs the class constructor of every static target's declaring
+  type, which restores what the call site used to guarantee. A type without one
+  is a no-op and running one twice is too, and only static targets can lose the
+  trigger, since an instance method cannot be reached before its type is
+  initialized. Of this patch's targets only `HitEffectParams` has a constructor
+  at all; it allocates three delegates and nothing else, so running it at mod
+  load is safe.
+- The smoke test now asserts `ObjectPool<HitEffectParams>.Allocator` is non-null
+  with the patch applied, and was confirmed to fail without the fix.
+
 ## 2.0.32
 
 - Stopped boxing a dictionary enumerator on every status lookup. A part keeps

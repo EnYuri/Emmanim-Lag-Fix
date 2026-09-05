@@ -1335,6 +1335,26 @@ foreach (var allocOverload in AccessTools
     RuntimeHelpers.PrepareMethod(allocOverload.MethodHandle);
 }
 
+// Patching a static method moves its body to a dynamic method on another type,
+// which drops the runtime's implicit static-constructor trigger. HitEffectParams
+// installs its pool's allocator from its own static constructor, and 2.0.32
+// crashed on the first beam hit because that never ran. Prove it is installed
+// with the patch applied - a null allocator here is that crash.
+{
+    var hitEffectParamsType = gameAssembly.GetType(
+        "Cosmoteer.Simulation.HitEffects.HitEffectParams", throwOnError: true)!;
+    var poolType = halflingAssembly.GetType("Halfling.Pooling.ObjectPool`1", throwOnError: true)!
+        .MakeGenericType(hitEffectParamsType);
+    var allocatorField = poolType.GetField("Allocator", BindingFlags.Public | BindingFlags.Static)
+        ?? throw new MissingFieldException(poolType.FullName, "Allocator");
+    if (allocatorField.GetValue(null) is null)
+    {
+        throw new InvalidOperationException(
+            "ObjectPool<HitEffectParams>.Allocator is null after patching, so HitEffectParams.Alloc "
+            + "will throw on the first weapon hit.");
+    }
+}
+
 // A pooled enumerator that skipped or repeated an entry would silently corrupt
 // resistance and status-effect results, and one handed out twice would make two
 // loops share a cursor. StatusType only has to be a key here, so uninitialized
