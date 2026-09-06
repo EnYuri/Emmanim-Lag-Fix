@@ -41,6 +41,26 @@ internal static class MultiplayerMemoryDiagnosticsPatch
 
     private static readonly Dictionary<object, PlayerSample> Samples = new();
 
+    /// <summary>
+    /// Frame times over the reporting window, bucketed by whole milliseconds so
+    /// a percentile is exact enough without keeping every sample. The last
+    /// bucket collects everything at or above its index.
+    /// </summary>
+    private static readonly int[] FrameBuckets = new int[1001];
+
+    private static long _lastFrameStamp;
+    private static long _frameCount;
+    private static double _frameTotalMs;
+
+    /// <summary>
+    /// CPU seconds and wall-clock at the previous report, so the window's
+    /// average number of busy cores can be differenced out of them. This is what
+    /// separates "the machine is saturated" from "the machine is waiting", which
+    /// no size or count in this line can say.
+    /// </summary>
+    private static TimeSpan _lastCpu;
+    private static long _lastCpuStamp;
+
     private static long _nextReport = Stopwatch.GetTimestamp() + ReportIntervalTicks;
     private static int _lastGen0 = GC.CollectionCount(0);
     private static int _lastGen1 = GC.CollectionCount(1);
@@ -54,6 +74,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         }
 
         SamplePlayers(__instance);
+        SampleFrame();
 
         var now = Stopwatch.GetTimestamp();
         var next = Volatile.Read(ref _nextReport);
@@ -63,6 +84,83 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         }
 
         WriteReport(__instance);
+    }
+
+    /// <summary>
+    /// Records the interval since the previous frame. BaseMPManager.Update runs
+    /// on the main thread only, so this needs no synchronisation.
+    /// </summary>
+    private static void SampleFrame()
+    {
+        var now = Stopwatch.GetTimestamp();
+        var previous = _lastFrameStamp;
+        _lastFrameStamp = now;
+
+        if (previous == 0)
+        {
+            return;
+        }
+
+        var ms = (now - previous) * 1000d / Stopwatch.Frequency;
+        _frameCount++;
+        _frameTotalMs += ms;
+
+        var bucket = (int)ms;
+        FrameBuckets[bucket < 0 ? 0 : Math.Min(bucket, FrameBuckets.Length - 1)]++;
+    }
+
+    /// <summary>
+    /// Mean and 95th-percentile frame time for the window, then resets it. The
+    /// mean says how fast the machine is running and the percentile says whether
+    /// it is hitching, which the mean alone hides.
+    /// </summary>
+    private static string FormatFrameTimes()
+    {
+        if (_frameCount == 0)
+        {
+            return "-/-";
+        }
+
+        var mean = _frameTotalMs / _frameCount;
+        var target = _frameCount * 95 / 100;
+        long running = 0;
+        var p95 = FrameBuckets.Length - 1;
+        for (var i = 0; i < FrameBuckets.Length; i++)
+        {
+            running += FrameBuckets[i];
+            if (running >= target)
+            {
+                p95 = i;
+                break;
+            }
+        }
+
+        Array.Clear(FrameBuckets);
+        _frameCount = 0;
+        _frameTotalMs = 0;
+        return $"{mean:F1}/{p95}";
+    }
+
+    /// <summary>
+    /// Average number of cores busy over the window. At or above the core count
+    /// the process is CPU-bound; near zero it is waiting on something else.
+    /// </summary>
+    private static string FormatCpuLoad(Process process)
+    {
+        var cpu = process.TotalProcessorTime;
+        var stamp = Stopwatch.GetTimestamp();
+        var previousCpu = _lastCpu;
+        var previousStamp = _lastCpuStamp;
+        _lastCpu = cpu;
+        _lastCpuStamp = stamp;
+
+        if (previousStamp == 0)
+        {
+            return "-";
+        }
+
+        var elapsed = (stamp - previousStamp) / (double)Stopwatch.Frequency;
+        return elapsed <= 0 ? "-" : ((cpu - previousCpu).TotalSeconds / elapsed).ToString("F1");
     }
 
     private static void SamplePlayers(BaseMPManager manager)
@@ -90,7 +188,16 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         }
     }
 
-    private static string FormatPlayerSamples()
+    /// <summary>
+    /// The relayed copy drops the running queue average and shortens the field
+    /// names, because the chat payload is capped at 200 characters and anything
+    /// past it is cut off the end - which is where the per-player block sits.
+    ///
+    /// A player's own entry always reads <c>delay=0.0%</c>: the local player
+    /// generates its own input tick, so it is never the one missing. Only each
+    /// side's view of the *remote* player carries information.
+    /// </summary>
+    private static string FormatPlayerSamples(bool compact)
     {
         var text = new StringBuilder();
         foreach (var sample in Samples.Values)
@@ -103,15 +210,22 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             var name = sample.Name.Replace(' ', '_').Replace('|', '_').Replace('=', '_');
             var delaying = sample.Frames > 0 ? sample.DelayingFrames * 100d / sample.Frames : 0d;
             var averageQueue = sample.Frames > 0 ? sample.QueueSum / (double)sample.Frames : 0d;
-            text.Append(name)
-                .Append(sample.IsLocal ? ":local" : ":remote")
-                .Append(",q=").Append(sample.LastQueue)
-                .Append(",avg=").Append(averageQueue.ToString("F1"))
-                .Append(",delay=").Append(delaying.ToString("F1")).Append('%')
-                .Append(",lat=").Append(sample.LatencyMs.ToString("F0")).Append("ms");
+            text.Append(name).Append(sample.IsLocal ? ":local" : ":remote");
+
+            if (!compact)
+            {
+                text.Append(",q=").Append(sample.LastQueue)
+                    .Append(",avg=").Append(averageQueue.ToString("F1"))
+                    .Append(",delay=").Append(delaying.ToString("F1")).Append('%')
+                    .Append(",lat=").Append(sample.LatencyMs.ToString("F0")).Append("ms");
+                continue;
+            }
+
+            text.Append(",q=").Append(sample.LastQueue)
+                .Append(",d=").Append(delaying.ToString("F0")).Append('%')
+                .Append(",l=").Append(sample.LatencyMs.ToString("F0"));
         }
 
-        Samples.Clear();
         return text.Length > 0 ? text.ToString() : "none";
     }
 
@@ -177,9 +291,14 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         var gen1Delta = gen1 - Interlocked.Exchange(ref _lastGen1, gen1);
         var gen2Delta = gen2 - Interlocked.Exchange(ref _lastGen2, gen2);
 
-        // FormatPlayerSamples clears the samples, so it must be read once and
-        // shared by the log line and the relayed one.
-        var perPlayer = FormatPlayerSamples();
+        // Both lines are built from the same window, so the samples are read
+        // twice and cleared once, after.
+        var perPlayer = FormatPlayerSamples(compact: false);
+        var perPlayerCompact = FormatPlayerSamples(compact: true);
+        Samples.Clear();
+
+        var frameTimes = FormatFrameTimes();
+        var cpuLoad = FormatCpuLoad(process);
 
         Halfling.Logging.Logger.Log(
             "[EmmanimLagFix.MultiplayerMemoryDiagnostics] " +
@@ -187,7 +306,8 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"privateMiB={ToMiB(process.PrivateMemorySize64):F0} workingMiB={ToMiB(process.WorkingSet64):F0} " +
             $"managedMiB={ToMiB(GC.GetTotalMemory(false)):F0} heapMiB={ToMiB(gcInfo.HeapSizeBytes):F0} " +
             $"fragmentedMiB={ToMiB(gcInfo.FragmentedBytes):F0} handles={process.HandleCount} " +
-            $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} players={manager._playerInfos.Count} " +
+            $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} frameMs={frameTimes} cpuCores={cpuLoad} " +
+            $"players={manager._playerInfos.Count} " +
             $"inputQueued={queuedInputTicks} inputMax={maximumPlayerQueue} outgoingInputs={manager._outgoingInputs.Count} " +
             $"hashes={hostHashes}/{ourHashes}/{theirHashes} connectionQueued={connectionReceiveQueue} " +
             $"sentKiBs={bytesPerSecond / 1024d:F1} recordingMiB={ToMiB(recordingBytes):F1} " +
@@ -201,10 +321,11 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         // the game truncates chat text at 200 characters.
         PeerDiagnosticsRelayPatch.MaybeSend(
             manager,
-            $"t={manager.NetworkInputTick} pv={ToMiB(process.PrivateMemorySize64):F0} "
-            + $"hp={ToMiB(gcInfo.HeapSizeBytes):F0} gc={gen0Delta}/{gen1Delta}/{gen2Delta} "
-            + $"q={queuedInputTicks}/{maximumPlayerQueue} cq={connectionReceiveQueue} "
-            + $"sh={sim.Ships.Count} pt={liveParts} pp=[{perPlayer}]");
+            $"t={manager.NetworkInputTick} ft={frameTimes} cpu={cpuLoad} "
+            + $"pv={ToMiB(process.PrivateMemorySize64):F0} hp={ToMiB(gcInfo.HeapSizeBytes):F0} "
+            + $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} q={queuedInputTicks}/{maximumPlayerQueue} "
+            + $"cq={connectionReceiveQueue} sh={sim.Ships.Count} pt={liveParts} "
+            + $"pp=[{perPlayerCompact}]");
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;

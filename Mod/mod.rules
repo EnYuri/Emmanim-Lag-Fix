@@ -38,7 +38,7 @@
 
 ID = nayuri.emmanim_lag_fix
 Name = "Emmanim Lag Fix"
-Version = 2.0.37
+Version = 2.0.38
 
 ModifiesGameplay = true
 ModifiesMultiplayer = true
@@ -287,9 +287,19 @@ Actions
 		{
 			MaxInputTickDelay = 180              // vanilla 60 (2 sec -> 6 sec)
 			InputTickDelayLatencyFactor = 1.5    // vanilla 1
+			MinInputTickDelay = 4                // vanilla 2
 
-			// MinInputTickDelay (2) and InputTicksPerSecond (30) are left alone.
-			// Changing InputTicksPerSecond alters simulation determinism itself.
+			// MinInputTickDelay is the floor the host applies when the measured
+			// latency is low. At 52 ms - the best seen on a real session - the
+			// computed delay is only 3 ticks, and the host was measured holding a
+			// median of ZERO input ticks from the client, so it stalled on every
+			// jitter spike. Four is deliberately small: it costs roughly one extra
+			// tick of command latency and cannot help a sustained deficit, only a
+			// brief one. If the far peer is simply simulating slower, a deeper
+			// buffer changes nothing - the fast peer consumes it and waits again.
+			//
+			// InputTicksPerSecond (30) is left alone. Changing it alters
+			// simulation determinism itself.
 		}
 	}
 

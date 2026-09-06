@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.0.38
+
+- The diagnostics line now carries frame time and CPU load, on both peers.
+  Every field it had was a size or a count - memory, GC, ships, parts - and
+  across a 132-minute two-player session none of them explained the host's tick
+  rate: private bytes correlated -0.42, parts -0.37, ships -0.29, and Gen0
+  collections *positively* at +0.47, which only says a faster tick allocates
+  more. What did explain it was the fraction of frames the host spent waiting on
+  the client, at -0.975 across three independent sessions.
+- The relay made that fraction readable from both sides for the first time, and
+  the two sides disagree completely: the host held a median of zero input ticks
+  from the client and reported it late on 95 of 134 samples, while the client
+  held a median of nine of the host's and reported the host late on almost none.
+  The starving peer is the host. Note a player's own entry always reads 0.0% -
+  the local player generates its own input tick and so is never the one missing -
+  so only each side's view of the *remote* player carries information.
+- What none of it can say is why the far peer is late, because every field is a
+  quantity rather than a duration. `frameMs=<mean>/<p95>` and `cpuCores=<busy>`
+  are durations: at or above the core count the machine is CPU-bound, near zero
+  it is waiting on something else, and the percentile separates a machine that is
+  hitching from one that is uniformly slow. The relayed copy carries the same two
+  fields and drops the per-player queue average to stay inside the chat limit.
+- `MinInputTickDelay` is raised from vanilla's 2 to 4. At the best latency seen
+  on a real session, 52 ms, the host computed a delay of only three input ticks
+  and was measured holding zero, so it stalled on every jitter spike. Four is
+  deliberately small - about one extra tick of command latency - and it is
+  honest about its limits: a deeper buffer absorbs jitter and nothing else. If
+  the far peer is simply simulating slower, the fast peer drains any buffer and
+  waits again, which is what the measurements above suggest is happening.
+
 ## 2.0.37
 
 - The client now reports what actually diverged when the game desyncs. Only the
