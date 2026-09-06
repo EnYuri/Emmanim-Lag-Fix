@@ -22,13 +22,17 @@
   it is waiting on something else, and the percentile separates a machine that is
   hitching from one that is uniformly slow. The relayed copy carries the same two
   fields and drops the per-player queue average to stay inside the chat limit.
-- `MinInputTickDelay` is raised from vanilla's 2 to 4. At the best latency seen
+- `MinInputTickDelay` is raised from vanilla's 2 to 6. At the best latency seen
   on a real session, 52 ms, the host computed a delay of only three input ticks
-  and was measured holding zero, so it stalled on every jitter spike. Four is
-  deliberately small - about one extra tick of command latency - and it is
-  honest about its limits: a deeper buffer absorbs jitter and nothing else. If
-  the far peer is simply simulating slower, the fast peer drains any buffer and
-  waits again, which is what the measurements above suggest is happening.
+  and was measured holding zero, so it stalled on every jitter spike. This is a
+  floor rather than a value - whenever latency is high enough to ask for more,
+  the computed delay already exceeds it, so it binds only on a quiet connection.
+  The cost is command latency, and note it divides by the *actual* tick rate
+  rather than the nominal 30: about 440 ms at the 13.7 ticks/s a real session
+  averaged. It is also honest about its limits - a deeper buffer absorbs jitter
+  and nothing else. If the far peer is simply simulating slower, the fast peer
+  drains any buffer and waits again, which is what the measurements above
+  suggest is happening.
 
 ## 2.0.37
 
