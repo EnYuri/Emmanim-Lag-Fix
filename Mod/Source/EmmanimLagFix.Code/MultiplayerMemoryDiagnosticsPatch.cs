@@ -177,6 +177,10 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         var gen1Delta = gen1 - Interlocked.Exchange(ref _lastGen1, gen1);
         var gen2Delta = gen2 - Interlocked.Exchange(ref _lastGen2, gen2);
 
+        // FormatPlayerSamples clears the samples, so it must be read once and
+        // shared by the log line and the relayed one.
+        var perPlayer = FormatPlayerSamples();
+
         Halfling.Logging.Logger.Log(
             "[EmmanimLagFix.MultiplayerMemoryDiagnostics] " +
             $"role={(manager is MPHostManager ? "host" : "client")} tick={manager.NetworkInputTick} " +
@@ -190,7 +194,17 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"game={RuntimeHelpers.GetHashCode(manager.Game):X8} sim={RuntimeHelpers.GetHashCode(sim):X8} " +
             $"ships={sim.Ships.Count} parts={liveParts}/{blueprintParts} " +
             $"stasis={sim.Stasis.Count}/{preloadedStasis} decals={decalPickers}/{decalItems} " +
-            $"perPlayer=[{FormatPlayerSamples()}]");
+            $"perPlayer=[{perPlayer}]");
+
+        // The host cannot see why a client is late, only that it is, so the
+        // client hands over the few fields that answer it. Kept short because
+        // the game truncates chat text at 200 characters.
+        PeerDiagnosticsRelayPatch.MaybeSend(
+            manager,
+            $"t={manager.NetworkInputTick} pv={ToMiB(process.PrivateMemorySize64):F0} "
+            + $"hp={ToMiB(gcInfo.HeapSizeBytes):F0} gc={gen0Delta}/{gen1Delta}/{gen2Delta} "
+            + $"q={queuedInputTicks}/{maximumPlayerQueue} cq={connectionReceiveQueue} "
+            + $"sh={sim.Ships.Count} pt={liveParts} pp=[{perPlayer}]");
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;

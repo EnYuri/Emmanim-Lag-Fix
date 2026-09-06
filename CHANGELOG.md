@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.0.34
+
+- The client now relays its own diagnostics line to the host once a minute, so
+  the host's log holds both sides of a session without anyone having to find and
+  send a file.
+- This is what the shipped diagnostics switch was for and did not finish. The
+  host's line already names which player is holding the lockstep readiness gate,
+  and across two independent sessions that fraction predicted the host's tick
+  rate with r = -0.970 and r = -0.971, while ships, parts, private memory and GC
+  counts did not agree even on sign. What it cannot say is why that player is
+  late; only that player's own line can, and it was sitting on their disk.
+- The relay travels as a chat message. `ChannelChatProvider` opens its own
+  reliable channel, so nothing about the lockstep input path, the packet formats
+  or the simulation changes. Lines carry an `#ELFDIAG#` marker, are logged as
+  `[EmmanimLagFix.PeerDiagnostics]` and are removed from the chat window on every
+  peer, so players never see them. Both peers necessarily run this build:
+  `ModData.Equals` compares mod ID *and* version, so a peer on a different
+  version cannot join at all.
+- The payload is built to fit the game's own 200-character chat limit and is
+  truncated before sending rather than being cut mid-field on receipt. It carries
+  the client's tick, private and heap size, GC counts, input queue depth,
+  connection backlog, ship and part counts, and its own view of which player is
+  delaying the game.
+- Sending and logging are both wrapped: a relay failure logs one line and a
+  logging failure is swallowed, because this code runs inside the chat receive
+  hook and must never be able to break chat or a session.
+
 ## 2.0.33
 
 - Fixed the crash 2.0.32 introduced. The first beam weapon to hit anything after

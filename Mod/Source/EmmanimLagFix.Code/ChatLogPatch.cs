@@ -17,17 +17,25 @@ internal static class ChatLogPatch
     private static readonly ConditionalWeakTable<ChatMessage, object> LoggedMessages = new();
     private static readonly object LoggedMarker = new();
 
-    private static void Prefix(ChatMessage msg, Func<int>? ____getTeam)
+    private static bool Prefix(ChatMessage msg, Func<int>? ____getTeam)
     {
+        // A relayed peer diagnostics line is not chat: it is logged as
+        // diagnostics and never reaches the chat window on any peer.
+        if (PeerDiagnosticsRelayPatch.TryHandleIncoming(msg))
+        {
+            return false;
+        }
+
         if (!IsVisibleToThisChatBox(msg, ____getTeam) || !TryMarkLogged(msg))
         {
-            return;
+            return true;
         }
 
         string channel = msg.Team.HasValue ? "Team" : "Global";
         string playerName = MakeSingleLine(msg.PlayerName);
         string text = MakeSingleLine(msg.Text);
         Halfling.Logging.Logger.Log($"[Chat][{channel}] {playerName}: {text}");
+        return true;
     }
 
     private static bool IsVisibleToThisChatBox(ChatMessage msg, Func<int>? getTeam)

@@ -1467,5 +1467,61 @@ foreach (var allocOverload in AccessTools
             "A non-dictionary source did not fall back to its own enumerator.");
     }
 }
+// The client relays its own diagnostics line to the host over the chat channel,
+// because the host can see that a peer is holding the lockstep gate but never
+// why, and asking the other player for a log file is a step that does not
+// happen. Prove the marker is recognised, logged once, and kept out of chat -
+// and that ordinary chat is untouched.
+{
+    var relayType = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.PeerDiagnosticsRelayPatch", throwOnError: true)!;
+    var tryHandle = AccessTools.Method(relayType, "TryHandleIncoming")
+        ?? throw new MissingMethodException(relayType.FullName, "TryHandleIncoming");
+    var receivedBefore = (int)AccessTools.Property(relayType, "Received")!.GetValue(null)!;
+
+    var chatMessageType = gameAssembly.GetType("Cosmoteer.Multiplayer.ChatMessage", throwOnError: true)!;
+    object NewChat(string text) => Activator.CreateInstance(
+        chatMessageType,
+        new object?[] { "peer", text, null, null })!;
+
+    var plain = NewChat("hello");
+    if ((bool)tryHandle.Invoke(null, new[] { plain })!)
+    {
+        throw new InvalidOperationException(
+            "An ordinary chat message was swallowed as a diagnostics relay.");
+    }
+
+    var relayed = NewChat("#ELFDIAG#t=1 pv=2 hp=3");
+    if (!(bool)tryHandle.Invoke(null, new[] { relayed })!)
+    {
+        throw new InvalidOperationException(
+            "A relayed diagnostics line was not recognised, so it would show up in the chat window.");
+    }
+
+    // A second delivery of the same message must still be suppressed, but must
+    // not be logged twice: every ChatBox subscribed to the provider sees it.
+    if (!(bool)tryHandle.Invoke(null, new[] { relayed })!)
+    {
+        throw new InvalidOperationException(
+            "A repeated delivery of a relayed line was not suppressed.");
+    }
+
+    var receivedAfter = (int)AccessTools.Property(relayType, "Received")!.GetValue(null)!;
+    if (receivedAfter != receivedBefore + 1)
+    {
+        throw new InvalidOperationException(
+            $"Expected exactly one relayed line to be logged, counted {receivedAfter - receivedBefore}.");
+    }
+
+    // The relay hangs off the chat receive hook, so that patch has to be live.
+    var chatBoxType = gameAssembly.GetType("Cosmoteer.Gui.Multiplayer.ChatBox", throwOnError: true)!;
+    var onChatReceived = AccessTools.Method(chatBoxType, "OnChatReceived")
+        ?? throw new MissingMethodException(chatBoxType.FullName, "OnChatReceived");
+    if (Harmony.GetPatchInfo(onChatReceived)?.Prefixes.Any(patch => patch.owner == smokeId) != true)
+    {
+        throw new InvalidOperationException(
+            "Expected Emmanim prefix was not installed on ChatBox.OnChatReceived.");
+    }
+}
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, and pooled status-dictionary enumeration patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, and peer diagnostics relay patches resolved and compiled on this game build.");
