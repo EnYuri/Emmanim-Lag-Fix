@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.36
+## 2.0.37
 
 - The client now reports what actually diverged when the game desyncs. Only the
   client detects one - `MPClientManager.ValidateIntegrityHashes` compares the two
