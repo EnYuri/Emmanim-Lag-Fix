@@ -44,6 +44,13 @@ the bundled Harmony library and `EmmanimLagFix.Code.dll`.
   to 6 Hz without lowering lockstep input or simulation cadence.
 - Reuses the host's per-client `InputTick` forwarding filters instead of
   allocating a closure and delegate for every received tick.
+- Shards the resource manager's sink-job collection lists per thread, removing
+  the largest single lock convoy in the process from the parallel per-sink pass.
+  Vanilla sorts both lists into a total order over distinct sink indexes before
+  reading them, so the merged result is identical to vanilla's.
+- Rescans minimap membership at 10 Hz and re-tests only the previously visible
+  sources in between, instead of asking every object in the sector whether it is
+  visible on every drawn frame. Disappearance and blip positions stay immediate.
 
 The code patches UI aggregation/construction, resource bookkeeping, visual
 updates, and local multiplayer timeout/initialization behavior. It does not

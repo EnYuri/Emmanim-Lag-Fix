@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.0.35
+
+- Sharded ResourceManager's sink-job collection per thread. The per-sink pass
+  runs on every FastParallel worker and each worker published its result through
+  one of two shared lists, guarded by a lock whose whole body is a single
+  `List.Add`. A 20-second host trace measured 637 ms of
+  `Monitor.Enter_Slowpath` underneath `UpdateSinkJobs` - the largest single lock
+  in the process, ahead of the audio mixer - so the cost was the convoy rather
+  than the work. Each thread now writes to its own list and the shards are
+  merged back before vanilla reads them.
+- That merge is deterministic by construction, not by argument. Vanilla sorts
+  both lists immediately after the parallel pass and before touching them,
+  `_jobUpdates` by sink index and `_highPriorityFlags` by value, and a given sink
+  index is added at most once, so each sort is a total order over distinct keys.
+  Whatever order the shards drain in, the sorted result is identical to
+  vanilla's. No job is added, dropped, reordered or delayed by a tick.
+- The two halves fail independently. If the drain site is not the expected
+  shape the shard hands back the real list and vanilla's contended lock stands;
+  if the shard site is not, no shard is ever created and the drain finds
+  nothing.
+- The minimap no longer asks every object in the sector whether it is visible on
+  every drawn frame. `Minimap.OnUpdateMinimap` runs once per frame and began with
+  a full scan whose per-ship answer reduces to intersecting the ship's bounding
+  circle against the team's radar circles; that scan cost 220 ms of the same
+  20-second trace, 1.5% of the main thread. Membership is now rescanned at 10 Hz
+  and, in between, only the sources that were visible last time are re-tested.
+- A per-frame memo would have saved nothing there - each source is already asked
+  exactly once per frame - which is why this throttles the decision rather than
+  caching it.
+- Disappearance stays immediate: a retained source is dropped as soon as its own
+  `ShowOnMinimap` goes false or it leaves the scene, and any change in scene
+  population forces a full rescan on the spot. Only a ship already in the sector
+  drifting into radar range can appear up to 100 ms late. Blip positions and the
+  minimap's own redraw are untouched.
+
 ## 2.0.34
 
 - The client now relays its own diagnostics line to the host once a minute, so

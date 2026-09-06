@@ -1523,5 +1523,112 @@ foreach (var allocOverload in AccessTools
             "Expected Emmanim prefix was not installed on ChatBox.OnChatReceived.");
     }
 }
+// ResourceManager's per-sink pass publishes through two shared lists guarded by
+// one lock each, which put 637 ms of Monitor.Enter_Slowpath under UpdateSinkJobs
+// in a 20-second host trace. Sharding them per thread is only correct if both
+// halves rewrote: the shard hands back the real list when the drain did not.
+{
+    var shardingType = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.ResourceSinkJobShardingPatch", throwOnError: true)!;
+    foreach (var flag in new[] { "ShardApplied", "DrainApplied" })
+    {
+        if (AccessTools.Field(shardingType, flag)!.GetValue(null) is not true)
+        {
+            throw new InvalidOperationException(
+                $"ResourceSinkJobShardingPatch.{flag} is false, so sink-job collection is still "
+                + "taking a contended lock on every worker.");
+        }
+    }
+
+    // Both rewrites insert a call inside a lock's try/finally, so malformed IL
+    // has to fail here rather than on a ship that starts moving resources.
+    var sinkJobsManagerType = gameAssembly.GetType(
+        "Cosmoteer.Ships.Resources.ResourceManager", throwOnError: true)!;
+    var timeType = halflingAssembly.GetType("Halfling.Timing.Time", throwOnError: true)!;
+    foreach (var signature in new[] { new[] { typeof(int) }, new[] { timeType } })
+    {
+        var sinkJobs = AccessTools.Method(sinkJobsManagerType, "UpdateSinkJobs", signature)
+            ?? throw new MissingMethodException(sinkJobsManagerType.FullName, "UpdateSinkJobs");
+        if (Harmony.GetPatchInfo(sinkJobs)?.Transpilers.Any(patch => patch.owner == smokeId) != true)
+        {
+            throw new InvalidOperationException(
+                "Expected Emmanim transpiler was not installed on ResourceManager.UpdateSinkJobs("
+                + $"{signature[0].Name}).");
+        }
+
+        RuntimeHelpers.PrepareMethod(sinkJobs.MethodHandle);
+    }
+
+    // Determinism rests on the drain returning every shard's entries, since
+    // vanilla then sorts them into a total order over distinct sink indexes.
+    // Post from several threads at once and prove the sorted merge matches a
+    // serial run exactly.
+    var shard = AccessTools.Method(shardingType, "Shard")!.MakeGenericMethod(typeof(int));
+    var drain = AccessTools.Method(shardingType, "DrainInto")!.MakeGenericMethod(typeof(int));
+    var real = new List<int>();
+    var expectedIndexes = Enumerable.Range(0, 4096).ToList();
+    Parallel.ForEach(expectedIndexes, index =>
+    {
+        var mine = (List<int>)shard.Invoke(null, new object[] { real })!;
+        lock (mine)
+        {
+            mine.Add(index);
+        }
+    });
+
+    if (real.Count != 0)
+    {
+        throw new InvalidOperationException(
+            $"{real.Count} entries reached the shared list before the drain, so the shard is not "
+            + "actually redirecting the field load.");
+    }
+
+    var drained = (List<int>)drain.Invoke(null, new object[] { real })!;
+    drained.Sort();
+    if (!ReferenceEquals(drained, real) || !drained.SequenceEqual(expectedIndexes))
+    {
+        throw new InvalidOperationException(
+            $"The drained sink-job list held {drained.Count} of {expectedIndexes.Count} entries, "
+            + "so the parallel pass would lose or duplicate job updates.");
+    }
+
+    // Draining twice must not resurrect anything: the merge reads the field
+    // several times and every read goes through the same helper.
+    real.Clear();
+    if (((List<int>)drain.Invoke(null, new object[] { real })!).Count != 0)
+    {
+        throw new InvalidOperationException("A second drain re-delivered entries it had already merged.");
+    }
+}
+
+// The minimap asked every object in the sector whether it is visible on every
+// drawn frame, which is 220 ms of a 20-second host trace. Membership is now
+// rescanned at 10 Hz while disappearance stays immediate.
+{
+    var minimapType = gameAssembly.GetType("Cosmoteer.Game.Gui.Minimap", throwOnError: true)!;
+    var getMinimapObjects = AccessTools.DeclaredMethod(minimapType, "GetMinimapObjects")
+        ?? throw new MissingMethodException(minimapType.FullName, "GetMinimapObjects");
+    var minimapPatches = Harmony.GetPatchInfo(getMinimapObjects);
+    if (minimapPatches?.Prefixes.Any(patch => patch.owner == smokeId) != true
+        || minimapPatches.Postfixes.Any(patch => patch.owner == smokeId) != true)
+    {
+        throw new InvalidOperationException(
+            "Expected Emmanim prefix and postfix were not both installed on Minimap.GetMinimapObjects, "
+            + "so the retained set would be filled but never used, or used but never refilled.");
+    }
+
+    // The prefix answers from the retained set only while the scene population
+    // is unchanged, and drops a source the moment it leaves the scene. Both
+    // members that rests on must still exist.
+    _ = AccessTools.PropertyGetter(minimapType, "Sim")
+        ?? throw new MissingMethodException(minimapType.FullName, "get_Sim");
+    var indicatorSourceType = gameAssembly.GetType(
+        "Cosmoteer.Simulation.ObjectIndicatorSource", throwOnError: true)!;
+    _ = AccessTools.Method(indicatorSourceType, "GetAllInScene")
+        ?? throw new MissingMethodException(indicatorSourceType.FullName, "GetAllInScene");
+    _ = AccessTools.PropertyGetter(indicatorSourceType, "Sim")
+        ?? throw new MissingMethodException(indicatorSourceType.FullName, "get_Sim");
+}
+
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, and peer diagnostics relay patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, sharded resource sink-job collection, and throttled minimap membership scanning patches resolved and compiled on this game build.");
