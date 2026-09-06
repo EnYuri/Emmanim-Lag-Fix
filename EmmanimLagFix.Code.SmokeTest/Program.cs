@@ -1630,5 +1630,49 @@ foreach (var allocOverload in AccessTools
         ?? throw new MissingMethodException(indicatorSourceType.FullName, "get_Sim");
 }
 
+// Only the client detects a desync, and the out-of-sync RPC carries no payload,
+// so the host's log records a resync with no cause. The client now reports the
+// diverging bucket over the existing diagnostics relay. Prove both halves of
+// that path still resolve on this build.
+{
+    var integrityHashType = gameAssembly.GetType(
+        "Cosmoteer.Game.Multiplayer.IntegrityHash", throwOnError: true)!;
+    var equals = AccessTools.DeclaredMethod(
+        integrityHashType, "Equals", new[] { integrityHashType })
+        ?? throw new MissingMethodException(integrityHashType.FullName, "Equals(IntegrityHash)");
+    if (Harmony.GetPatchInfo(equals)?.Postfixes.Any(patch => patch.owner == smokeId) != true)
+    {
+        throw new InvalidOperationException(
+            "The capture postfix was not installed on IntegrityHash.Equals, so a desync would be "
+            + "detected with nothing recorded about which bucket diverged.");
+    }
+
+    // The report is built from these five, and they are read by value because
+    // the hashes are pooled and released immediately after the comparison.
+    foreach (var name in new[] { "Tick", "InputTick", "Phase", "Bucket", "Hash" })
+    {
+        _ = AccessTools.PropertyGetter(integrityHashType, name)
+            ?? throw new MissingMethodException(integrityHashType.FullName, "get_" + name);
+    }
+
+    var bucketsType = gameAssembly.GetType("Cosmoteer.FixedUpdateBuckets", throwOnError: true)!;
+    _ = AccessTools.Method(bucketsType, "GetBucketName")
+        ?? throw new MissingMethodException(bucketsType.FullName, "GetBucketName");
+
+    var clientType = gameAssembly.GetType(
+        "Cosmoteer.Game.Multiplayer.MPClientManager", throwOnError: true)!;
+    var validate = AccessTools.DeclaredMethod(clientType, "ValidateIntegrityHashes")
+        ?? throw new MissingMethodException(clientType.FullName, "ValidateIntegrityHashes");
+    var validatePatches = Harmony.GetPatchInfo(validate);
+    if (validatePatches?.Prefixes.Any(patch => patch.owner == smokeId) != true
+        || validatePatches.Postfixes.Any(patch => patch.owner == smokeId) != true)
+    {
+        throw new InvalidOperationException(
+            "Expected Emmanim prefix and postfix were not both installed on "
+            + "MPClientManager.ValidateIntegrityHashes, so a captured report would either never be "
+            + "sent or could be sent for a comparison made outside the validation loop.");
+    }
+}
+
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, sharded resource sink-job collection, and throttled minimap membership scanning patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, and throttled minimap membership scanning patches resolved and compiled on this game build.");

@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.0.36
+
+- The client now reports what actually diverged when the game desyncs. Only the
+  client detects one - `MPClientManager.ValidateIntegrityHashes` compares the two
+  hash queues pairwise and logs `Out of sync!` with both hashes - and the
+  out-of-sync RPC it then fires is a bare `RpcActionInvoker` with no payload, so
+  the host learns only that the game diverged, never where. The host's log has
+  been recording resyncs with no cause while the one line naming the diverging
+  `FixedUpdateBuckets` sat in the other player's log file.
+- The report travels over the diagnostics chat relay that is already there, so
+  nobody has to find and send a log and neither peer has to turn on
+  `EnableDesyncDebugging`, which needs both machines and hashes every bucket at
+  full rate. It arrives in the host's log as
+  `[EmmanimLagFix.PeerDiagnostics] from=<peer> DESYNC our=<tick>/<input tick>
+  <phase> <bucket> h=<hash> their=...`.
+- The bucket is the point of it. `Resources` or `Jobs` would implicate this
+  mod's own sink-job sharding; `Physics`, `Statuses` or a `TickStart` phase would
+  exonerate it. One report settles what no amount of reading the patches can.
+- The mismatching pair is captured by value, because the hashes are pooled and
+  released the instant after they are compared, and only a mismatch found inside
+  the validation loop is ever reported. Nothing is added to the lockstep input
+  path and no simulation state is read or written.
+
 ## 2.0.35
 
 - Sharded ResourceManager's sink-job collection per thread. The per-sink pass
