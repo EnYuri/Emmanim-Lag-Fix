@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.1.0
+
+- The package now carries a second, independent code module, `ModsQol.Code.dll`,
+  alongside `EmmanimLagFix.Code.dll`. It has its own Harmony id and patches a
+  disjoint set of methods; the loader's allow-list was widened from one name to a
+  set so either module can be shipped, updated or dropped without touching the
+  other. Nothing about Emmanim's own patches changed in this release.
+- What the new module does is teach `ProxyHandler` a sentinel `ComponentID` of the
+  form `znayuri_any_<resource>`, meaning "whatever component on that part actually
+  stores this resource" rather than a component name. Vanilla can only find a
+  neighbouring part's storage by naming its component - `RelativePartCriteria`
+  matches part identity only, and `ProxyableComponents` breaks on the first
+  criteria match rather than trying each name in turn - so a data-only mod that
+  wants to deliver power to arbitrary parts has to enumerate every recipient by
+  hand, which does not scale as more mods are installed.
+- The scan resumes from the entry vanilla stopped on and honours any sentinel
+  further down the same list, so a part that does expose the conventionally named
+  component still binds through vanilla and never reaches the sentinel. That is
+  what lets one proxy component carry both paths instead of two proxies that would
+  both bind and report double the part's real capacity.
+- The module is inert without Mods QoL 1.65.0 or later: the sentinel ID appears in
+  no other mod's rules, so every patch falls through on its first branch. Mods QoL
+  is equally inert without this module - the unresolved ID simply never matches and
+  its wire network keeps the rate-limited fallback it shipped in 1.64.1. Neither
+  side needs to know the other's version.
+- Both modules now ship a matching `.pdb`, and `Pack.ps1` refreshes them in the
+  same pass as the DLLs and requires them to be present. `EmmanimLagFix.Code.pdb`
+  had been shipping as an untracked leftover that nothing regenerated, so it drifted
+  out of step with its assembly. That is worse than shipping none: a stale portable
+  PDB still loads and reports confident but wrong file names and line numbers in
+  every stack trace written to the game log, which is the main way problems in this
+  mod get diagnosed. `.gitignore` now keeps `Mod/Code/*.pdb` out of the blanket
+  `*.pdb` rule so a fresh clone can still pack, as it already could for the DLLs.
+- Note for multiplayer: the sentinel changes how much power a wire delivers, which
+  is simulation state. Peers running Mods QoL 1.65.0 must either all have this
+  loader or all lack it. That is the same rule the mod's own `.rules` half has
+  always had, but it now extends to the optional loader for anyone using Mods QoL.
+
 ## 2.0.38
 
 - The diagnostics line now carries frame time and CPU load, on both peers.

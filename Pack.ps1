@@ -1,4 +1,4 @@
-# Builds the GitHub release archive for Emmanim Lag Fix.
+﻿# Builds the GitHub release archive for Emmanim Lag Fix.
 #
 #   .\Pack.ps1                     package Mod/ as it stands
 #   .\Pack.ps1 -RefreshBinaries    first copy freshly built DLLs into Mod/
@@ -42,7 +42,16 @@ if ($RefreshBinaries) {
         @{ From = "ModLoader\bin\Release\$tfm\ModLoader.dll";                To = 'Loader\ModLoader.dll' },
         @{ From = 'build\windows\x64\release\winmm.dll';                    To = 'Loader\winmm.dll' },
         @{ From = "EmmanimLagFix.Code\bin\Release\$tfm\EmmanimLagFix.Code.dll"; To = 'Code\EmmanimLagFix.Code.dll' },
-        @{ From = "EmmanimLagFix.Code\bin\Release\$tfm\0Harmony.dll";       To = 'Code\0Harmony.dll' }
+        @{ From = "EmmanimLagFix.Code\bin\Release\$tfm\0Harmony.dll";       To = 'Code\0Harmony.dll' },
+        @{ From = "ModsQol.Code\bin\Release\$tfm\ModsQol.Code.dll";         To = 'Code\ModsQol.Code.dll' },
+        # The symbol files ship with their modules. This project reads exception
+        # stack traces straight out of the game log, and without a pdb beside the
+        # dll every frame in one is a bare method with no file or line. They must
+        # be refreshed in the same pass as the dll: a pdb from an older build
+        # still loads and silently reports the wrong lines, which is worse than
+        # none at all.
+        @{ From = "EmmanimLagFix.Code\bin\Release\$tfm\EmmanimLagFix.Code.pdb"; To = 'Code\EmmanimLagFix.Code.pdb' },
+        @{ From = "ModsQol.Code\bin\Release\$tfm\ModsQol.Code.pdb";         To = 'Code\ModsQol.Code.pdb' }
     )
     foreach ($b in $binaries) {
         $src = Join-Path $repo $b.From
@@ -63,7 +72,7 @@ $sourceOut = Join-Path $mod 'Source'
 if (Test-Path -LiteralPath $sourceOut) { Remove-Item -LiteralPath $sourceOut -Recurse -Force }
 New-Item -ItemType Directory -Path $sourceOut -Force | Out-Null
 
-$sourceDirs  = @('ModLoader', 'ModPreLoader', 'EmmanimLagFix.Code', 'CosmoDoorstop')
+$sourceDirs  = @('ModLoader', 'ModPreLoader', 'EmmanimLagFix.Code', 'ModsQol.Code', 'CosmoDoorstop')
 $sourceFiles = @('ModLoader.sln', 'Directory.Build.props', 'EMMANIM_FORK.md', 'LICENSE.txt')
 $excluded    = @('bin', 'obj', '.vs', '.xmake', 'build', 'tools')
 
@@ -91,7 +100,8 @@ $required = @(
     'mod.rules', 'README.md', 'logo.png',
     'Install.bat', 'Install.ps1', 'Uninstall.bat', 'Uninstall.ps1',
     'Loader\winmm.dll', 'Loader\ModLoader.dll', 'Loader\LICENSE.LGPL-2.1.txt',
-    'Code\EmmanimLagFix.Code.dll', 'Code\0Harmony.dll', 'Code\LICENSE.Harmony.txt',
+    'Code\EmmanimLagFix.Code.dll', 'Code\ModsQol.Code.dll', 'Code\0Harmony.dll', 'Code\LICENSE.Harmony.txt',
+    'Code\EmmanimLagFix.Code.pdb', 'Code\ModsQol.Code.pdb',
     'multiplayer-memory-diagnostics.flag', 'singleplayer-memory-diagnostics.flag'
 )
 foreach ($name in $required) {

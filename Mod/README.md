@@ -4,7 +4,9 @@ Reduces multiplayer lag and `WaitingForAck` disconnects in heavily modded games.
 
 Version 2.0 adds an optional, source-available .NET 10 code layer. Its dedicated
 loader only accepts this exact mod ID and only loads the bundled Harmony library
-and `EmmanimLagFix.Code.dll`; it does not execute DLLs from other mods.
+plus the code modules named in its compiled allow-list - `EmmanimLagFix.Code.dll`
+and, since 2.1.0, `ModsQol.Code.dll`. It does not execute DLLs from other mods,
+and dropping a DLL into `Code/` by hand does not add it to that list.
 
 The first code patch caches the costly selected-ship resource aggregation behind
 the upper-right resource list for one second. The surrounding widget still runs
@@ -174,6 +176,16 @@ single spans of up to 146 ms in that sort, during which every other thread sits
 spinning. In single player that is a dropped frame; in multiplayer both peers
 freeze together and acks go out late.
 
+Version 2.1.0 adds a second code module, `ModsQol.Code.dll`, for the companion
+mod **Mods QoL**. Nothing about Emmanim's own patches changed. It ships and
+installs with everything else - both modules live in the mod folder, so one
+`Install.bat` run places them together - and does nothing at all unless Mods QoL
+1.65.0 or later is installed. What it does there is let that mod's wire network
+find a part's power storage without knowing the component's name, which no
+`.rules` mod can express on its own. **If you use it, read the multiplayer note
+in *Two halves* below: for Mods QoL players this module is no longer optional
+per player.**
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:
@@ -308,7 +320,9 @@ That is the whole procedure. The installer:
 
 - copies the mod into your Cosmoteer user `Mods` folder, resolving it the same
   way the game does (`%USERPROFILE%\Saved Games` when that exists, otherwise the
-  redirected *Saved Games* known folder, then the SteamID64 profile beneath it);
+  redirected *Saved Games* known folder, then the SteamID64 profile beneath it).
+  The code modules under `Code\` - `0Harmony.dll`, `EmmanimLagFix.Code.dll` and
+  `ModsQol.Code.dll` - are part of that folder and come with it;
 - copies the code loader (`winmm.dll`, `ModLoader.dll`) into `Cosmoteer\Bin`,
   requesting administrator rights only if that folder is not writable;
 - clears the Mark of the Web from the extracted files;
@@ -336,7 +350,7 @@ Switches, for a non-default setup:
 | Half | Where | Multiplayer requirement |
 |---|---|---|
 | `.rules` values | user `Mods` folder | **Every player needs the same version.** These feed the deterministic lockstep simulation. |
-| code loader | `Cosmoteer\Bin` | **Per player, optional.** UI caching and thread priority only; `Bin` is outside `datahash`, so you stay in sync with peers who skip it. |
+| code loader + modules | `Cosmoteer\Bin` and `Mods\emmanim_lag_fix\Code` | **Per player, optional - with one exception.** Emmanim's own patches are UI caching and thread priority only, and `Bin` is outside `datahash`, so you stay in sync with peers who skip them. The exception is `ModsQol.Code.dll`: it changes how much power a Mods QoL wire delivers, which *is* simulation state, so players running **Mods QoL 1.65.0 or later** must either all install the loader or all skip it. Without Mods QoL the module never activates and this does not apply. |
 
 Cosmoteer multiplayer is deterministic lockstep — each client runs the same simulation independently.
 If one player's simulation values differ, the session desyncs. For the same reason, lag comes from
@@ -346,13 +360,13 @@ the slowest PC's compute speed, not from connection quality.
 
 Both wipe added files out of `Cosmoteer\Bin`. Run `Install.bat` again; it will
 skip whatever is already correct. Do the same after updating the mod, so the
-loader in `Bin` and the code module in the mod folder stay the same build.
+loader in `Bin` and the code modules in the mod folder stay the same build.
 
 ### If your antivirus objects
 
 A proxy `winmm.dll` beside a game executable has the same shape as a DLL
-hijack, because that is the mechanism it uses. The source for both the loader
-and the code module is in `Source/`, and upstream is linked under *Credits*.
+hijack, because that is the mechanism it uses. The source for the loader and for
+both code modules is in `Source/`, and upstream is linked under *Credits*.
 Running `Install.bat -NoLoader` gives you the `.rules` optimizations with no
 native DLL at all.
 
@@ -417,6 +431,11 @@ every stall safe to patch. Simulation patches can change lockstep behaviour and
 must be identical on every peer; UI-only caching is safer and may differ between
 clients. The hardcoded ten-second transport timeout remains deliberately
 untouched until its ownership and failure behaviour are fully verified.
+
+Every patch in `EmmanimLagFix.Code` stays on the safe side of that line.
+`ModsQol.Code` deliberately does not - it exists to change a simulation value -
+which is why it is a separate module with its own multiplayer requirement rather
+than another patch in the same assembly.
 
 ## Credits
 

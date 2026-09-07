@@ -1,8 +1,14 @@
 # Emmanim Lag Fix - one-click installer.
 #
 # Installs two independent halves:
-#   1. the mod folder itself, into the game's user Mods folder;
+#   1. the mod folder itself, into the game's user Mods folder. This carries the
+#      .rules data AND the code modules under Code\ - 0Harmony.dll,
+#      EmmanimLagFix.Code.dll and ModsQol.Code.dll - which the loader reads from
+#      the installed mod folder, so they need no separate step and no enumeration
+#      here: the folder is copied whole.
 #   2. the optional code loader (winmm.dll + ModLoader.dll), into Cosmoteer\Bin.
+#      Only these two go outside the mod folder, which is why $loaderFiles lists
+#      exactly them and why the uninstall manifest tracks only their hashes.
 #
 # Run Install.bat rather than calling this directly; the batch wrapper supplies
 # the execution policy that an unsigned downloaded script otherwise lacks.
@@ -239,5 +245,7 @@ if (-not $LoaderOnly) {
     Write-Host 'Start the game and enable Emmanim Lag Fix under Options > Mods.'
     Write-Host 'Multiplayer is lockstep: every player needs the same version of the .rules half.'
     Write-Host 'The loader is per-player and optional; you stay in sync with peers who skip it.'
+    Write-Host 'Exception: with Mods QoL 1.65.0+, ModsQol.Code.dll changes simulation state, so'
+    Write-Host 'those players must all install the loader or all skip it. See README.md.'
 }
 Write-Host ''

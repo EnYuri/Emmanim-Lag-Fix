@@ -15,6 +15,16 @@ namespace ModLoader
         private const string TargetModId = "nayuri.emmanim_lag_fix";
         private const string TargetLibraryName = "EmmanimLagFix.Code";
 
+        // Mods QoL ships its own patches as a second assembly in the same package.
+        // It is a separate Harmony instance patching a disjoint set of methods; it is
+        // listed here rather than folded into EmmanimLagFix.Code so that either module
+        // can be shipped, updated or dropped without touching the other.
+        private static readonly HashSet<string> AllowedLibraryNames =
+        [
+            TargetLibraryName,
+            "ModsQol.Code",
+        ];
+
         // Guid for harmony 2.4.2.0
         // Must be updated if another version of the library is shipped
         private static readonly Guid HarmonyGuid = new("dc2e7251-4b84-4883-90eb-eb05a041522c");
@@ -235,7 +245,7 @@ namespace ModLoader
                     // Never execute arbitrary libraries that happen to live in the
                     // same mod folder: only the pinned Harmony dependency and our
                     // one code module are eligible for loading.
-                    if (libName != "0Harmony" && libName != TargetLibraryName)
+                    if (libName != "0Harmony" && !AllowedLibraryNames.Contains(libName))
                     {
                         Halfling.Logging.Logger.Log($"Library {file} is not part of the Emmanim allow-list, ignored");
                         continue;

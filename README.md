@@ -5,7 +5,14 @@ A Cosmoteer performance mod for very large, heavily modded ships and fleets.
 The project combines ordinary `.rules` tuning with a narrowly-scoped .NET 10
 code layer. The code loader is deliberately restricted to the exact mod ID
 `nayuri.emmanim_lag_fix`; it ignores DLLs from every other mod and accepts only
-the bundled Harmony library and `EmmanimLagFix.Code.dll`.
+the bundled Harmony library and the two code modules shipped in this package,
+`EmmanimLagFix.Code.dll` and `ModsQol.Code.dll`. The allow-list is a fixed set
+compiled into the loader, not a folder scan, so adding a DLL to `Code/` by hand
+does not make it load.
+
+`ModsQol.Code.dll` is a separate module with its own Harmony id, added in 2.1.0.
+It exists only to lift an engine limit for the companion mod **Mods QoL**, and is
+inert without it - see [Mods QoL support](#mods-qol-support).
 
 > [!WARNING]
 > Every multiplayer participant must install the same mod version because the
@@ -101,6 +108,8 @@ whether the cause is on their side. Delete a flag file to turn its line off.
 Mod/                            Distributable mod folder
 EmmanimLagFix.Code/             Harmony performance patches
 EmmanimLagFix.Code.SmokeTest/   Patch-resolution smoke test
+ModsQol.Code/                   Mods QoL support module (see below)
+ModsQol.Code.SmokeTest/         Its own patch-resolution smoke test
 ModLoader/                      Dedicated managed loader fork
 ModPreLoader/                   Alternate preloader
 CosmoDoorstop/                  Native Windows entry point
@@ -114,7 +123,11 @@ Releases are distributed as a single archive from the
 anywhere and run `Install.bat`; there is no Steam Workshop item to subscribe to.
 
 The installer places the mod in the Cosmoteer user `Mods` folder and the code
-loader in `Cosmoteer\Bin`, resolving both the same way the game does. It
+loader in `Cosmoteer\Bin`, resolving both the same way the game does. Both code
+modules travel inside the mod folder, so a single `Install.bat` run puts
+`EmmanimLagFix.Code.dll` and `ModsQol.Code.dll` in place together; only
+`winmm.dll` and `ModLoader.dll` go outside it, and only those two are tracked in
+the uninstall manifest. It
 declines to run while the game is open, to overwrite a `winmm.dll` or
 `ModLoader.dll` it did not place, or to replace a mod folder that is not this
 mod. `Uninstall.bat` removes files only when their hashes still match its
@@ -125,6 +138,35 @@ native DLL. See `Mod/README.md` for the full switch list.
 
 To work from a source tree instead, copy `Mod` into the user `Mods` folder and
 run `Mod/Install.bat -LoaderOnly`.
+
+## Mods QoL support
+
+`ModsQol.Code.dll` (2.1.0) is a second, independent module: its own Harmony id,
+its own smoke test, and a set of patched methods disjoint from every Emmanim
+patch. It exists because a data-only mod cannot express one thing.
+
+A Cosmoteer part proxies a neighbouring part's storage by **naming** a component.
+`RelativePartCriteria` matches part identity only, and `ProxyableComponents`
+stops at the first entry whose criteria match rather than trying each name in
+turn, so there is no way to write "whatever component that part uses to store
+power". A mod that delivers power over a wire network therefore has to enumerate
+every recipient part by hand, and that list can never keep up with the mods a
+player actually has installed.
+
+This module recognizes a sentinel component ID of the form
+`znayuri_any_<resource>`, resumes the scan from the entry vanilla stopped on, and
+binds the part's largest real storage of that resource.
+
+It is inert without **Mods QoL** 1.65.0 or later, because that sentinel ID exists
+in no other mod's rules and every patch returns on its first branch. Mods QoL is
+equally usable without this module: an unresolved component ID is not an error,
+so its wire network simply keeps the rate-limited delivery path it shipped in
+1.64.1. Neither mod reads the other's version, and neither requires the other.
+
+> [!WARNING]
+> The sentinel changes how much power a wire delivers, which is simulation state.
+> Players in the same multiplayer game running Mods QoL 1.65.0 or later must
+> either all install this loader or all skip it.
 
 ## Packaging a release
 

@@ -10,7 +10,10 @@ The upstream loader is licensed under LGPL-2.1. The original license remains in
 ## Deliberate restrictions
 
 - Only an enabled mod whose exact ID is `nayuri.emmanim_lag_fix` is scanned.
-- Only `0Harmony.dll` 2.4.2 and `EmmanimLagFix.Code.dll` are eligible to load.
+- Only `0Harmony.dll` 2.4.2 and the code modules named in the loader's compiled
+  allow-list - `EmmanimLagFix.Code.dll` and, since 2.1.0, `ModsQol.Code.dll` -
+  are eligible to load. The list is a constant in `ModLoader.cs`, so it cannot be
+  extended by dropping a file into `Code/`.
 - DLLs from every other enabled mod are ignored.
 - The normal game launch path remains available by uninstalling `winmm.dll` and
   `ModLoader.dll` with the supplied uninstaller.

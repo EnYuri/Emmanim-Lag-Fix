@@ -442,3 +442,10 @@ artifacts/
 # minute, and a multiplayer stall can only be attributed by comparing the same
 # minute on both peers, which needs the remote side reporting too.
 Mod/korean-ime-diagnostics.flag
+
+# Mod/ is the distributable folder, so its binaries are committed rather than
+# rebuilt on demand - a fresh clone can run Pack.ps1 with no build output. The
+# symbol files belong with them for the same reason: Pack.ps1 now lists them as
+# required, and without this negation the generic *.pdb rule above would leave a
+# clean checkout unable to pack.
+!Mod/Code/*.pdb

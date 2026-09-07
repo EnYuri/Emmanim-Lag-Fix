@@ -4,6 +4,9 @@
 # folder. Every deletion is guarded by the manifest this mod wrote at install
 # time, so a file the installer did not place is never removed.
 #
+# The code modules under Code\ are not listed here: they live inside the mod
+# folder and go with it, so they need no manifest entry of their own.
+#
 # Run Uninstall.bat rather than calling this directly.
 
 [CmdletBinding()]
