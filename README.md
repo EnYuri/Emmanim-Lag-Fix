@@ -178,8 +178,21 @@ This copies the freshly built loader, proxy and code module into `Mod/`,
 regenerates `Mod/Source` from the repository (the LGPL source bundle that ships
 beside the binary), and writes `build/Emmanim-Lag-Fix-<version>.zip`. The
 version is read from `Mod/mod.rules`, so the archive name cannot disagree with
-what the game reports. The script prints the tag and `gh release create`
-commands to run next.
+what the game reports. The archive it writes is for local verification; the one
+that ships is built by CI from the committed payload.
+
+Publishing is therefore just the tag:
+
+```powershell
+git tag -a v<version> -m "Emmanim Lag Fix <version>"
+git push origin v<version>
+```
+
+Do not also run `gh release create`. The workflow's last step does exactly that,
+and a release made by hand fails the job with *a release with the same tag name
+already exists*. Note too that this repository has an `upstream` remote, so a
+bare `gh` command targets the fork source rather than this repository - always
+pass `--repo EnYuri/Emmanim-Lag-Fix`.
 
 Pushing a matching `v*` tag runs `.github/workflows/release.yml`. The Windows
 runner validates the tag against `Mod/mod.rules`, checks the committed installer

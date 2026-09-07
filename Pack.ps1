@@ -139,8 +139,14 @@ Write-Host "$zip" -ForegroundColor Green
 Write-Host "  $size MB"
 Write-Host "  SHA-256 $hash"
 Write-Host ''
-Write-Host 'Publish with:'
+# .github/workflows/release.yml publishes on a v* tag: it re-runs this script
+# on the committed payload and creates the release itself. Creating one by hand
+# as well makes that job fail on 'a release with the same tag name already
+# exists', so the archive above is for local verification only - pushing the tag
+# is the whole publish step.
+Write-Host 'Publish by pushing the tag; CI builds and releases from it:'
 Write-Host "  git tag -a v$version -m ""Emmanim Lag Fix $version"""
 Write-Host "  git push origin v$version"
-Write-Host "  gh release create v$version ""$zip"" --title ""Emmanim Lag Fix $version"" --notes-file CHANGELOG.md"
+Write-Host ''
+Write-Host 'Do NOT run gh release create yourself - the workflow does it.'
 Write-Host ''

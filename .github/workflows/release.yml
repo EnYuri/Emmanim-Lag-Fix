@@ -34,6 +34,9 @@ jobs:
             '.\Mod\Install.bat',
             '.\Mod\Install.ps1',
             '.\Mod\Code\EmmanimLagFix.Code.dll',
+            '.\Mod\Code\EmmanimLagFix.Code.pdb',
+            '.\Mod\Code\ModsQol.Code.dll',
+            '.\Mod\Code\ModsQol.Code.pdb',
             '.\Mod\Code\0Harmony.dll',
             '.\Mod\Loader\winmm.dll',
             '.\Mod\Loader\ModLoader.dll'
@@ -76,6 +79,9 @@ jobs:
             'emmanim_lag_fix/Install.ps1',
             'emmanim_lag_fix/mod.rules',
             'emmanim_lag_fix/Code/EmmanimLagFix.Code.dll',
+            'emmanim_lag_fix/Code/EmmanimLagFix.Code.pdb',
+            'emmanim_lag_fix/Code/ModsQol.Code.dll',
+            'emmanim_lag_fix/Code/ModsQol.Code.pdb',
             'emmanim_lag_fix/Loader/winmm.dll',
             'emmanim_lag_fix/multiplayer-memory-diagnostics.flag',
             'emmanim_lag_fix/singleplayer-memory-diagnostics.flag'
