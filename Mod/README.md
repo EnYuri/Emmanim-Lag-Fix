@@ -304,6 +304,27 @@ the reach without doubling the margin converts idle crew into pointless walking.
 Lowering either one is still wrong for the original reason: it truncates the candidate scan, so crew
 stand idle beside work they never scanned.
 
+### Idle worker threads
+
+Halfling runs one `FastParallel` worker per physical core minus one, and vanilla never
+lets any of them sleep — the idle branch of the worker loop is `SpinWait.SpinOnce(-1)`,
+where `-1` means "never block". In a 20-second trace of a degraded session that spin was
+**39 of the 65.9 seconds of CPU the whole process used**, with a further 17.8 s of GC
+suspension rendezvous underneath it, against about 27 s of real work.
+
+That is not only wasted power. A spinning thread has to be caught and stopped at every
+garbage collection, and — more to the point here — a core permanently held by a worker
+with nothing to do is a core Steam's networking thread is not getting, which is the exact
+starvation the disconnect asserts name.
+
+Workers now spin for a bounded budget, long enough to cover the back-to-back dispatches
+inside one frame, then block until the next batch of work wakes them. Work still runs the
+moment it arrives; only the waiting is free now.
+
+`fastparallel-park.txt` beside this file overrides the budget for calibration
+(`<spin budget> [backstop ms]`, default `60 5`); a budget of `0` restores vanilla
+spinning outright. It does not normally need to exist.
+
 ### What is deliberately left alone
 
 `SourceRefreshesPerTick` stays at vanilla 10. It is a give-up point too — how much of the resource
@@ -411,6 +432,7 @@ Every value in `mod.rules` carries its vanilla number in a comment. Restart the 
 | Marked mining or salvage pickup is slow | Raise `LowPriorityJobAssignmentsPerSecond` above 70 cautiously; this increases crew-search work |
 | Only some Q-beam-mined resources have no pickup marker | Use Mods QoL 1.4.7 or later; assignment rates cannot replace the skipped salvage callback |
 | Transfer or salvage orders feel sluggish | Raise the corresponding expensive-check rate above 0.5 cautiously |
+| CPU sits high with nothing happening | Already addressed: idle `FastParallel` workers park. `fastparallel-park.txt` with `0` restores vanilla spinning |
 | Still dropping | See "Beyond this mod" below |
 | Crew stuck in airlocks | Do not touch `CrewUpdatesPerSecond` (never below 6) |
 

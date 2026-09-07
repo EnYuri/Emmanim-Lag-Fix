@@ -1674,5 +1674,155 @@ foreach (var allocOverload in AccessTools
     }
 }
 
+// FastParallel's workers never sleep: RunThread's idle branch is SpinOnce(-1),
+// which was 39.0 s of the 65.9 s of process CPU in a 20-second trace, with 17.8 s
+// of GC rendezvous underneath the spin. The idle branch now parks past a spin
+// budget and is pulsed by AddToLive. Prove the rewrite landed and that the
+// park/wake handshake actually works, since a broken one silently costs
+// parallelism rather than failing.
+{
+    var fastParallelType = halflingAssembly.GetType("Halfling.Performance.FastParallel", throwOnError: true)!;
+
+    var runThread = AccessTools.DeclaredMethod(fastParallelType, "RunThread")
+        ?? throw new MissingMethodException(fastParallelType.FullName, "RunThread");
+    var addToLive = AccessTools.DeclaredMethod(fastParallelType, "AddToLive")
+        ?? throw new MissingMethodException(fastParallelType.FullName, "AddToLive");
+
+    var parkPatchType = typeof(EntryPoint).Assembly
+        .GetType("EmmanimLagFix.Code.FastParallelIdleParkPatch", throwOnError: true)!;
+
+    if (Harmony.GetPatchInfo(runThread)?.Transpilers.Any(patch => patch.owner == smokeId) != true)
+    {
+        throw new InvalidOperationException(
+            "The idle-branch transpiler was not installed on FastParallel.RunThread.");
+    }
+    if (AccessTools.Field(parkPatchType, "Applied").GetValue(null) is not true)
+    {
+        throw new InvalidOperationException(
+            "FastParallel.RunThread's idle SpinOnce(-1) was not rewritten, so every worker would "
+            + "keep spinning: "
+            + (AccessTools.Field(parkPatchType, "FailureReason").GetValue(null) as string
+               ?? "no reason recorded")
+            + ".");
+    }
+    if (Harmony.GetPatchInfo(addToLive)?.Postfixes.Any(patch => patch.owner == smokeId) != true)
+    {
+        throw new InvalidOperationException(
+            "The wake postfix was not installed on FastParallel.AddToLive, so a parked worker "
+            + "would only ever be released by the backstop timeout.");
+    }
+
+    // Malformed IL surfaces here rather than on a worker thread whose exception
+    // nobody can catch.
+    RuntimeHelpers.PrepareMethod(runThread.MethodHandle);
+
+    // The pool the park test consults is built by the static initializer, which
+    // reads App.Platform and tolerates it being null in this standalone host.
+    RuntimeHelpers.RunClassConstructor(fastParallelType.TypeHandle);
+
+    var spinBudget = (int)AccessTools.Field(parkPatchType, "SpinBudget").GetValue(null)!;
+    if (spinBudget <= 0)
+    {
+        throw new InvalidOperationException(
+            "The spin budget is not positive, so no worker would ever spin before parking.");
+    }
+
+    var parkCountField = AccessTools.Field(parkPatchType, "ParkCount");
+    var wakeCountField = AccessTools.Field(parkPatchType, "WakeCount");
+    long Parks() => (long)parkCountField.GetValue(null)!;
+    long Wakes() => (long)wakeCountField.GetValue(null)!;
+
+    var idleSpin = AccessTools.DeclaredMethod(parkPatchType, "IdleSpin")
+        ?? throw new MissingMethodException(parkPatchType.FullName, "IdleSpin");
+    var wake = AccessTools.DeclaredMethod(parkPatchType, "Wake")
+        ?? throw new MissingMethodException(parkPatchType.FullName, "Wake");
+
+    // Invoked by reference so the SpinWait's own Count is what drives the budget,
+    // exactly as it does on a real worker.
+    void Spin(ref SpinWait spin)
+    {
+        object[] args = { spin };
+        idleSpin.Invoke(null, args);
+        spin = (SpinWait)args[0];
+    }
+
+    // Below the budget a worker must behave exactly as vanilla did.
+    var parksBefore = Parks();
+    var cold = new SpinWait();
+    Spin(ref cold);
+    if (cold.Count != 1 || Parks() != parksBefore)
+    {
+        throw new InvalidOperationException(
+            "A worker below the spin budget parked instead of spinning, which would give up "
+            + "parallelism inside a frame rather than only between frames.");
+    }
+
+    // Past it, it must park - and AddToLive must be able to see that it has.
+    using var stop = new ManualResetEventSlim(false);
+    Exception? workerFailure = null;
+    var worker = new Thread(() =>
+    {
+        try
+        {
+            var spin = new SpinWait();
+            while (spin.Count < spinBudget)
+            {
+                spin.SpinOnce(-1);
+            }
+            while (!stop.IsSet)
+            {
+                Spin(ref spin);
+            }
+        }
+        catch (Exception ex)
+        {
+            workerFailure = ex;
+        }
+    })
+    { IsBackground = true, Name = "FastParallel park smoke" };
+    worker.Start();
+
+    var wakesBefore = Wakes();
+    var deadline = DateTime.UtcNow.AddSeconds(5);
+    while (DateTime.UtcNow < deadline
+           && workerFailure == null
+           && (Parks() == parksBefore || Wakes() == wakesBefore))
+    {
+        // Wake counts only when it actually observed a sleeper, so passing this loop
+        // is the whole handshake: the park is published with a full fence before the
+        // work test, and the pulse fences before reading it.
+        wake.Invoke(null, null);
+        Thread.Sleep(1);
+    }
+
+    stop.Set();
+    wake.Invoke(null, null);
+    var joined = worker.Join(TimeSpan.FromSeconds(5));
+
+    if (workerFailure != null)
+    {
+        throw new InvalidOperationException(
+            "The parked-worker smoke thread threw, so the idle branch is not safe to run on a "
+            + "real FastParallel worker.", workerFailure);
+    }
+    if (!joined)
+    {
+        throw new InvalidOperationException(
+            "A parked FastParallel worker did not return after a wake, so the idle branch can hang.");
+    }
+    if (Parks() == parksBefore)
+    {
+        throw new InvalidOperationException(
+            "A worker past the spin budget never parked, so the spin this patch exists to stop "
+            + "would still run.");
+    }
+    if (Wakes() == wakesBefore)
+    {
+        throw new InvalidOperationException(
+            "AddToLive's wake never observed a parked worker, so a dispatch would leave the pool "
+            + "asleep until the backstop timeout.");
+    }
+}
+
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, and throttled minimap membership scanning patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, and parked FastParallel idle workers patches resolved and compiled on this game build.");

@@ -1,5 +1,82 @@
 # Changelog
 
+## 2.1.3
+
+**FastParallel workers park when idle instead of spinning forever.**
+
+Halfling starts one worker thread per physical core minus one and never lets any
+of them sleep. `FastParallel.RunThread` is an unbounded loop whose idle branch is
+a single instruction pair:
+
+```csharp
+while (true)
+{
+    if (!RunUntilEmpty(profilerJobs))
+    {
+        if (!IsRunning) { s_wait.WaitOne(); spinWait.Reset(); }
+        else spinWait.SpinOnce(-1);      // <- never blocks
+    }
+    else spinWait.Reset();
+}
+```
+
+`-1` is `SpinWait`'s documented "never call `Thread.Sleep(1)`" sentinel, so past
+the yield threshold every idle worker alternates `Thread.Yield` and
+`Thread.Sleep(0)` for as long as the game runs.
+
+That is the largest single CPU item measured in this installation. A 20-second
+sampled trace of a degraded 5.7-hour session recorded 65.9 s of process CPU
+across 16 logical cores, of which `SpinWait.SpinOnce` was **39.0 s (59%)** with
+`Thread.PollGCWorker` **17.8 s (27%)** underneath it, against about 26.9 s of
+real work. The second figure is why this costs more than watts: a spinning thread
+runs in cooperative GC mode and every collection has to rendezvous with all
+sixteen of them, while a thread blocked in a wait is already preemptive and costs
+the collector nothing. It is also the mechanism behind the multiplayer drops —
+sixteen permanently hot threads are what starves Steam's networking thread, which
+is what the `SteamNetworkingSockets service thread waited 65ms for lock!` asserts
+say directly.
+
+A transpiler now replaces that one `SpinOnce(-1)` with a bounded spin. Below a
+budget of 60 `SpinWait` iterations — roughly 0.7 ms, measured on this machine as
+254 us to climb to count 20 plus about 12 us per step after — the worker spins
+exactly as vanilla did, which covers the back-to-back `For` dispatches inside one
+frame since vanilla calls `SpinWait.Reset` the moment a batch is found. Past it
+the worker parks on a monitor that a postfix on `AddToLive` pulses, so it wakes on
+the next dispatch rather than on a timer. `Mod/fastparallel-park.txt` overrides
+the budget and the backstop timeout for calibration runs; a budget of zero leaves
+vanilla behaviour untouched.
+
+**Raising `SpinOnce`'s `sleep1Threshold` instead was measured and rejected.** It
+is a one-token IL change and would have been far simpler, but Cosmoteer never
+calls `timeBeginPeriod` — no binary under `Bin/` does except the runtime and our
+own doorstop — so the process runs at the default timer resolution, and
+`Thread.Sleep(1)` on this machine takes **10.6 ms**. That would park a worker for
+most of a 60 fps frame. The monitor path wakes in microseconds and keeps its
+timeout only as a backstop.
+
+The handshake is written to be exact rather than usually right, because a missed
+wake does not fail — it silently costs parallelism. A worker publishes its park
+with `Interlocked.Increment` (a full fence) *before* testing the live-task pool,
+and `Wake` issues `Thread.MemoryBarrier` after the task is in the pool and before
+reading the sleeper count, so x86 store-load reordering cannot let the two miss
+each other. Whichever order they interleave in, either the dispatcher sees a
+sleeper and pulses it, or the sleeper sees the task and does not park.
+
+Nothing here can deadlock or drop work. `For` runs batches on the calling thread
+and spins on `PendingBatches` until its task is complete, so a dispatch with every
+worker asleep still finishes — serially. Only parallelism is at risk, bounded by
+the wake latency. Nothing touches simulation state either, so this is
+lockstep-neutral: it changes when work runs, never what it computes.
+
+Smoke: the transpiler's `Applied` flag is asserted (the shape guard requires
+exactly one `ldloca` / `ldc.i4.m1` / `SpinOnce(int32)` site, so a future build that
+bounds its own spin is left alone rather than rewritten), the rewritten
+`RunThread` is forced through `RuntimeHelpers.PrepareMethod` so malformed IL
+fails there instead of on a worker thread whose exception nobody can catch, and
+the park/wake handshake is exercised live against the real `FastParallel` type —
+a worker below the budget must spin and not park, a worker past it must park, and
+`Wake` must observe that it has.
+
 ## 2.1.2
 
 **Mods QoL code layer: rebind a proxy that vanilla unbound for the wrong part.**

@@ -58,6 +58,14 @@ inert without it - see [Mods QoL support](#mods-qol-support).
 - Rescans minimap membership at 10 Hz and re-tests only the previously visible
   sources in between, instead of asking every object in the sector whether it is
   visible on every drawn frame. Disappearance and blip positions stay immediate.
+- Parks idle `FastParallel` worker threads instead of letting them spin
+  forever. Halfling's idle branch is `SpinWait.SpinOnce(-1)`, which never
+  blocks; it was 39.0 s of the 65.9 s of process CPU in a 20-second trace, with
+  17.8 s of GC suspension rendezvous underneath it. Workers now spin for a
+  bounded budget — long enough to cover back-to-back dispatches inside a frame —
+  and then block until the next dispatch pulses them. Raising `SpinOnce`'s
+  `sleep1Threshold` instead was rejected after measuring `Thread.Sleep(1)` at
+  10.6 ms in a process that never calls `timeBeginPeriod`.
 
 The code patches UI aggregation/construction, resource bookkeeping, visual
 updates, and local multiplayer timeout/initialization behavior. It does not
