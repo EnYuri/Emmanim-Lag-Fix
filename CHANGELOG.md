@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.1.4
+
+**The idle park uses one event per worker, not one shared monitor.**
+
+2.1.3 was measured in the running game and the spin is genuinely gone —
+`SpinWait.SpinOnce` does not appear anywhere in a 20-second trace — but total
+process CPU did not move. The cost had been relocated, not removed:
+
+```
+Monitor.Wait            19.07 s  27.6%   <- was SpinWait.SpinOnce
+Thread.PollGCWorker      8.11 s  11.7%   (was 27%)
+Monitor.Enter_Slowpath   3.97 s   5.7%
+Monitor.PulseAll         0.42 s   1.7% of the main thread
+```
+
+Ten workers parked on a single monitor and `AddToLive` woke them with
+`PulseAll`, so every dispatch was a thundering herd: all ten wake, nine of them
+spin in `Monitor.Enter_Slowpath` re-acquiring the one lock, and the `PulseAll`
+plus part of that contention lands on whichever thread dispatched — usually the
+**main** thread, which is the one thread that could least afford it.
+
+The 5 ms backstop compounded it. Nothing under `Bin/` calls `timeBeginPeriod`,
+so the OS rounds that up to its ~11 ms timer granularity, and the trace counted
+**12,316 timeouts against 180 wakes** in 20 seconds — 62 park/probe/re-park
+cycles per worker per second, driven by the timer rather than by work arriving.
+
+Each worker now owns a `ManualResetEventSlim` created with no spin count, and
+neither `IdleSpin` nor `Wake` takes a lock at all: `Wake` walks a copy-on-grow
+array and sets only the events of workers that say they are parked. The backstop
+rises to 200 ms, since the park/wake handshake is exact and a lost set cannot
+lose work either — vanilla's loop probes again the moment the park returns.
+
+The diagnostics line now carries `fppark=<parks>/<wakes>/<timeouts>` so the next
+measurement is read off the log rather than inferred from a sampled trace. A
+timeout share near 100% means the handshake is not firing.
+
+**What the same trace says about the rest of the process**, recorded here because
+it redirects where the next work goes: the main thread ran at 90% of one core
+while the ten workers sat at about 9% each, so parallel capacity is not the
+constraint — the main thread is. Its largest single item is `Thread.PollGCWorker`
+at **20.5%**, i.e. GC suspension, which the allocation rate drives and this patch
+does not. Half of the main thread's CPU is inside `FastParallel.For`, with 4.4%
+of it spinning in `_WaitUntilFinished` waiting for workers to pick up batches.
+
 ## 2.1.3
 
 **FastParallel workers park when idle instead of spinning forever.**

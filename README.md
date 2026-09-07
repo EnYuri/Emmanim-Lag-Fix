@@ -63,7 +63,10 @@ inert without it - see [Mods QoL support](#mods-qol-support).
   blocks; it was 39.0 s of the 65.9 s of process CPU in a 20-second trace, with
   17.8 s of GC suspension rendezvous underneath it. Workers now spin for a
   bounded budget — long enough to cover back-to-back dispatches inside a frame —
-  and then block until the next dispatch pulses them. Raising `SpinOnce`'s
+  and then block on an event of their own until the next dispatch releases them.
+  Neither the park nor the wake takes a lock: 2.1.3 shared one monitor and simply
+  relocated the cost into `Monitor.Wait` and `Enter_Slowpath`, part of it on the
+  main thread. Raising `SpinOnce`'s
   `sleep1Threshold` instead was rejected after measuring `Thread.Sleep(1)` at
   10.6 ms in a process that never calls `timeBeginPeriod`.
 

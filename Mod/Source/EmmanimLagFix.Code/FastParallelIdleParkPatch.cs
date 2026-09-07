@@ -29,14 +29,22 @@ namespace EmmanimLagFix.Code;
 /// The repair is a bounded spin. Below <see cref="SpinBudget"/> the worker spins
 /// exactly as vanilla does — which covers the back-to-back <c>For</c> dispatches
 /// inside one frame, since vanilla calls <c>SpinWait.Reset</c> the moment a batch
-/// is found. Past it the worker parks on a monitor that <c>AddToLive</c> pulses,
-/// so it wakes on the next dispatch rather than on a timer.
+/// is found. Past it the worker parks on an event that <c>AddToLive</c> sets, so
+/// it wakes on the next dispatch rather than on a timer.
+///
+/// Every parked worker gets its <b>own</b> event and neither side takes a lock.
+/// Version 2.1.3 parked all of them on one monitor and pulsed it, which moved the
+/// cost rather than removing it: a 20-second trace showed <c>SpinWait.SpinOnce</c>
+/// gone but <c>Monitor.Wait</c>, <c>Monitor.Enter_Slowpath</c> and
+/// <c>Monitor.PulseAll</c> in its place — and the pulse plus part of the lock
+/// contention landed on the <i>main</i> thread, because <c>AddToLive</c> runs on
+/// whichever thread dispatched. Ten waiters on one monitor is a thundering herd
+/// per dispatch; ten independent events are not.
 ///
 /// Raising <c>SpinOnce</c>'s sleep1Threshold instead — a one-token change — was
 /// measured and rejected: Cosmoteer never calls <c>timeBeginPeriod</c>, and
 /// <c>Thread.Sleep(1)</c> on this machine takes <b>10.6 ms</b>, which would park
-/// a worker for most of a frame. The monitor path wakes in microseconds and keeps
-/// its timeout only as a backstop.
+/// a worker for most of a frame.
 ///
 /// This cannot deadlock or drop work. <c>For</c> runs batches on the calling
 /// thread and spins on <c>PendingBatches</c> until the task is complete, so with
@@ -55,13 +63,40 @@ internal static class FastParallelIdleParkPatch
     /// <summary>Why the rewrite was skipped, for the smoke test's message.</summary>
     internal static string? FailureReason;
 
-    /// <summary>Parks and pulses so far, for diagnostics.</summary>
+    /// <summary>Parks so far.</summary>
     internal static long ParkCount;
+
+    /// <summary>Dispatches that found at least one parked worker to release.</summary>
     internal static long WakeCount;
 
-    private static readonly object Idle = new();
+    /// <summary>Parks that ended on the backstop timeout instead of on a set.</summary>
+    internal static long TimeoutCount;
 
-    /// <summary>Workers that have announced they are about to park. Read by <see cref="Wake"/>.</summary>
+    /// <summary>
+    /// One parked worker. The event is level-triggered, so a set that arrives
+    /// before the wait still releases it, and it is created with no spin count so
+    /// the wait goes straight to a kernel block rather than burning the CPU this
+    /// patch exists to save.
+    /// </summary>
+    private sealed class Waiter
+    {
+        public readonly ManualResetEventSlim Event = new(initialState: false, spinCount: 0);
+
+        /// <summary>Set while this worker is in, or about to enter, its wait.</summary>
+        public volatile bool Parked;
+    }
+
+    [ThreadStatic]
+    private static Waiter? t_waiter;
+
+    // Registered once per worker thread and never removed - FastParallel's threads
+    // live for the process. Wake walks this without a lock, so the array grows by
+    // publishing a copy, never by mutating the one a walk may be reading.
+    private static Waiter?[] s_waiters = new Waiter?[32];
+    private static int s_waiterCount;
+    private static readonly object RegisterLock = new();
+
+    /// <summary>Workers that have announced a park. Read by <see cref="Wake"/>.</summary>
     private static int s_sleepers;
 
     /// <summary>
@@ -73,13 +108,22 @@ internal static class FastParallelIdleParkPatch
     /// </summary>
     internal static readonly int SpinBudget;
 
-    /// <summary>Backstop timeout for a park. The pulse is the normal wake path.</summary>
+    /// <summary>
+    /// Backstop timeout for a park; a set is the normal wake path.
+    ///
+    /// 2.1.3 used 5 ms, which the OS rounds up to its ~11 ms timer granularity in
+    /// a process that never calls <c>timeBeginPeriod</c>, and a trace showed
+    /// 12,316 timeouts against 180 wakes in 20 seconds — every worker on a
+    /// treadmill of wake, probe, re-park. The handshake below is exact, so this
+    /// only has to cover a lost set, and a lost set cannot lose work either:
+    /// vanilla's loop probes again the moment the park returns.
+    /// </summary>
     internal static readonly int ParkMilliseconds;
 
     static FastParallelIdleParkPatch()
     {
         var budget = 60;
-        var park = 5;
+        var park = 200;
 
         // Optional override, one line "<budget> [parkMs]", beside the mod folder.
         // Written for calibration runs; absent in a normal install.
@@ -117,12 +161,42 @@ internal static class FastParallelIdleParkPatch
     }
 
     /// <summary>
+    /// Parks, wakes that found a sleeper, and parks that ended on the backstop,
+    /// for the diagnostics log line. A timeout share near 100% means the wake
+    /// handshake is not firing and the workers are back on a timer.
+    /// </summary>
+    internal static string Counters() =>
+        Volatile.Read(ref ParkCount).ToString(CultureInfo.InvariantCulture)
+        + "/" + Volatile.Read(ref WakeCount).ToString(CultureInfo.InvariantCulture)
+        + "/" + Volatile.Read(ref TimeoutCount).ToString(CultureInfo.InvariantCulture);
+
+    private static Waiter Register()
+    {
+        var waiter = new Waiter();
+        lock (RegisterLock)
+        {
+            if (s_waiterCount == s_waiters.Length)
+            {
+                // Publish a copy rather than resizing in place: Wake walks the array
+                // with no lock and must never see a half-built one.
+                var grown = new Waiter?[s_waiters.Length * 2];
+                Array.Copy(s_waiters, grown, s_waiterCount);
+                Volatile.Write(ref s_waiters, grown);
+            }
+
+            // The slot is filled before the count that publishes it.
+            s_waiters[s_waiterCount] = waiter;
+            Volatile.Write(ref s_waiterCount, s_waiterCount + 1);
+        }
+        return waiter;
+    }
+
+    /// <summary>
     /// Replaces vanilla's idle <c>spinWait.SpinOnce(-1)</c>.
     ///
     /// The parameter is the worker's own <c>SpinWait</c> local, so
     /// <c>SpinWait.Count</c> is the spin budget's clock and vanilla's existing
-    /// <c>Reset</c> on finding work is what refills it. No state of our own is
-    /// kept per worker.
+    /// <c>Reset</c> on finding work is what refills it.
     /// </summary>
     internal static void IdleSpin(ref SpinWait spin)
     {
@@ -132,10 +206,17 @@ internal static class FastParallelIdleParkPatch
             return;
         }
 
+        var waiter = t_waiter ??= Register();
+
+        // Reset before announcing the park, so a set that arrives from here on is
+        // the one this park consumes.
+        waiter.Event.Reset();
+        waiter.Parked = true;
+
         // Announce the park before testing for work. Interlocked is a full fence,
         // and Wake fences before reading this counter, so the two cannot miss each
-        // other: either the dispatcher sees a sleeper and pulses, or its task was
-        // published before our test below and we find it.
+        // other: either the dispatcher sees a sleeper and sets our event, or its
+        // task was published before the test below and we find it here.
         Interlocked.Increment(ref s_sleepers);
         try
         {
@@ -144,21 +225,15 @@ internal static class FastParallelIdleParkPatch
                 return;
             }
 
-            lock (Idle)
+            ParkCount++;
+            if (!waiter.Event.Wait(ParkMilliseconds))
             {
-                // Wake pulses under this same lock, so a task published between the
-                // test above and here is either visible now or arrives as a pulse.
-                if (FastParallel.s_liveTasks.TryPeek(out _))
-                {
-                    return;
-                }
-
-                ParkCount++;
-                Monitor.Wait(Idle, ParkMilliseconds);
+                TimeoutCount++;
             }
         }
         finally
         {
+            waiter.Parked = false;
             Interlocked.Decrement(ref s_sleepers);
         }
     }
@@ -167,17 +242,25 @@ internal static class FastParallelIdleParkPatch
     internal static void Wake()
     {
         // The task is already in the pool; order that write before this read, or
-        // x86 store-load reordering can hide a sleeper that is about to test it.
+        // x86 store-load reordering can hide a sleeper about to test for it.
         Thread.MemoryBarrier();
         if (Volatile.Read(ref s_sleepers) == 0)
         {
             return;
         }
 
-        lock (Idle)
+        WakeCount++;
+
+        // No lock on this path. It runs on whichever thread dispatched - usually
+        // the main one - and a lock here is exactly what 2.1.3 got wrong.
+        var waiters = Volatile.Read(ref s_waiters);
+        var count = Volatile.Read(ref s_waiterCount);
+        for (var i = 0; i < count && i < waiters.Length; i++)
         {
-            WakeCount++;
-            Monitor.PulseAll(Idle);
+            if (waiters[i] is { Parked: true } waiter)
+            {
+                waiter.Event.Set();
+            }
         }
     }
 
@@ -262,7 +345,7 @@ internal static class FastParallelIdleParkPatch
         }
     }
 
-    /// <summary>Pulses parked workers as soon as a task becomes claimable.</summary>
+    /// <summary>Releases parked workers as soon as a task becomes claimable.</summary>
     [HarmonyPatch]
     internal static class AddToLiveWake
     {

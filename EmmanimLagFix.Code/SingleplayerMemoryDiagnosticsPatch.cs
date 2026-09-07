@@ -98,7 +98,10 @@ internal static class SingleplayerMemoryDiagnosticsPatch
             $"fragmentedMiB={ToMiB(gcInfo.FragmentedBytes):F0} handles={process.HandleCount} " +
             $"allocatedMiBs={ToMiB(allocatedDelta) / elapsedSeconds:F1} gc={gen0Delta}/{gen1Delta}/{gen2Delta} " +
             $"ships={sim.Ships.Count} parts={liveParts}/{blueprintParts} " +
-            $"stasis={sim.Stasis.Count}/{preloadedStasis} decals={decalPickers}/{decalItems}");
+            $"stasis={sim.Stasis.Count}/{preloadedStasis} decals={decalPickers}/{decalItems} " +
+            // parks/wakes/timeouts of the FastParallel idle park. A timeout share
+            // near 100% means the wake handshake is not firing.
+            $"fppark={FastParallelIdleParkPatch.Counters()}");
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;

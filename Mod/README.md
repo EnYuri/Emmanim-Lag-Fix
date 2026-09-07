@@ -318,8 +318,9 @@ with nothing to do is a core Steam's networking thread is not getting, which is 
 starvation the disconnect asserts name.
 
 Workers now spin for a bounded budget, long enough to cover the back-to-back dispatches
-inside one frame, then block until the next batch of work wakes them. Work still runs the
-moment it arrives; only the waiting is free now.
+inside one frame, then block until the next batch of work wakes them — each on an event of
+its own, with no lock on either side. Work still runs the moment it arrives; only the
+waiting is free now.
 
 `fastparallel-park.txt` beside this file overrides the budget for calibration
 (`<spin budget> [backstop ms]`, default `60 5`); a budget of `0` restores vanilla
