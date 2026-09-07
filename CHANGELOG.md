@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.1.2
+
+**Mods QoL code layer: rebind a proxy that vanilla unbound for the wrong part.**
+
+`ProxyHandler<T>.OnProxiedPartRemoving(Part part)` never reads its `part` argument:
+
+```csharp
+private void OnProxiedPartRemoving(Part part)
+{
+    if (_proxiedPart != null)
+    {
+        if (ProxiedComponent != null) ProxiedComponent = null;
+        else _proxiedPart.ComponentAdded -= OnProxiedPartComponentAdded;
+        _proxiedPart = null;
+        _proxyableIndex = -1;
+    }
+}
+```
+
+`ActivateProxy` registers it with `RegisterCellRemovingHandler`, and **two parts occupy every
+cell** - the placed part plus the structure tile `base_part` puts underneath it. So the
+structure leaving unbinds a proxy whose real target is still sitting at that cell, and nothing
+ever rebinds it. `ExcludeCategories = [structure]` in the `.rules` fixes only the add path.
+
+Observed consequence, with a Mods QoL wire terminal pointed at a Star Wars large hyperdrive:
+`TerminalKnownBatteryStoragePresent` came unbound, so `TerminalKnownStorageOperational` went
+false and the capacity-aware transfer switched off, while `TerminalPowerUserPresent` stayed
+true - which turned the projectile fallback on. A projectile path cannot back-pressure, so the
+contact drained its staging buffer at 3 power/sec forever into an already-full hyperdrive,
+never let `AvailableCapacity` reach zero, and therefore took a share of every network push.
+The generator's own battery never accumulated. Rotating that one wire tile away made it fill
+immediately.
+
+The fix registers a second cell-removing handler beside vanilla's. `PartsManager` combines
+cell handlers with `Delegate.Combine`, so ours runs straight after vanilla's, and when the
+part that left is not the one being proxied it replays vanilla's own `OnProxiedPartAdded`
+against the part still there - restoring `_proxiedPart`, `_proxyableIndex` and either
+`ProxiedComponent` or the `ComponentAdded` subscription exactly as the original binding had
+them. A sentinel binding is re-applied on top, since vanilla's path cannot resolve one.
+
+Notes:
+
+- This applies to **every** proxy with a `PartLocation` and no `ProxyToggle`, not only ones
+  naming a sentinel, because the defect is vanilla's and hits named proxies just as hard.
+  Proxies carrying a `ProxyToggle` are still left entirely to vanilla.
+- `ProxyHandler` is still never patched - the 2.1.0 shared-canonical-generic collision.
+  `OnProxiedPartAdded` is *called* by reflection, which is safe; only patching it is not.
+- The smoke test now asserts `OnProxiedPartAdded(Part)`, `_proxiedPart`, and the
+  `Register`/`UnregisterCellRemovingHandler` signatures.
+
 ## 2.1.1
 
 - Fixes 2.1.0's sentinel storage proxy, which never bound anything. `ProxyHandler`

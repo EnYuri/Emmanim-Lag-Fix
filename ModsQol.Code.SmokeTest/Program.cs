@@ -52,6 +52,19 @@ foreach (var handler in closedHandlers)
 {
     _ = AccessTools.DeclaredMethod(handler, "OnProxiedPartComponentAdded")
         ?? throw new MissingMethodException(handler.FullName, "OnProxiedPartComponentAdded");
+    // The rebind guard replays vanilla's own add path against the part that is still at the
+    // cell, so its shape has to hold: one Part parameter, and a _proxiedPart to read back.
+    var added = AccessTools.DeclaredMethod(handler, "OnProxiedPartAdded")
+        ?? throw new MissingMethodException(handler.FullName, "OnProxiedPartAdded");
+    var addedParams = added.GetParameters();
+    if (addedParams.Length != 1 || addedParams[0].ParameterType != partType)
+    {
+        throw new InvalidOperationException(
+            $"{handler.Name}.OnProxiedPartAdded is no longer (Part), so the rebind guard would "
+            + "invoke it with the wrong arguments.");
+    }
+    _ = AccessTools.DeclaredField(handler, "_proxiedPart")
+        ?? throw new MissingFieldException(handler.FullName, "_proxiedPart");
     _ = AccessTools.PropertySetter(handler, "ProxiedComponent")
         ?? throw new MissingMethodException(handler.FullName, "set_ProxiedComponent");
     _ = AccessTools.PropertyGetter(handler, "ProxiedComponent")
@@ -105,14 +118,18 @@ if (presenceToggleField.FieldType != closedHandlers[1])
 
 // The attachment layer mirrors vanilla's own cell registration, so it needs the same API.
 var cellHandlerType = typeof(Action<>).MakeGenericType(partType);
-foreach (var name in new[] { "RegisterCellAddHandler", "UnregisterCellAddHandler" })
+foreach (var name in new[]
+         {
+             "RegisterCellAddHandler", "UnregisterCellAddHandler",
+             "RegisterCellRemovingHandler", "UnregisterCellRemovingHandler",
+         })
 {
     var method = AccessTools.Method(partsManagerType, name)
         ?? throw new MissingMethodException(partsManagerType.FullName, name);
     if (method.GetParameters()[1].ParameterType != cellHandlerType)
     {
         throw new InvalidOperationException(
-            $"PartsManager.{name} no longer takes Action<Part>, so the sentinel's cell watch "
+            $"PartsManager.{name} no longer takes Action<Part>, so the cell watches "
             + "would not match vanilla's registration.");
     }
 }

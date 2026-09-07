@@ -1,14 +1,16 @@
 using System;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using Cosmoteer.Ships.Parts;
 using Cosmoteer.Ships.Parts.Logic;
 using Halfling.Geometry;
+using HarmonyLib;
 
 namespace ModsQol.Code;
 
 /// <summary>
-/// Runs the sentinel bind alongside vanilla's own proxy activation, without patching
-/// <see cref="ProxyHandler{TComponent}"/> itself.
+/// Runs alongside vanilla's proxy activation for every <see cref="ProxyHandler{TComponent}"/>
+/// that watches a neighbouring cell, without patching ProxyHandler itself.
 ///
 /// ProxyHandler is generic over reference types only, so the runtime shares one canonical
 /// body between ProxyHandler&lt;IResourceStorage&gt; and ProxyHandler&lt;PartComponent&gt; -
@@ -20,8 +22,19 @@ namespace ModsQol.Code;
 ///
 /// So nothing here is patched. The owning components are ordinary non-generic classes, and
 /// their attach/detach hooks are enough: vanilla's ActivateProxy has already run by the time
-/// the postfix fires, so registering a second cell-add handler puts the sentinel pass right
-/// after vanilla's on every part that appears at the proxied cell.
+/// the postfix fires, so registering a second pair of cell handlers puts our pass right after
+/// vanilla's on every part that appears at - or leaves - the proxied cell.
+///
+/// Two things happen there:
+///
+///  1. The sentinel bind (see <see cref="AnyStorageBinder"/>), for proxies that name one.
+///
+///  2. The rebind guard, for every proxy. Vanilla's OnProxiedPartRemoving never reads its
+///     part argument and unbinds whatever is bound. Two parts occupy every cell - the placed
+///     part and the structure tile base_part puts under it - so the structure leaving unbinds
+///     a proxy whose real target is still sitting there, and nothing ever rebinds it. Our
+///     handler runs immediately after and restores the binding when the part that left was
+///     not the one being proxied.
 /// </summary>
 internal static class SentinelAttachment<TComponent> where TComponent : class
 {
@@ -30,9 +43,23 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
         public PartsManager Parts = null!;
         public IntVector2 Cell;
         public Action<Part> CellAdd = null!;
+        public Action<Part> CellRemoving = null!;
+
+        // The part vanilla last bound to, remembered because OnProxiedPartRemoving has
+        // already cleared _proxiedPart by the time we are called.
+        public Part? Bound;
+
         public Part? LateWatch;
         public Action<Part, PartComponent>? LateHandler;
     }
+
+    // Vanilla's own add path, reused verbatim for the rebind so criteria, component lookup,
+    // the ComponentAdded subscription and _proxyableIndex all follow the same rules. Calling
+    // a shared canonical method is fine; only patching one is not.
+    private static readonly MethodInfo s_onProxiedPartAdded =
+        AccessTools.DeclaredMethod(typeof(ProxyHandler<TComponent>), "OnProxiedPartAdded")
+        ?? throw new MissingMethodException(
+            typeof(ProxyHandler<TComponent>).FullName, "OnProxiedPartAdded");
 
     // Keyed by handler so a part carrying several proxies keeps them independent, and so a
     // detached ship's registrations are collectable even if Detach is somehow missed.
@@ -45,14 +72,14 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
     public static void Attach(ProxyHandler<TComponent> handler, Part? parentPart)
     {
         var rules = handler.Rules;
-        if (parentPart == null || !AnyStorageBinder.HasSentinel(rules))
+        if (parentPart == null || rules == null)
         {
             return;
         }
 
         // A ProxyToggle lets vanilla activate and deactivate the proxy repeatedly without
         // going through OnPartAttached, and no Mods QoL proxy uses one. Rather than mirror
-        // that lifecycle, stay out: the rules degrade to vanilla's named-component path.
+        // that lifecycle, stay out: such a proxy keeps vanilla behaviour exactly.
         if (rules.ProxyToggle.HasValue)
         {
             return;
@@ -60,9 +87,12 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
 
         if (!rules.PartLocation.HasValue)
         {
-            // Self-proxy: there is no cell to watch, so vanilla's single OnProxiedPartAdded
-            // call is the only chance to bind.
-            TryBind(handler, parentPart, parentPart);
+            // Self-proxy. Vanilla registers no cell handlers, so there is no unbind to guard
+            // and its single OnProxiedPartAdded call is the only chance to bind.
+            if (AnyStorageBinder.HasSentinel(rules))
+            {
+                TryBind(handler, parentPart, parentPart);
+            }
             return;
         }
 
@@ -77,17 +107,24 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
         Detach(handler);
 
         var registration = new Registration { Parts = parts, Cell = cell };
-        registration.CellAdd = part => TryBind(handler, parentPart, part);
+        registration.CellAdd = part => OnCellAdd(handler, parentPart, registration, part);
+        registration.CellRemoving = part => OnCellRemoving(handler, parentPart, registration, part);
         s_registrations.Add(handler, registration);
 
-        // Vanilla registered its handler inside ActivateProxy, so ours is second in line and
-        // sees the binding vanilla just made - or failed to make.
+        // Vanilla registered its handlers inside ActivateProxy, and PartsManager combines
+        // them into one multicast delegate, so ours run second - after the binding vanilla
+        // just made, or after the unbind it should not have made.
         parts.RegisterCellAddHandler(cell, registration.CellAdd);
+        parts.RegisterCellRemovingHandler(cell, registration.CellRemoving);
 
         var existing = parts[cell, PartRectType.Normal];
         if (existing != null)
         {
-            TryBind(handler, parentPart, existing);
+            OnCellAdd(handler, parentPart, registration, existing);
+        }
+        else
+        {
+            registration.Bound = handler._proxiedPart;
         }
     }
 
@@ -102,8 +139,59 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
         }
 
         registration.Parts.UnregisterCellAddHandler(registration.Cell, registration.CellAdd);
+        registration.Parts.UnregisterCellRemovingHandler(registration.Cell, registration.CellRemoving);
         StopLateWatch(registration);
+        registration.Bound = null;
         s_registrations.Remove(handler);
+    }
+
+    private static void OnCellAdd(
+        ProxyHandler<TComponent> handler, Part parentPart, Registration registration, Part part)
+    {
+        if (AnyStorageBinder.HasSentinel(handler.Rules))
+        {
+            TryBind(handler, parentPart, part);
+        }
+        registration.Bound = handler._proxiedPart;
+    }
+
+    private static void OnCellRemoving(
+        ProxyHandler<TComponent> handler, Part parentPart, Registration registration, Part part)
+    {
+        var bound = registration.Bound;
+        if (bound == null)
+        {
+            return;
+        }
+
+        if (ReferenceEquals(bound, part))
+        {
+            // The proxied part really is leaving; vanilla's unbind was correct.
+            StopLateWatch(registration);
+            registration.Bound = null;
+            return;
+        }
+
+        // Some other part at this cell left - the structure tile under the recipient, almost
+        // always - and vanilla unbound anyway. Only step in if it actually did.
+        if (handler._proxiedPart != null || handler.ProxiedComponent != null)
+        {
+            return;
+        }
+
+        // Replay vanilla's own add path against the part that is still there. This restores
+        // _proxiedPart, _proxyableIndex and either ProxiedComponent or the ComponentAdded
+        // subscription, exactly as the original binding had them.
+        s_onProxiedPartAdded.Invoke(handler, new object[] { bound });
+
+        // A binding that was originally made by the sentinel is not restored by vanilla's
+        // path - it cannot resolve the sentinel ID - so run our pass again on top.
+        if (AnyStorageBinder.HasSentinel(handler.Rules))
+        {
+            TryBind(handler, parentPart, bound);
+        }
+
+        registration.Bound = handler._proxiedPart;
     }
 
     private static void TryBind(ProxyHandler<TComponent> handler, Part parentPart, Part part)
