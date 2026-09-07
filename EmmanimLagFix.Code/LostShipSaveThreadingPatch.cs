@@ -1,7 +1,9 @@
 using System.Reflection;
+using Cosmoteer;
 using Cosmoteer.Modes;
 using Cosmoteer.Ships;
 using Halfling;
+using Halfling.Logging;
 using HarmonyLib;
 
 namespace EmmanimLagFix.Code;
@@ -33,6 +35,9 @@ namespace EmmanimLagFix.Code;
 [HarmonyPatch]
 internal static class LostShipSaveThreadingPatch
 {
+    /// <summary>Saves posted to the main-thread queue and not yet run.</summary>
+    internal static int Pending;
+
     internal static bool Applied { get; private set; }
 
     private static MethodBase TargetMethod()
@@ -57,7 +62,8 @@ internal static class LostShipSaveThreadingPatch
         bool asynchronous)
     {
         // The synchronous path is already safe: it runs on its caller's thread,
-        // which is the thread that owns the ship.
+        // which is the thread that owns the ship. Vanilla uses it from the
+        // unhandled-exception handler, where no queue will ever be pumped.
         if (!asynchronous)
         {
             return true;
@@ -71,16 +77,76 @@ internal static class LostShipSaveThreadingPatch
             return true;
         }
 
+        // Evaluate vanilla's guard here, on the thread that owns the ship and at
+        // the moment vanilla evaluates it. Deferring the guard itself would read
+        // mode.Game after the mode may have been torn down, silently turning a
+        // ship that should be saved into one that is not.
+        bool save;
+        try
+        {
+            save = ship.Metadata.HasUnsavedChanges
+                && Settings.SaveLostShips
+                && mode.ShouldSaveLostShip(ship);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError("Emmanim Lag Fix: lost-ship guard threw, deferring to vanilla:");
+            Logger.LogError(ex.ToString());
+            return true;
+        }
+
+        if (!save)
+        {
+            if (disposeWhenDone)
+            {
+                ship.Dispose();
+            }
+            return false;
+        }
+
         // Post, never execute inline: running the save here would re-enter the
-        // stasis sweep that is still unwinding this ship's removal. The
-        // re-entrant call passes asynchronous: false, so this prefix lets it
-        // through to vanilla.
+        // stasis sweep that is still unwinding this ship's removal. The queue is
+        // pumped at the top of the frame, before UpdateStates and before the
+        // input/update/draw phases, so the save lands outside the simulation.
+        Interlocked.Increment(ref Pending);
         director.SynchronizationContext.Post(() =>
-            LostShipSaver.OnShipPotentiallyLost(
-                ship,
-                mode,
-                disposeWhenDone,
-                asynchronous: false));
+        {
+            try
+            {
+                LostShipSaver.SaveLostShip(ship, disposeWhenDone);
+            }
+            catch (Exception ex)
+            {
+                // PostInfo.Call() does not catch, so an escape here would be an
+                // unhandled main-thread exception - the failure this patch exists
+                // to remove.
+                Logger.LogError("Emmanim Lag Fix: deferred lost-ship save failed:");
+                Logger.LogError(ex.ToString());
+            }
+            finally
+            {
+                Interlocked.Decrement(ref Pending);
+            }
+        });
         return false;
+    }
+}
+
+/// <summary>
+/// GameApp.OnExiting drains lost-ship saves by spinning on
+/// <c>LostShipSaver.IsReadyToExit</c> while pumping the Director's queue. That
+/// property only reports vanilla's <c>ThreadedTaskQueue</c>, which
+/// <see cref="LostShipSaveThreadingPatch"/> no longer uses, so without this the
+/// loop is skipped entirely and a ship lost in the final frames is never
+/// written. Kept in its own class: combining a class-level TargetMethod with a
+/// method-level [HarmonyPatch] would let Harmony bind both patches to the same
+/// target.
+/// </summary>
+[HarmonyPatch(typeof(LostShipSaver), nameof(LostShipSaver.IsReadyToExit), MethodType.Getter)]
+internal static class LostShipSaveExitDrainPatch
+{
+    private static void Postfix(ref bool __result)
+    {
+        __result = __result && Volatile.Read(ref LostShipSaveThreadingPatch.Pending) == 0;
     }
 }

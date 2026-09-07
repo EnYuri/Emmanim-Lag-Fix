@@ -1881,6 +1881,45 @@ harmony.UnpatchAll(smokeId);
         throw new InvalidOperationException(
             syncContext.PropertyType.FullName + ".Post(Action) was not found.");
     }
+
+    // The deferred save calls the private worker directly, and GameApp.OnExiting
+    // drains it through the IsReadyToExit getter. Both must still exist.
+    if (HarmonyLib.AccessTools.DeclaredMethod(saverType, "SaveLostShip") == null)
+    {
+        throw new InvalidOperationException(
+            "LostShipSaver.SaveLostShip was not found, so the deferred save has nothing to call.");
+    }
+
+    var readyGetter = HarmonyLib.AccessTools.DeclaredPropertyGetter(saverType, "IsReadyToExit")
+        ?? throw new InvalidOperationException(
+            "LostShipSaver.IsReadyToExit was not found, so a save still queued at exit "
+            + "would not be drained.");
+
+    // Two patch classes name targets in this area. Binding both to one method -
+    // which a class-level TargetMethod combined with a method-level
+    // [HarmonyPatch] would do - must fail here rather than in game.
+    var probe = new HarmonyLib.Harmony(smokeId + ".lostship");
+    probe.PatchAll(typeof(EmmanimLagFix.Code.EntryPoint).Assembly);
+    try
+    {
+        foreach (var (target, label) in new[] { (onLost, "OnShipPotentiallyLost"), (readyGetter, "IsReadyToExit") })
+        {
+            var info = HarmonyLib.Harmony.GetPatchInfo(target);
+            var mine = info == null
+                ? 0
+                : info.Prefixes.Concat(info.Postfixes)
+                    .Count(patch => patch.owner == smokeId + ".lostship");
+            if (mine != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Expected exactly one patch on LostShipSaver.{label}, found {mine}.");
+            }
+        }
+    }
+    finally
+    {
+        probe.UnpatchAll(smokeId + ".lostship");
+    }
 }
 
 Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, frame-phase timing, and main-thread lost-ship saving patches resolved and compiled on this game build.");

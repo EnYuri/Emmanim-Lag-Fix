@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.1.8
+
+**Three defects in 2.1.7's lost-ship deferral.**
+
+2.1.7 moved the lost-ship save from vanilla's background worker to the
+Director's main-thread queue. The move was right; three details of it were not.
+
+**The exit drain was bypassed.** `GameApp.OnExiting` waits for outstanding
+lost-ship saves by spinning on `LostShipSaver.IsReadyToExit` while pumping the
+Director's queue. That property reports only vanilla's `ThreadedTaskQueue`,
+which 2.1.7 stopped using, so it read true unconditionally, the loop was skipped
+and a ship lost in the closing frames was never written. A postfix on the getter
+now also reports this patch's own outstanding count.
+
+**Vanilla's guard was re-evaluated late.** Vanilla decides
+`HasUnsavedChanges && Settings.SaveLostShips && mode.ShouldSaveLostShip(ship)`
+at the moment the ship is removed and queues only the save. 2.1.7 deferred the
+whole call, so the guard ran a frame or more later, against a
+`SimModeManager` that may since have been torn down — `ShouldSaveLostShip`
+returns false once `Game` is null, silently dropping a ship that should have
+been saved. The guard is now evaluated on the removing thread, exactly where
+vanilla evaluates it, and only the save itself is posted.
+
+**The posted callback could throw into the frame loop.**
+`QueueingSyncContext.PostInfo.Call()` does not catch, so an escape from the
+deferred action would be an unhandled main-thread exception — the same failure
+class 2.1.7 exists to remove. The callback is now wrapped, logging through
+`Logger.LogError` and always decrementing its pending count.
+
+The exit-drain postfix lives in its own patch class. A class-level
+`TargetMethod` combined with a method-level `[HarmonyPatch]` lets Harmony bind
+both patch methods to one target; the smoke test now asserts exactly one patch
+on each of `OnShipPotentiallyLost` and `IsReadyToExit`, so that cannot regress
+silently.
+
+One property of 2.1.7 held up on review: `SynchronizationContext.HandleQueue()`
+runs at the top of the frame, before `UpdateStates` and before the
+input/update/draw phases, so a posted save lands outside the simulation and
+cannot re-enter the stasis sweep that queued it.
+
 ## 2.1.7
 
 **Lost ships are saved on the main thread, not on a background worker.**
