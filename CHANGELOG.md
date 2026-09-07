@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.1.6
+
+**The frame is split into input, update and draw.**
+
+`frameMs` said a peer's frame took 34 ms. It never said why, and the two
+explanations call for opposite fixes: a client stuck in `draw` is GPU-bound and
+its simulation is fine, while one stuck in `update` is simulation-bound and the
+tick rate it can offer the host is its own ceiling. `update` also contains the
+lockstep wait, so a peer that is merely waiting is distinguishable from one that
+is working.
+
+`Halfling.Application.Director` already runs exactly those three phases, so the
+probe is six `Stopwatch.GetTimestamp` calls per frame into three longs, read
+once per reporting window:
+
+```
+phaseMs=1.2/28.4/19.9@29     input/update/draw ms per frame, at 29 fps
+```
+
+It reaches the host through the peer relay as `ph=`. To make room inside the
+chat limit the relay drops `sh=` and `pt=` — the host logs the same ship and
+part counts for the same simulation — and `fp=` becomes wakes plus the share of
+parks that ended on the backstop rather than the full triple. Worst case is now
+187 characters against the 195 the relay allows.
+
+The probe rides the existing memory-diagnostics flags rather than adding one of
+its own, so a peer that already opted in needs no new file. With neither flag
+present `Prepare` declines and the three methods are not patched at all. The
+smoke test now asserts all three resolve, so a game update that renames one
+fails there rather than quietly reporting dashes.
+
 ## 2.1.5
 
 **The non-deterministic drain visits only the shards that were written.**

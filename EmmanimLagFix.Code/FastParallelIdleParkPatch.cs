@@ -165,6 +165,20 @@ internal static class FastParallelIdleParkPatch
     /// for the diagnostics log line. A timeout share near 100% means the wake
     /// handshake is not firing and the workers are back on a timer.
     /// </summary>
+    /// <summary>
+    /// Wakes and the share of parks that ended on the backstop instead, for the
+    /// peer relay, where the full triple does not fit inside the chat limit. A
+    /// share near 100% means the wake handshake is not firing.
+    /// </summary>
+    internal static string CompactCounters()
+    {
+        var parks = Volatile.Read(ref ParkCount);
+        var timeouts = Volatile.Read(ref TimeoutCount);
+        var share = parks > 0 ? 100d * timeouts / parks : 0d;
+        return Volatile.Read(ref WakeCount).ToString(CultureInfo.InvariantCulture)
+            + "/" + share.ToString("F0", CultureInfo.InvariantCulture) + "%";
+    }
+
     internal static string Counters() =>
         Volatile.Read(ref ParkCount).ToString(CultureInfo.InvariantCulture)
         + "/" + Volatile.Read(ref WakeCount).ToString(CultureInfo.InvariantCulture)

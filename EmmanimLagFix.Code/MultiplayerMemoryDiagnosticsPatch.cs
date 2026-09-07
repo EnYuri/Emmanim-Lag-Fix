@@ -299,6 +299,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
 
         var frameTimes = FormatFrameTimes();
         var cpuLoad = FormatCpuLoad(process);
+        var phases = FramePhaseDiagnosticsPatch.Snapshot(ReportSeconds);
 
         Halfling.Logging.Logger.Log(
             "[EmmanimLagFix.MultiplayerMemoryDiagnostics] " +
@@ -309,6 +310,9 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} frameMs={frameTimes} cpuCores={cpuLoad} " +
             // parks/wakes/timeouts of the FastParallel idle park. A timeout share
             // near 100% means the wake handshake is not firing.
+            // input/update/draw milliseconds per frame, then frames per second.
+            // update carries the lockstep wait; draw carries present and vsync.
+            $"phaseMs={phases} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"players={manager._playerInfos.Count} " +
             $"inputQueued={queuedInputTicks} inputMax={maximumPlayerQueue} outgoingInputs={manager._outgoingInputs.Count} " +
@@ -327,8 +331,8 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"t={manager.NetworkInputTick} ft={frameTimes} cpu={cpuLoad} "
             + $"pv={ToMiB(process.PrivateMemorySize64):F0} hp={ToMiB(gcInfo.HeapSizeBytes):F0} "
             + $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} q={queuedInputTicks}/{maximumPlayerQueue} "
-            + $"cq={connectionReceiveQueue} sh={sim.Ships.Count} pt={liveParts} "
-            + $"fp={FastParallelIdleParkPatch.Counters()} "
+            + $"cq={connectionReceiveQueue} ph={phases} "
+            + $"fp={FastParallelIdleParkPatch.CompactCounters()} "
             + $"pp=[{perPlayerCompact}]");
     }
 

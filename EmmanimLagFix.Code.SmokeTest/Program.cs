@@ -1825,4 +1825,22 @@ foreach (var allocOverload in AccessTools
 }
 
 harmony.UnpatchAll(smokeId);
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, and parked FastParallel idle workers patches resolved and compiled on this game build.");
+// The frame-phase probe is opt-in at runtime, but the three Director methods it
+// times must still exist on this build or the split silently reports dashes.
+{
+    var directorType = HarmonyLib.AccessTools.TypeByName("Halfling.Application.Director")
+        ?? throw new InvalidOperationException(
+            "Halfling.Application.Director was not found, so frame phases cannot be timed.");
+
+    foreach (var name in new[] { "DoInput", "DoUpdate", "DoDraw" })
+    {
+        if (HarmonyLib.AccessTools.DeclaredMethod(directorType, name) == null)
+        {
+            throw new InvalidOperationException(
+                $"Halfling.Application.Director.{name} was not found, so the frame-phase split "
+                + "would report dashes rather than input/update/draw.");
+        }
+    }
+}
+
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, and frame-phase timing patches resolved and compiled on this game build.");

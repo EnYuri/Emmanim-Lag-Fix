@@ -101,6 +101,7 @@ internal static class SingleplayerMemoryDiagnosticsPatch
             $"stasis={sim.Stasis.Count}/{preloadedStasis} decals={decalPickers}/{decalItems} " +
             // parks/wakes/timeouts of the FastParallel idle park. A timeout share
             // near 100% means the wake handshake is not firing.
+            $"phaseMs={FramePhaseDiagnosticsPatch.Snapshot(elapsedSeconds)} " +
             $"fppark={FastParallelIdleParkPatch.Counters()}");
     }
 
