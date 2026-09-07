@@ -1843,4 +1843,44 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, and frame-phase timing patches resolved and compiled on this game build.");
+// The lost-ship save is moved off vanilla's background worker onto the
+// Director's main-thread queue, so both halves of that hand-off must resolve.
+{
+    var saverType = HarmonyLib.AccessTools.TypeByName("Cosmoteer.Ships.LostShipSaver")
+        ?? throw new InvalidOperationException(
+            "Cosmoteer.Ships.LostShipSaver was not found, so lost-ship saving cannot be "
+            + "moved onto the main thread.");
+
+    var onLost = HarmonyLib.AccessTools.DeclaredMethod(saverType, "OnShipPotentiallyLost")
+        ?? throw new InvalidOperationException(
+            "LostShipSaver.OnShipPotentiallyLost was not found.");
+
+    var shape = onLost.GetParameters();
+    if (shape.Length != 4
+        || shape[2].ParameterType != typeof(bool)
+        || shape[3].ParameterType != typeof(bool)
+        || shape[2].Name != "disposeWhenDone"
+        || shape[3].Name != "asynchronous")
+    {
+        throw new InvalidOperationException(
+            "LostShipSaver.OnShipPotentiallyLost no longer takes "
+            + "(ship, mode, bool disposeWhenDone, bool asynchronous); the prefix would "
+            + "not bind its parameters. Found: "
+            + string.Join(", ", shape.Select(p => p.ParameterType.Name + " " + p.Name)) + ".");
+    }
+
+    var syncContext = HarmonyLib.AccessTools.DeclaredProperty(
+        HarmonyLib.AccessTools.TypeByName("Halfling.Application.Director")!,
+        "SynchronizationContext")
+        ?? throw new InvalidOperationException(
+            "Director.SynchronizationContext was not found, so there is no main-thread "
+            + "queue to defer the lost-ship save onto.");
+
+    if (HarmonyLib.AccessTools.Method(syncContext.PropertyType, "Post", new[] { typeof(Action) }) == null)
+    {
+        throw new InvalidOperationException(
+            syncContext.PropertyType.FullName + ".Post(Action) was not found.");
+    }
+}
+
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, frame-phase timing, and main-thread lost-ship saving patches resolved and compiled on this game build.");

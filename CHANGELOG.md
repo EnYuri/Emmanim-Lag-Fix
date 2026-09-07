@@ -1,5 +1,70 @@
 # Changelog
 
+## 2.1.7
+
+**Lost ships are saved on the main thread, not on a background worker.**
+
+Two crashes on 2026-09-07, at 21:46 and 22:14, each landed in the same second
+as a new file in the Lost Ships folder. The second one carried a complete stack:
+
+```
+System.InvalidOperationException: Can't modify components while they are being saved.
+   at Part.RemoveComponents                          (Part.cs:757)
+   at PartToggledComponents.OnToggleChanged
+   at PortHandler.DeregisterPort
+   at ShipPartNetworkManager.ProcessPendingOperationsOnce
+   at CommonBasePartsManager.OnShipDeactivated
+   at SceneNode.NodeChildren.RemoveAt
+   at SimShipsManager.Remove
+   at SimStasisManager.UpdateStasis
+```
+
+No save was running. The last autosave had finished twelve minutes earlier and
+`AutoSaveInterval` is twenty minutes. What *was* running is vanilla's lost-ship
+saver: `SimShipsManager.Remove` ends with
+
+```csharp
+if (handleLostShip)
+    LostShipSaver.OnShipPotentiallyLost(ship, Sim.Mode, dispose, asynchronous: true);
+```
+
+and `asynchronous: true` posts the whole save onto a private
+`ThreadedTaskQueue`. That worker runs `Ship.SaveDesign` — and, when
+`disposeWhenDone` is set, `Ship.Dispose` — against a ship the simulation is
+still tearing down. `Part.WriteTo` brackets its component loop with
+
+```csharp
+Flags |= PartFlags.DebugSavingComponents;
+foreach (var component in _components) component.WriteTo(...);
+Flags &= ~PartFlags.DebugSavingComponents;
+```
+
+no lock, no try/finally. A stasis sweep that culls a ship in the same instant
+flushes the ship's queued network-port operations, flips a
+`PartToggledComponents` toggle, reaches `Part.RemoveComponents`, and reads a
+flag another thread set. The exception is unhandled and takes the process down.
+
+The flag is only the assertion that catches it; serializing a ship's parts while
+the simulation mutates them is unsound with or without the flag.
+
+A prefix on `OnShipPotentiallyLost` keeps the feature and keeps the work off the
+teardown, but moves it from the background worker to
+`Director.SynchronizationContext`, so it runs on the main thread at a frame
+boundary. It posts rather than executing inline — running the save in place
+would re-enter the stasis sweep still unwinding the removal — and the deferred
+call passes `asynchronous: false`, which the prefix lets through to vanilla
+untouched.
+
+This removes a thread rather than adding a wait. `Ship.SaveDesignToTextureData`
+already marshals its render capture to the main thread and busy-waits on it, so
+the capture was never off-thread to begin with; only the PNG encode and the file
+write were, and those are rare — a handful of ships per session. Vanilla itself
+treats a synchronous save as supported: its unhandled-exception handler saves
+every ship that way.
+
+Unchanged: `SaveLostShips` stays on, the save still happens, and nothing about
+what is written changes.
+
 ## 2.1.6
 
 **The frame is split into input, update and draw.**
