@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.1.5
+
+**The non-deterministic drain visits only the shards that were written.**
+
+A 20-second host trace put this mod's own `NonDeterministicQueueShardingPatch.Drain`
+seventh in main-thread self time, at 2.9%:
+
+```
+Thread.PollGCWorker                 17.2%
+SceneNode.DoWorldTransformChanged    7.9%
+Monitor.Enter_Slowpath               7.3%   <- 2.1.3's shared monitor, gone in 2.1.4
+D3D11GraphicsManager.SetRenderTarget 5.6%
+...
+NonDeterministicQueueShardingPatch.Drain   506.3 ms   2.9%
+```
+
+That is loop overhead, not the callbacks — those are their own frames. The
+drain swept all sixteen shards and then swept them again to observe emptiness,
+so every tick paid at least thirty-two `TryDequeue` calls on mostly empty
+queues whether or not anything had been posted.
+
+Each shard now sets a bit when it is written, and the drain visits only the
+shards that bit names. A tick that posted nothing costs one interlocked read.
+The bit is set **after** the enqueue, so a drain that observes it is guaranteed
+to observe the callback as well; the bit can only ever be set spuriously, never
+lost while an item is still queued. Delivery order, timing and the drain's
+reentrancy are unchanged, and a callback posted during the drain is picked up in
+the same drain exactly as before.
+
+**`fppark` is now on the multiplayer diagnostics line too.**
+
+It shipped in 2.1.4 on the single-player line only, which is the one place the
+FastParallel park least needed watching. It is now on the multiplayer line and
+in the peer relay as `fp=`, so a client's park/wake/timeout counters reach the
+host's log. A timeout share near 100% means the wake handshake is not firing.
+
 ## 2.1.4
 
 **The idle park uses one event per worker, not one shared monitor.**

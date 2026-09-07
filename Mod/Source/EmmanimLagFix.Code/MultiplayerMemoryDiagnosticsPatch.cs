@@ -307,6 +307,9 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"managedMiB={ToMiB(GC.GetTotalMemory(false)):F0} heapMiB={ToMiB(gcInfo.HeapSizeBytes):F0} " +
             $"fragmentedMiB={ToMiB(gcInfo.FragmentedBytes):F0} handles={process.HandleCount} " +
             $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} frameMs={frameTimes} cpuCores={cpuLoad} " +
+            // parks/wakes/timeouts of the FastParallel idle park. A timeout share
+            // near 100% means the wake handshake is not firing.
+            $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"players={manager._playerInfos.Count} " +
             $"inputQueued={queuedInputTicks} inputMax={maximumPlayerQueue} outgoingInputs={manager._outgoingInputs.Count} " +
             $"hashes={hostHashes}/{ourHashes}/{theirHashes} connectionQueued={connectionReceiveQueue} " +
@@ -325,6 +328,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             + $"pv={ToMiB(process.PrivateMemorySize64):F0} hp={ToMiB(gcInfo.HeapSizeBytes):F0} "
             + $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} q={queuedInputTicks}/{maximumPlayerQueue} "
             + $"cq={connectionReceiveQueue} sh={sim.Ships.Count} pt={liveParts} "
+            + $"fp={FastParallelIdleParkPatch.Counters()} "
             + $"pp=[{perPlayerCompact}]");
     }
 

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Numerics;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
@@ -62,18 +63,40 @@ internal static class NonDeterministicQueueShardingPatch
     /// <summary>Set only after every shape check passed and the enqueue site was rewritten.</summary>
     internal static bool Applied;
 
+    /// <summary>
+    /// The shards for one SimRoot, plus a bit per shard that has been written
+    /// since a drain last looked. The bitmap is what keeps the drain off the
+    /// shards nobody posted to: a queue that was never written is never touched.
+    /// </summary>
+    private sealed class ShardSet
+    {
+        internal readonly ConcurrentQueue<Action>[] Queues;
+
+        /// <summary>Bit <c>i</c> set means shard <c>i</c> was written to.</summary>
+        internal long Written;
+
+        internal ShardSet(int count)
+        {
+            Queues = new ConcurrentQueue<Action>[count];
+            for (var i = 0; i < count; i++)
+            {
+                Queues[i] = new ConcurrentQueue<Action>();
+            }
+        }
+    }
+
     /// <summary>One shard set per SimRoot, collected with it.</summary>
-    private static readonly ConditionalWeakTable<object, ConcurrentQueue<Action>[]> Shards = new();
+    private static readonly ConditionalWeakTable<object, ShardSet> Shards = new();
 
     /// <summary>
     /// A SimRoot and its shards as one immutable pair, so a single read is
     /// always self-consistent. There is one simulation at a time, so this hits
     /// on essentially every call and keeps the lookup to a reference compare.
     /// </summary>
-    private sealed class Hot(object sim, ConcurrentQueue<Action>[] queues)
+    private sealed class Hot(object sim, ShardSet shards)
     {
         internal readonly object Sim = sim;
-        internal readonly ConcurrentQueue<Action>[] Queues = queues;
+        internal readonly ShardSet Shards = shards;
     }
 
     private static Hot? _hot;
@@ -92,27 +115,17 @@ internal static class NonDeterministicQueueShardingPatch
         return Math.Clamp(n, 8, 64);
     }
 
-    private static ConcurrentQueue<Action>[] QueuesFor(object sim)
+    private static ShardSet ShardsFor(object sim)
     {
         var hot = _hot;
         if (hot != null && ReferenceEquals(hot.Sim, sim))
         {
-            return hot.Queues;
+            return hot.Shards;
         }
 
-        var queues = Shards.GetValue(sim, static _ =>
-        {
-            var created = new ConcurrentQueue<Action>[ShardMask + 1];
-            for (var i = 0; i < created.Length; i++)
-            {
-                created[i] = new ConcurrentQueue<Action>();
-            }
-
-            return created;
-        });
-
-        _hot = new Hot(sim, queues);
-        return queues;
+        var shards = Shards.GetValue(sim, static _ => new ShardSet(ShardMask + 1));
+        _hot = new Hot(sim, shards);
+        return shards;
     }
 
     /// <summary>
@@ -120,34 +133,63 @@ internal static class NonDeterministicQueueShardingPatch
     /// thread id picks the shard, so one thread never changes shard and its own
     /// callbacks stay in order.
     /// </summary>
-    internal static void ShardedEnqueue(object sim, Action callback) =>
-        QueuesFor(sim)[Environment.CurrentManagedThreadId & ShardMask].Enqueue(callback);
+    internal static void ShardedEnqueue(object sim, Action callback)
+    {
+        var shards = ShardsFor(sim);
+        var index = Environment.CurrentManagedThreadId & ShardMask;
+        shards.Queues[index].Enqueue(callback);
+
+        // Publish the shard only after the callback is in the queue. Both
+        // operations carry a full barrier, so a drain that observes this bit is
+        // guaranteed to observe the callback as well, and the bit can only ever
+        // be set spuriously — never lost while an item is still queued.
+        Interlocked.Or(ref shards.Written, 1L << index);
+    }
 
     /// <summary>
     /// Runs everything the shards hold, repeating while callbacks post more —
     /// the same reentrancy vanilla's <c>while (TryDequeue)</c> loop allows.
+    ///
+    /// Only the shards the bitmap names are visited. The previous form swept
+    /// every shard and then swept them all again to observe emptiness, which
+    /// cost at least two <c>TryDequeue</c> calls per shard on every tick
+    /// whether or not anything had been posted; a 20-second host trace put that
+    /// sweep at 2.9% of all main-thread CPU. A tick that posted nothing now
+    /// costs one interlocked read.
     /// </summary>
     internal static void Drain(object sim)
     {
-        if (!Applied || !Shards.TryGetValue(sim, out var queues))
+        if (!Applied)
         {
             return;
         }
 
-        bool any;
-        do
+        var hot = _hot;
+        ShardSet? shards;
+        if (hot != null && ReferenceEquals(hot.Sim, sim))
         {
-            any = false;
-            foreach (var queue in queues)
-            {
-                while (queue.TryDequeue(out var callback))
-                {
-                    any = true;
-                    callback();
-                }
-            }
+            shards = hot.Shards;
         }
-        while (any);
+        else if (!Shards.TryGetValue(sim, out shards))
+        {
+            return;
+        }
+
+        var pending = (ulong)Interlocked.Exchange(ref shards.Written, 0L);
+        while (pending != 0UL)
+        {
+            var index = BitOperations.TrailingZeroCount(pending);
+            pending &= pending - 1;
+
+            var queue = shards.Queues[index];
+            while (queue.TryDequeue(out var callback))
+            {
+                callback();
+            }
+
+            // A callback may have posted more work, to this shard or another.
+            pending |= (ulong)Interlocked.Exchange(ref shards.Written, 0L);
+        }
     }
 
     private static Type SimRootType =>
