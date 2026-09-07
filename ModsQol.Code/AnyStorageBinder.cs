@@ -22,6 +22,9 @@ namespace ModsQol.Code;
 /// &lt;resource&gt;" instead of naming one. The sentinel is a plain ID, so a game without this
 /// library simply never matches it and the .rules degrade to the fallback on their own - no
 /// version negotiation and no hard dependency in either direction.
+///
+/// It is driven by <see cref="SentinelAttachment{TComponent}"/>, which hooks the non-generic
+/// components that own a ProxyHandler rather than ProxyHandler itself.
 /// </summary>
 internal static class AnyStorageBinder
 {
@@ -73,6 +76,27 @@ internal static class AnyStorageBinder
     }
 
     /// <summary>
+    /// True when these proxy rules name at least one sentinel. This is the gate that keeps the
+    /// module inert without Mods QoL: no sentinel, no attachment, no cell handler, no cost.
+    /// </summary>
+    public static bool HasSentinel(ProxyRules? rules)
+    {
+        var proxyables = rules?.ProxyableComponents;
+        if (proxyables == null)
+        {
+            return false;
+        }
+        for (int i = 0; i < proxyables.Length; i++)
+        {
+            if (ResolveSentinel(proxyables[i].ComponentID).HasValue)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Picks the storage on the given part that a sentinel should bind to.
     ///
     /// Proxies and aggregates are skipped: ResourceStorageProxy is itself a view onto some
@@ -118,17 +142,18 @@ internal static class AnyStorageBinder
     public static bool TryBind<TComponent>(
         ProxyHandler<TComponent> handler,
         Part parentPart,
-        Part part,
-        int matchedIndex) where TComponent : class
+        Part part) where TComponent : class
     {
-        if (handler.ProxiedComponent != null)
+        if (handler.ProxiedComponent != null || parentPart == null || part == null)
         {
             return false;
         }
 
-        // matchedIndex < 0 means no criteria matched at all, so vanilla never set _proxiedPart
-        // and never subscribed. Binding from here would leave the handler half-initialized.
-        if (matchedIndex < 0 || parentPart == null)
+        // Vanilla ran first and recorded which entry it stopped on. A negative index means no
+        // criteria matched at all, so it never set _proxiedPart and never subscribed; binding
+        // from here would leave the handler half-initialized.
+        int matchedIndex = handler._proxyableIndex;
+        if (matchedIndex < 0)
         {
             return false;
         }
@@ -154,9 +179,7 @@ internal static class AnyStorageBinder
 
             if (FindStorage(part, resource.Value) is not TComponent bound)
             {
-                // Nothing to bind yet. Vanilla has already subscribed its own
-                // OnProxiedPartComponentAdded to the part, and the late-bind prefix makes that
-                // handler sentinel-aware, so a storage that appears later still binds.
+                // Nothing to bind yet; SentinelAttachment starts its own late watch.
                 continue;
             }
 
@@ -177,22 +200,22 @@ internal static class AnyStorageBinder
     /// Completes a sentinel bind for a component that appeared on the proxied part after the
     /// proxy attached - a ToggledComponents group switching on, for instance.
     ///
-    /// Returns true when this took the bind, in which case vanilla's handler must be skipped.
+    /// Returns true when this took the bind.
     /// </summary>
     public static bool TryBindLate<TComponent>(
         ProxyHandler<TComponent> handler,
         Part parentPart,
         Part part,
-        PartComponent component,
-        int matchedIndex) where TComponent : class
+        PartComponent component) where TComponent : class
     {
-        if (matchedIndex < 0 || parentPart == null)
+        if (handler.ProxiedComponent != null || parentPart == null || part == null)
         {
             return false;
         }
 
+        int matchedIndex = handler._proxyableIndex;
         var proxyables = handler.Rules.ProxyableComponents;
-        if (proxyables == null || matchedIndex >= proxyables.Length)
+        if (matchedIndex < 0 || proxyables == null || matchedIndex >= proxyables.Length)
         {
             return false;
         }

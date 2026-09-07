@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.1.1
+
+- Fixes 2.1.0's sentinel storage proxy, which never bound anything. `ProxyHandler`
+  is generic over reference types only, so the runtime shares one canonical body
+  between `ProxyHandler<IResourceStorage>` and `ProxyHandler<PartComponent>`: their
+  `MethodInfo`s differ but their `RuntimeMethodHandle` and native entry point are
+  identical. Patching "each" instantiation therefore patched one method twice, and
+  Harmony could not see the collision because its registry is keyed by `MethodInfo`.
+  A postfix declaring a typed `__instance` would also have received the other
+  instantiation's object. A 20-second CPU trace of a live game confirmed it: no
+  frame from this module appeared on any of 63 threads, and
+  `ProxyHandler`1[__Canon].OnProxiedPartAdded` ran without a `_Patch` suffix.
+- The module now patches nothing generic. It hooks the attach and detach methods of
+  the two ordinary non-generic components that own a `ProxyHandler` -
+  `ResourceStorageProxy` and `ComponentPresenceToggle` - and registers its own
+  cell-add handler beside vanilla's, so the sentinel pass runs right after vanilla's
+  on every part that appears at the proxied cell. Behaviour is otherwise unchanged:
+  a part exposing the named component still binds through vanilla and never reaches
+  the sentinel, so exactly one view of a store exists.
+- A proxy carrying a `ProxyToggle` is now left entirely to vanilla rather than
+  having its activation lifecycle mirrored. No Mods QoL proxy uses one.
+- The smoke test asserts the four patch targets are non-generic, that the two
+  `ProxyHandler` instantiations still share one canonical method, and that this
+  module patches neither of them - so the 2.1.0 defect cannot come back silently.
+
 ## 2.1.0
 
 - The package now carries a second, independent code module, `ModsQol.Code.dll`,

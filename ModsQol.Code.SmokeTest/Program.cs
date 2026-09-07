@@ -8,32 +8,48 @@ using System.Reflection;
 
 var gameAssembly = Assembly.Load("Cosmoteer");
 
-var proxyHandlerType = gameAssembly.GetType(
-    "Cosmoteer.Ships.Parts.Logic.ProxyHandler`1", throwOnError: true)!;
-var storageInterface = gameAssembly.GetType(
-    "Cosmoteer.Ships.Parts.Resources.IResourceStorage", throwOnError: true)!;
-var partComponentType = gameAssembly.GetType(
-    "Cosmoteer.Ships.Parts.PartComponent", throwOnError: true)!;
-var partType = gameAssembly.GetType("Cosmoteer.Ships.Parts.Part", throwOnError: true)!;
-var baseStorageType = gameAssembly.GetType(
-    "Cosmoteer.Ships.Parts.Resources.BaseResourceStorage", throwOnError: true)!;
-var proxyRulesType = gameAssembly.GetType(
-    "Cosmoteer.Ships.Parts.Logic.ProxyRules", throwOnError: true)!;
+Type Game(string name) => gameAssembly.GetType(name, throwOnError: true)!;
 
-// Both closed instantiations the game builds. ResourceStorageProxy uses the first,
-// ComponentPresenceToggle the second; the binder patches each separately.
+var proxyHandlerType = Game("Cosmoteer.Ships.Parts.Logic.ProxyHandler`1");
+var storageInterface = Game("Cosmoteer.Ships.Parts.Resources.IResourceStorage");
+var partComponentType = Game("Cosmoteer.Ships.Parts.PartComponent");
+var partType = Game("Cosmoteer.Ships.Parts.Part");
+var partsManagerType = Game("Cosmoteer.Ships.Parts.PartsManager");
+var partRulesType = Game("Cosmoteer.Ships.Parts.PartRules");
+var baseStorageType = Game("Cosmoteer.Ships.Parts.Resources.BaseResourceStorage");
+var proxyRulesType = Game("Cosmoteer.Ships.Parts.Logic.ProxyRules");
+var storageProxyType = Game("Cosmoteer.Ships.Parts.Resources.ResourceStorageProxy");
+var presenceToggleType = Game("Cosmoteer.Ships.Parts.Logic.ComponentPresenceToggle");
+
 var closedHandlers = new[]
 {
     proxyHandlerType.MakeGenericType(storageInterface),
     proxyHandlerType.MakeGenericType(partComponentType),
 };
 
-// Members the binder calls directly. A rename in any of them would compile (they are all
-// reached through AccessTools or a publicized reference) but fail silently at runtime.
+// ---------------------------------------------------------------------------
+// The reason this module patches the owning components rather than ProxyHandler
+// ---------------------------------------------------------------------------
+// ProxyHandler is generic over reference types only, so the runtime shares one canonical
+// body between both instantiations: the MethodInfos differ but the RuntimeMethodHandle is
+// the same method. Patching "each" instantiation therefore patches one method twice, and
+// Harmony cannot see the collision because its registry is keyed by MethodInfo. Version
+// 2.1.0 did that and bound nothing at all. Assert the sharing is still real, so that if a
+// future runtime ever stops sharing, this test says so rather than silently going quiet.
+var handleA = AccessTools.DeclaredMethod(closedHandlers[0], "OnProxiedPartAdded")
+    ?? throw new MissingMethodException(closedHandlers[0].FullName, "OnProxiedPartAdded");
+var handleB = AccessTools.DeclaredMethod(closedHandlers[1], "OnProxiedPartAdded")
+    ?? throw new MissingMethodException(closedHandlers[1].FullName, "OnProxiedPartAdded");
+if (handleA.MethodHandle != handleB.MethodHandle)
+{
+    Console.WriteLine(
+        "NOTE: ProxyHandler's instantiations no longer share one canonical method. Patching "
+        + "them directly would now be safe, but this module does not rely on that.");
+}
+
+// Members the binder and the attachment layer reach for.
 foreach (var handler in closedHandlers)
 {
-    _ = AccessTools.DeclaredMethod(handler, "OnProxiedPartAdded")
-        ?? throw new MissingMethodException(handler.FullName, "OnProxiedPartAdded");
     _ = AccessTools.DeclaredMethod(handler, "OnProxiedPartComponentAdded")
         ?? throw new MissingMethodException(handler.FullName, "OnProxiedPartComponentAdded");
     _ = AccessTools.PropertySetter(handler, "ProxiedComponent")
@@ -42,30 +58,83 @@ foreach (var handler in closedHandlers)
         ?? throw new MissingMethodException(handler.FullName, "get_ProxiedComponent");
     _ = AccessTools.PropertyGetter(handler, "Rules")
         ?? throw new MissingMethodException(handler.FullName, "get_Rules");
+    // The sentinel scan resumes past the entry vanilla stopped on.
     _ = AccessTools.DeclaredField(handler, "_proxyableIndex")
         ?? throw new MissingFieldException(handler.FullName, "_proxyableIndex");
-    // The sentinel scan resumes past the entry vanilla stopped on, so it has to re-evaluate
-    // PartCriteria itself, which needs the proxy's own part.
-    _ = AccessTools.DeclaredField(handler, "_parentPart")
-        ?? throw new MissingFieldException(handler.FullName, "_parentPart");
 }
 
-var criteriaType = gameAssembly.GetType("Cosmoteer.Ships.Parts.RelativePartCriteria", throwOnError: true)!;
-_ = AccessTools.Method(criteriaType, "IsMatch")
-    ?? throw new MissingMethodException(criteriaType.FullName, "IsMatch");
-_ = AccessTools.Field(proxyableTypeProbe(), "PartCriteria")
-    ?? throw new MissingFieldException("ProxyRules.ProxyableComponent", "PartCriteria");
+// The four patch targets. All four are non-generic methods on non-generic types, which is
+// the whole point: no canonical sharing is possible here.
+var patchTargets = new[]
+{
+    AccessTools.DeclaredMethod(storageProxyType, "OnPartAttached2")
+        ?? throw new MissingMethodException(storageProxyType.FullName, "OnPartAttached2"),
+    AccessTools.DeclaredMethod(storageProxyType, "OnPartDetaching2")
+        ?? throw new MissingMethodException(storageProxyType.FullName, "OnPartDetaching2"),
+    AccessTools.DeclaredMethod(presenceToggleType, "OnPartAttached")
+        ?? throw new MissingMethodException(presenceToggleType.FullName, "OnPartAttached"),
+    AccessTools.DeclaredMethod(presenceToggleType, "OnPartDetaching")
+        ?? throw new MissingMethodException(presenceToggleType.FullName, "OnPartDetaching"),
+};
+foreach (var target in patchTargets)
+{
+    if (target.DeclaringType!.IsGenericType || target.IsGenericMethod)
+    {
+        throw new InvalidOperationException(
+            $"{target.DeclaringType}.{target.Name} is generic; patching it risks the shared "
+            + "canonical-code collision this module exists to avoid.");
+    }
+}
 
-Type proxyableTypeProbe() => gameAssembly
-    .GetType("Cosmoteer.Ships.Parts.Logic.ProxyRules", throwOnError: true)!
-    .GetNestedType("ProxyableComponent", BindingFlags.Public | BindingFlags.NonPublic)!;
+// The proxy handler each owning component holds, reached by field rather than reflection at
+// runtime, so its exact closed type matters.
+var storageProxyField = AccessTools.DeclaredField(storageProxyType, "_proxy")
+    ?? throw new MissingFieldException(storageProxyType.FullName, "_proxy");
+if (storageProxyField.FieldType != closedHandlers[0])
+{
+    throw new InvalidOperationException(
+        $"ResourceStorageProxy._proxy is {storageProxyField.FieldType}, expected {closedHandlers[0]}.");
+}
+var presenceToggleField = AccessTools.DeclaredField(presenceToggleType, "_proxy")
+    ?? throw new MissingFieldException(presenceToggleType.FullName, "_proxy");
+if (presenceToggleField.FieldType != closedHandlers[1])
+{
+    throw new InvalidOperationException(
+        $"ComponentPresenceToggle._proxy is {presenceToggleField.FieldType}, expected {closedHandlers[1]}.");
+}
 
-_ = AccessTools.Field(proxyRulesType, "ProxyableComponents")
-    ?? throw new MissingFieldException(proxyRulesType.FullName, "ProxyableComponents");
+// The attachment layer mirrors vanilla's own cell registration, so it needs the same API.
+var cellHandlerType = typeof(Action<>).MakeGenericType(partType);
+foreach (var name in new[] { "RegisterCellAddHandler", "UnregisterCellAddHandler" })
+{
+    var method = AccessTools.Method(partsManagerType, name)
+        ?? throw new MissingMethodException(partsManagerType.FullName, name);
+    if (method.GetParameters()[1].ParameterType != cellHandlerType)
+    {
+        throw new InvalidOperationException(
+            $"PartsManager.{name} no longer takes Action<Part>, so the sentinel's cell watch "
+            + "would not match vanilla's registration.");
+    }
+}
+_ = AccessTools.Method(partRulesType, "GetShipRelativeCell")
+    ?? throw new MissingMethodException(partRulesType.FullName, "GetShipRelativeCell");
+
 var proxyableType = proxyRulesType.GetNestedType("ProxyableComponent", BindingFlags.Public | BindingFlags.NonPublic)
     ?? throw new MissingMemberException(proxyRulesType.FullName, "ProxyableComponent");
-_ = AccessTools.Field(proxyableType, "ComponentID")
-    ?? throw new MissingFieldException(proxyableType.FullName, "ComponentID");
+foreach (var name in new[] { "ProxyableComponents", "PartLocation", "ProxyToggle" })
+{
+    _ = AccessTools.Field(proxyRulesType, name)
+        ?? throw new MissingFieldException(proxyRulesType.FullName, name);
+}
+foreach (var name in new[] { "ComponentID", "PartCriteria" })
+{
+    _ = AccessTools.Field(proxyableType, name)
+        ?? throw new MissingFieldException(proxyableType.FullName, name);
+}
+
+var criteriaType = Game("Cosmoteer.Ships.Parts.RelativePartCriteria");
+_ = AccessTools.Method(criteriaType, "IsMatch")
+    ?? throw new MissingMethodException(criteriaType.FullName, "IsMatch");
 
 _ = AccessTools.Method(baseStorageType, "GetAllOfTypeOnPart")
     ?? throw new MissingMethodException(baseStorageType.FullName, "GetAllOfTypeOnPart");
@@ -74,8 +143,8 @@ _ = AccessTools.PropertyGetter(baseStorageType, "MaxResources")
 _ = AccessTools.PropertyGetter(baseStorageType, "ResourceType")
     ?? throw new MissingMethodException(baseStorageType.FullName, "get_ResourceType");
 
-// The binder unsubscribes vanilla's own handler by rebuilding its delegate, so the event's
-// delegate type has to stay Action<Part, PartComponent> for the removal to match.
+// The binder unsubscribes vanilla's own handler by rebuilding its delegate, and the late
+// watch subscribes one of its own, so the event's delegate type has to stay put.
 var componentAdded = partType.GetEvent("ComponentAdded", BindingFlags.Public | BindingFlags.Instance)
     ?? throw new MissingMemberException(partType.FullName, "ComponentAdded");
 var expectedHandlerType = typeof(Action<,>).MakeGenericType(partType, partComponentType);
@@ -106,29 +175,43 @@ if (resolve.Invoke(null, new[] { MakeId("BatteryStorage") }) is not null)
         + "without Mods QoL.");
 }
 
-// Install for real and confirm all four patches took. PatchAll is invoked directly rather
-// than through EntryPoint because the entry point also writes to Halfling's Logger, which
-// has no game to initialize against in this standalone host.
+// Install for real and confirm every patch took. PatchAll is invoked directly rather than
+// through EntryPoint because the entry point also writes to Halfling's Logger, which has no
+// game to initialize against in this standalone host.
 new Harmony(ModsQol.Code.EntryPoint.HarmonyId).PatchAll(typeof(ModsQol.Code.EntryPoint).Assembly);
+
+foreach (var target in patchTargets)
+{
+    var info = Harmony.GetPatchInfo(target);
+    var mine = (info?.Prefixes.Count(p => p.owner == ModsQol.Code.EntryPoint.HarmonyId) ?? 0)
+             + (info?.Postfixes.Count(p => p.owner == ModsQol.Code.EntryPoint.HarmonyId) ?? 0);
+    if (mine != 1)
+    {
+        throw new InvalidOperationException(
+            $"Expected exactly one sentinel patch on {target.DeclaringType!.Name}.{target.Name}, found {mine}.");
+    }
+}
+
+// Regression guard for the 2.1.0 defect: nothing may patch ProxyHandler's shared canonical
+// methods, because both instantiations resolve to the same method and the second patch wins.
 foreach (var handler in closedHandlers)
 {
-    var added = AccessTools.DeclaredMethod(handler, "OnProxiedPartAdded")!;
-    if (Harmony.GetPatchInfo(added)?.Postfixes.Any(p => p.owner == ModsQol.Code.EntryPoint.HarmonyId) != true)
+    foreach (var name in new[] { "OnProxiedPartAdded", "OnProxiedPartComponentAdded" })
     {
-        throw new InvalidOperationException(
-            "The sentinel postfix was not installed on " + handler + ".OnProxiedPartAdded.");
-    }
-
-    var late = AccessTools.DeclaredMethod(handler, "OnProxiedPartComponentAdded")!;
-    if (Harmony.GetPatchInfo(late)?.Prefixes.Any(p => p.owner == ModsQol.Code.EntryPoint.HarmonyId) != true)
-    {
-        throw new InvalidOperationException(
-            "The late-bind prefix was not installed on " + handler + ".OnProxiedPartComponentAdded, so a "
-            + "storage appearing after the proxy attached would never bind.");
+        var method = AccessTools.DeclaredMethod(handler, name)!;
+        var info = Harmony.GetPatchInfo(method);
+        if (info != null && info.Owners.Contains(ModsQol.Code.EntryPoint.HarmonyId))
+        {
+            throw new InvalidOperationException(
+                $"{handler.Name}.{name} is patched by this module. Both ProxyHandler instantiations "
+                + "share one canonical method, so such a patch is applied twice and only the last "
+                + "one survives - which is exactly why 2.1.0 never bound anything.");
+        }
     }
 }
 
 new Harmony(ModsQol.Code.EntryPoint.HarmonyId).UnpatchAll(ModsQol.Code.EntryPoint.HarmonyId);
 Console.WriteLine(
-    "PASS: sentinel storage-proxy targets resolved and all four ProxyHandler patches installed on this "
-    + "game build; sentinel resolution is prefix-scoped, so the module stays inert without Mods QoL.");
+    "PASS: sentinel targets resolved, all four non-generic proxy-owner patches installed, and no "
+    + "shared canonical ProxyHandler method is patched; sentinel resolution is prefix-scoped, so "
+    + "the module stays inert without Mods QoL.");
