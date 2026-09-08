@@ -1,5 +1,54 @@
 # Changelog
 
+## 2.1.13
+
+**Dead per-ship resource-count entries are now compacted in one pass.**
+
+The previous cleanup counted live weak references and then tested them again
+while filling an exactly-sized replacement array. A target collected between
+those passes could leave a default entry with a null weak reference in the
+published array. Cleanup now fills a worst-case array in one pass and trims it
+to the number actually retained before publication.
+
+**Low-core scheduling no longer falls back to unbounded worker spin.**
+
+The 2.1.12 worker-count gate disabled idle parking below eight FastParallel
+workers. That restored vanilla's `SpinOnce(-1)` precisely on machines with the
+fewest cores to spare. Parking now remains enabled everywhere, with a shorter
+20-iteration hot-spin budget below eight workers and the measured 60-iteration
+budget on wider machines. `fastparallel-park.txt` can still force an exact
+budget or restore vanilla with `0` for calibration.
+
+**Transfer-row pacing no longer calls `Thread.Sleep(1)`.**
+
+The process measured that nominal one-millisecond sleep at 10.6 ms, imposing
+that delay after every constructed transfer or trade row. The main thread
+already admits only one row per frame, so the background builder now uses
+`Thread.Yield()` to remain cooperative without adding a timer-granularity delay.
+
+**Resource sink-job shards now scale with their actual producers.**
+
+The shard array previously followed logical processor count and had a minimum
+of eight. It now rounds the FastParallel worker count plus the calling thread to
+a power of two. A three-worker client therefore drains four slots per result
+list instead of eight, while the measured eleven-worker host remains at sixteen.
+A current-session trace also found 545 ms of `Monitor.Enter_Slowpath` under 866
+ms of `UpdateSinkJobs`: masking managed thread IDs had collided live producers
+onto the same shard. Producers now receive consecutive, thread-stable slots on
+first use; the retained per-shard lock remains a safe fallback if unexpected
+additional producer threads wrap the assignment.
+
+**Dense resource searches no longer duplicate every visited-source write.**
+
+The proportional visited-set cleanup recorded every successful `HashSet.Add`
+in a second list even for a fresh or dense set, then discovered at disposal
+that the set was not sparse and called vanilla `Clear` anyway. In the current
+20-second trace `TrackedAdd` alone accounted for 601 ms. Fresh sets are now left
+on the bulk-clear path immediately, and a reused large set abandons tracking as
+soon as the round reaches one quarter of its captured capacity. Truly sparse
+reuse retains proportional removal; source selection and traversal are
+unchanged.
+
 ## 2.1.12
 
 **The idle-worker parking gate now counts workers, not logical processors.**

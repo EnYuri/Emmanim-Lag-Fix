@@ -121,7 +121,7 @@ internal static class FastParallelIdleParkPatch
     internal static readonly int ParkMilliseconds;
 
     /// <summary>
-    /// Logical processors below which parking is off by default.
+    /// Worker count below which the shorter spin budget is used.
     ///
     /// The trade this patch makes is not the same on every machine. Its benefit
     /// is CPU handed back to the rest of the process and a cheaper GC rendezvous;
@@ -138,9 +138,11 @@ internal static class FastParallelIdleParkPatch
     /// 1.4-1.7 cores while its update phase grew from 45 to 162 ms. More work
     /// raises CPU; lost parallelism raises wall time and leaves CPU flat.
     ///
-    /// This threshold is a judgement, not a measurement, which is why
-    /// fastparallel-park.txt overrides it in both directions: a positive budget
-    /// forces parking on, and 0 forces it off.
+    /// Disabling parking here entirely restored vanilla's unbounded spin on the
+    /// machine with the fewest cores to spare. Keep the eventual park on every
+    /// machine and shorten only the hot-spin window instead. The override still
+    /// permits exact A/B calibration: a positive value selects that budget and
+    /// 0 restores vanilla behavior.
     /// </summary>
     /// <remarks>
     /// Version 2.1.11 gated on <see cref="Environment.ProcessorCount"/> and picked
@@ -155,16 +157,19 @@ internal static class FastParallelIdleParkPatch
     /// latency paid for it is per dispatch and does not shrink with it. Host 11
     /// workers, client 3.
     /// </remarks>
-    private const int ParkMinimumWorkers = 8;
+    private const int NarrowWorkerThreshold = 8;
+    private const int NarrowSpinBudget = 20;
+    private const int WideSpinBudget = 60;
 
     /// <summary>Logical processors this machine reports, for the diagnostics line.</summary>
     internal static readonly int ProcessorCount = Environment.ProcessorCount;
 
-    /// <summary>FastParallel worker threads on this machine, the gate's input.</summary>
+    /// <summary>FastParallel worker threads on this machine, the budget's input.</summary>
     internal static readonly int WorkerCount;
 
-    /// <summary>True when the worker-count rule, not an override, disabled parking.</summary>
-    internal static readonly bool DisabledByProcessorCount;
+    /// <summary>Default budget for a worker count, exposed for structural tests.</summary>
+    internal static int DefaultSpinBudget(int workerCount) =>
+        workerCount < NarrowWorkerThreshold ? NarrowSpinBudget : WideSpinBudget;
 
     static FastParallelIdleParkPatch()
     {
@@ -183,10 +188,8 @@ internal static class FastParallelIdleParkPatch
         }
 
         WorkerCount = workers;
-        var narrow = workers < ParkMinimumWorkers;
-        var budget = narrow ? 0 : 60;
+        var budget = DefaultSpinBudget(workers);
         var park = 200;
-        var overridden = false;
 
         // Optional override, one line "<budget> [parkMs]", beside the mod folder.
         // Written for calibration runs; absent in a normal install.
@@ -204,7 +207,6 @@ internal static class FastParallelIdleParkPatch
                     && int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var b))
                 {
                     budget = b;
-                    overridden = true;
                 }
                 if (fields.Length > 1
                     && int.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var p)
@@ -222,7 +224,6 @@ internal static class FastParallelIdleParkPatch
 
         SpinBudget = budget;
         ParkMilliseconds = park;
-        DisabledByProcessorCount = narrow && !overridden;
     }
 
     /// <summary>
@@ -246,23 +247,23 @@ internal static class FastParallelIdleParkPatch
     {
         if (SpinBudget <= 0)
         {
-            return DisabledByProcessorCount ? "off" : "off!";
+            return "off!";
         }
 
         var parks = Volatile.Read(ref ParkCount);
         var timeouts = Volatile.Read(ref TimeoutCount);
         var share = parks > 0 ? 100d * timeouts / parks : 0d;
-        return share.ToString("F0", CultureInfo.InvariantCulture) + "%";
+        return share.ToString("F0", CultureInfo.InvariantCulture)
+            + "%@" + SpinBudget.ToString(CultureInfo.InvariantCulture);
     }
 
     internal static string Counters() =>
         SpinBudget <= 0
-        ? (DisabledByProcessorCount
-            ? $"off(workers={WorkerCount})"
-            : "off(override)")
+        ? "off(override)"
         : Volatile.Read(ref ParkCount).ToString(CultureInfo.InvariantCulture)
         + "/" + Volatile.Read(ref WakeCount).ToString(CultureInfo.InvariantCulture)
-        + "/" + Volatile.Read(ref TimeoutCount).ToString(CultureInfo.InvariantCulture);
+        + "/" + Volatile.Read(ref TimeoutCount).ToString(CultureInfo.InvariantCulture)
+        + "@" + SpinBudget.ToString(CultureInfo.InvariantCulture);
 
     private static Waiter Register()
     {

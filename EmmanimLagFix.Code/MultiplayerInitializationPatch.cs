@@ -13,9 +13,10 @@ namespace EmmanimLagFix.Code;
 /// worker thread by the game. Large, heavily-modded saves can keep that worker
 /// busy long enough for SteamNetworkingSockets' service thread to be starved,
 /// producing the characteristic WaitingForAck disconnect with zero packet
-/// loss. Run only those two multiplayer launch workers below normal priority so
-/// networking and the UI remain schedulable. The original priority is restored
-/// even when game creation throws.
+/// loss. Preserve the runtime-selected priority: lowering these workers was
+/// measured to extend client creation enough to worsen the acknowledgement
+/// timeout risk. Track their duration and release the client's copied input
+/// buffer before constructing the simulation instead.
 /// </summary>
 [HarmonyPatch]
 internal static class MultiplayerInitializationPatch

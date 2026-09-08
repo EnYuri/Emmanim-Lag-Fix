@@ -54,10 +54,11 @@ shape; otherwise it preserves vanilla and logs a warning.
 
 ### Initialization worker scheduling
 
-`MultiplayerInitializationPatch` runs only the host/client simulation-creation
-workers at `BelowNormal` priority and restores the original priority in a
-finalizer. This leaves more scheduling time for the UI and Steam networking
-service during large-game construction.
+`MultiplayerInitializationPatch` leaves the host/client simulation-creation
+workers at the priority selected by the runtime and records their elapsed time.
+An earlier release used `BelowNormal`, but measurement showed that it greatly
+extended client construction and increased the risk of crossing the
+acknowledgement window, so version 2.1.9 removed that scheduling change.
 
 ### Client buffer lifetime and copy allocation
 

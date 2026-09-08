@@ -68,24 +68,57 @@ internal static class ResourceSinkJobShardingPatch
     private static readonly ConditionalWeakTable<object, object?[]> Slots = new();
 
     /// <summary>Power of two, so a thread id maps with a mask rather than a modulo.</summary>
-    private static readonly int ShardMask = ShardCount() - 1;
+    private static readonly int ShardMask = ShardCountForWorkers(
+        FastParallelIdleParkPatch.WorkerCount) - 1;
 
-    private static int ShardCount()
+    // FastParallel owns a stable worker set. Assign those threads and the
+    // calling thread consecutive slots on first use; hashing ManagedThreadId
+    // with a mask allowed two live producers to collide even when enough slots
+    // existed, which put Monitor.Enter_Slowpath back inside the sharded path.
+    private static int s_nextShardIndex;
+
+    [ThreadStatic]
+    private static int t_shardIndexPlusOne;
+
+    /// <summary>
+    /// One producer is the calling thread and the rest are FastParallel workers.
+    /// Size for those actual producers rather than logical processors; the old
+    /// minimum of eight made a three-worker client scan twice as many slots as
+    /// it could use after every parallel pass.
+    /// </summary>
+    internal static int ShardCountForWorkers(int workerCount)
     {
+        var producers = Math.Clamp(workerCount, 1, 63) + 1;
         var n = 1;
-        while (n < Environment.ProcessorCount)
+        while (n < producers)
         {
             n <<= 1;
         }
 
-        return Math.Clamp(n, 8, 64);
+        return n;
+    }
+
+    internal static int ConfiguredShardCount => ShardMask + 1;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int CurrentShardIndex()
+    {
+        var registered = t_shardIndexPlusOne;
+        if (registered != 0)
+        {
+            return registered - 1;
+        }
+
+        var index = (Interlocked.Increment(ref s_nextShardIndex) - 1) & ShardMask;
+        t_shardIndexPlusOne = index + 1;
+        return index;
     }
 
     /// <summary>
     /// Replaces a load of <c>_jobUpdates</c> / <c>_highPriorityFlags</c> inside
-    /// the per-sink pass. Two threads landing on the same slot share a list and
-    /// therefore share its lock, which is slower but still correct - slot
-    /// uniqueness is a performance property here, never a correctness one.
+    /// the per-sink pass. Stable FastParallel workers receive distinct slots
+    /// while capacity remains. A wrapped slot still retains the original lock,
+    /// so unexpected extra producer threads are slower but remain correct.
     /// </summary>
     internal static List<T> Shard<T>(List<T> real)
     {
@@ -95,7 +128,7 @@ internal static class ResourceSinkJobShardingPatch
         }
 
         var slots = Slots.GetValue(real, static _ => new object?[ShardMask + 1]);
-        var index = Environment.CurrentManagedThreadId & ShardMask;
+        var index = CurrentShardIndex();
         if (slots[index] is List<T> existing)
         {
             return existing;

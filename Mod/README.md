@@ -38,11 +38,11 @@ background row builder yields briefly after every resource. Buttons and typed
 amounts retain their immediate handlers; displayed totals can be up to half a
 second old while a large modded catalog fills progressively.
 
-Version 2.0.5 protects the first multiplayer synchronization. The host's
-simulation-creation worker and the client's data-decoding/simulation-creation
-worker temporarily run below normal priority, leaving scheduling time for Steam
-networking while very large saves are being constructed. Their elapsed times are
-written to the log. This changes local scheduling only, not simulation data.
+Version 2.0.5 initially lowered the host simulation-creation worker and the
+client data-decoding/simulation-creation worker below normal priority. Version
+2.1.9 restored the runtime-selected priority after measurement showed that the
+lower priority greatly extended client creation and worsened the first-sync
+timeout risk. Their elapsed times are still written to the log.
 
 Version 2.0.6 narrows the background stasis-ship preload radius from 3750 to
 3000 while leaving the actual 2500-unit live/spawn radius unchanged. In the

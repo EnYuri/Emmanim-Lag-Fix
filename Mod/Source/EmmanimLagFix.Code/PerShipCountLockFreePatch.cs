@@ -131,31 +131,27 @@ internal static class PerShipCountLockFreeStorage
 
     private static void RemoveDeadEntries(State state, Entry[] observed)
     {
-        var liveCount = 0;
-        for (var i = 0; i < observed.Length; i++)
-        {
-            if (observed[i].Ship.TryGetTarget(out _))
-            {
-                liveCount++;
-            }
-        }
-
-        if (liveCount == observed.Length)
-        {
-            return;
-        }
-
-        var replacement = new Entry[liveCount];
+        // Compact in one pass. Counting live weak references first and then
+        // testing them again can over-allocate: a target may die between the
+        // two passes, leaving a default Entry (and a null Ship reference) in
+        // the published tail of the array.
+        var replacement = new Entry[observed.Length];
         var targetIndex = 0;
         for (var i = 0; i < observed.Length; i++)
         {
             var entry = observed[i];
-            if (entry.Ship.TryGetTarget(out _))
+            if (entry.Ship is not null && entry.Ship.TryGetTarget(out _))
             {
                 replacement[targetIndex++] = entry;
             }
         }
 
+        if (targetIndex == observed.Length)
+        {
+            return;
+        }
+
+        Array.Resize(ref replacement, targetIndex);
         Interlocked.CompareExchange(ref state.Entries, replacement, observed);
     }
 }

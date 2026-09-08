@@ -196,7 +196,9 @@ internal static class TransferWidgetCreationThrottlePatch
 /// Vanilla creates every transfer row in one uninterrupted worker task. That
 /// avoids a direct main-thread block but can still contend with simulation and
 /// networking on large mod lists. Yield briefly after each row is handed to the
-/// main thread so construction remains cooperative.
+/// main thread so construction remains cooperative. Use a scheduler yield, not
+/// <c>Sleep(1)</c>: the latter measured 10.6 ms on this process and imposed a
+/// large per-row delay on top of the one-row-per-frame consumer throttle.
 /// </summary>
 [HarmonyPatch]
 internal static class TransferWidgetBackgroundPacingPatch
@@ -248,6 +250,6 @@ internal static class TransferWidgetBackgroundPacingPatch
     private static void ExecutePaced(Director director, Action action)
     {
         director.ExecuteOnMainThread(action);
-        Thread.Sleep(1);
+        Thread.Yield();
     }
 }

@@ -321,7 +321,8 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             // input/update/draw milliseconds per frame, then frames per second.
             // update carries the lockstep wait; draw carries present and vsync.
             $"phaseMs={phases} " +
-            $"{simPhases} cores={FastParallelIdleParkPatch.ProcessorCount}/{FastParallelIdleParkPatch.WorkerCount} pickups={pickups} tickcap={NetworkTimeCatchUpPatch.TicksPerFrame}/{raised} " +
+            $"{simPhases} cores={FastParallelIdleParkPatch.ProcessorCount}/{FastParallelIdleParkPatch.WorkerCount} " +
+            $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} pickups={pickups} tickcap={NetworkTimeCatchUpPatch.TicksPerFrame}/{raised} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"players={manager._playerInfos.Count} " +
             $"inputQueued={queuedInputTicks} inputMax={maximumPlayerQueue} outgoingInputs={manager._outgoingInputs.Count} " +

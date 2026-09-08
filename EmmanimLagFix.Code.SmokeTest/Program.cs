@@ -1530,6 +1530,56 @@ foreach (var allocOverload in AccessTools
 {
     var shardingType = typeof(EntryPoint).Assembly.GetType(
         "EmmanimLagFix.Code.ResourceSinkJobShardingPatch", throwOnError: true)!;
+    var shardCountForWorkers = AccessTools.DeclaredMethod(shardingType, "ShardCountForWorkers")
+        ?? throw new MissingMethodException(shardingType.FullName, "ShardCountForWorkers");
+    foreach (var (workers, expected) in new[] { (1, 2), (3, 4), (7, 8), (8, 16), (11, 16) })
+    {
+        var actual = (int)shardCountForWorkers.Invoke(null, new object[] { workers })!;
+        if (actual != expected)
+        {
+            throw new InvalidOperationException(
+                $"Expected {workers} FastParallel workers plus the caller to use {expected} "
+                + $"sink-job shards, got {actual}.");
+        }
+    }
+    var configuredShardCount = (int)(AccessTools.PropertyGetter(
+        shardingType, "ConfiguredShardCount")
+        ?? throw new MissingMethodException(shardingType.FullName, "get_ConfiguredShardCount"))
+        .Invoke(null, null)!;
+    if (configuredShardCount < 2 || (configuredShardCount & (configuredShardCount - 1)) != 0)
+    {
+        throw new InvalidOperationException(
+            $"Configured sink-job shard count {configuredShardCount} is not a usable power of two.");
+    }
+    var currentShardIndex = AccessTools.DeclaredMethod(shardingType, "CurrentShardIndex")
+        ?? throw new MissingMethodException(shardingType.FullName, "CurrentShardIndex");
+    var assignedIndexes = new int[configuredShardCount];
+    using (var startAssignments = new ManualResetEventSlim(false))
+    {
+        var assignmentThreads = Enumerable.Range(0, configuredShardCount)
+            .Select(i => new Thread(() =>
+            {
+                startAssignments.Wait();
+                assignedIndexes[i] = (int)currentShardIndex.Invoke(null, null)!;
+            }) { IsBackground = true, Name = $"sink-shard assignment {i}" })
+            .ToArray();
+        foreach (var thread in assignmentThreads)
+        {
+            thread.Start();
+        }
+        startAssignments.Set();
+        foreach (var thread in assignmentThreads)
+        {
+            thread.Join();
+        }
+    }
+    if (assignedIndexes.Distinct().Count() != configuredShardCount)
+    {
+        throw new InvalidOperationException(
+            "Stable sink-job producers collided despite having enough shard slots: "
+            + string.Join(", ", assignedIndexes));
+    }
+
     foreach (var flag in new[] { "ShardApplied", "DrainApplied" })
     {
         if (AccessTools.Field(shardingType, flag)!.GetValue(null) is not true)
@@ -1690,6 +1740,17 @@ foreach (var allocOverload in AccessTools
 
     var parkPatchType = typeof(EntryPoint).Assembly
         .GetType("EmmanimLagFix.Code.FastParallelIdleParkPatch", throwOnError: true)!;
+    var defaultSpinBudget = AccessTools.DeclaredMethod(parkPatchType, "DefaultSpinBudget")
+        ?? throw new MissingMethodException(parkPatchType.FullName, "DefaultSpinBudget");
+    foreach (var (workers, expected) in new[] { (1, 20), (3, 20), (7, 20), (8, 60), (11, 60) })
+    {
+        var actual = (int)defaultSpinBudget.Invoke(null, new object[] { workers })!;
+        if (actual != expected)
+        {
+            throw new InvalidOperationException(
+                $"Expected {workers} FastParallel workers to use spin budget {expected}, got {actual}.");
+        }
+    }
 
     if (Harmony.GetPatchInfo(runThread)?.Transpilers.Any(patch => patch.owner == smokeId) != true)
     {
@@ -1725,6 +1786,14 @@ foreach (var allocOverload in AccessTools
     {
         throw new InvalidOperationException(
             "The spin budget is not positive, so no worker would ever spin before parking.");
+    }
+    var compactCounters = (string)(AccessTools.DeclaredMethod(parkPatchType, "CompactCounters")
+        ?? throw new MissingMethodException(parkPatchType.FullName, "CompactCounters"))
+        .Invoke(null, null)!;
+    if (!compactCounters.EndsWith("@" + spinBudget, StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException(
+            $"Compact FastParallel diagnostics '{compactCounters}' do not report spin budget {spinBudget}.");
     }
 
     var parkCountField = AccessTools.Field(parkPatchType, "ParkCount");

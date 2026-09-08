@@ -32,8 +32,8 @@ inert without it - see [Mods QoL support](#mods-qol-support).
   core while the simulation and networking threads are active.
 - Lazily creates crew role-priority controls per expanded part and refreshes
   their visual state at 10 Hz.
-- Runs host/client multiplayer simulation creation below normal thread priority,
-  preserving CPU scheduling time for Steam networking during the first sync.
+- Keeps host/client multiplayer simulation creation at the runtime-selected
+  thread priority; lowering it was measured to worsen first-sync completion.
 - Logs host creation and client decode/creation durations separately.
 - Replaces the resource manager's exclusive per-ship count lock with immutable
   copy-on-write snapshots, removing lock contention from parallel readers.
@@ -58,12 +58,13 @@ inert without it - see [Mods QoL support](#mods-qol-support).
 - Rescans minimap membership at 10 Hz and re-tests only the previously visible
   sources in between, instead of asking every object in the sector whether it is
   visible on every drawn frame. Disappearance and blip positions stay immediate.
-- Parks idle `FastParallel` worker threads instead of letting them spin
-  forever. Halfling's idle branch is `SpinWait.SpinOnce(-1)`, which never
-  blocks; it was 39.0 s of the 65.9 s of process CPU in a 20-second trace, with
-  17.8 s of GC suspension rendezvous underneath it. Workers now spin for a
-  bounded budget — long enough to cover back-to-back dispatches inside a frame —
-  and then block on an event of their own until the next dispatch releases them.
+- Parks idle `FastParallel` workers instead of letting them spin forever.
+  Halfling's idle branch is `SpinWait.SpinOnce(-1)`, which never blocks; it was
+  39.0 s of the 65.9 s of process CPU in a 20-second trace, with 17.8 s of GC
+  suspension rendezvous underneath it. Workers spin for a bounded budget and
+  then block on an event of their own until the next dispatch releases them.
+  Machines below eight workers use a shorter 20-iteration budget instead of
+  disabling parking and restoring the unbounded spin; wider machines use 60.
   Neither the park nor the wake takes a lock: 2.1.3 shared one monitor and simply
   relocated the cost into `Monitor.Wait` and `Enter_Slowpath`, part of it on the
   main thread. Raising `SpinOnce`'s

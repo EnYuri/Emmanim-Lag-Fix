@@ -25,6 +25,10 @@ namespace EmmanimLagFix.Code;
 /// instead: a transpiler routes the allocation and the three Add calls through
 /// helpers that record what was added, and a replacement pool deinitializer
 /// empties the set in proportion to that record rather than to its capacity.
+/// Recording is enabled only for a previously allocated set and is abandoned
+/// as soon as the round reaches one quarter of the captured capacity. Fresh or
+/// dense rounds therefore pay the normal bulk clear without duplicating every
+/// successful Add in a list.
 ///
 /// The set is only ever probed with Add and never enumerated, so nothing
 /// observable can depend on its internal layout, and the emptied set is
@@ -60,6 +64,10 @@ internal static class ResourceSourceVisitedSetPatch
     /// </summary>
     [ThreadStatic]
     private static List<SourceInfo>? _trackedAdds;
+
+    /// <summary>Capacity captured before the tracked round adds anything.</summary>
+    [ThreadStatic]
+    private static int _trackedCapacity;
 
     private static readonly MethodInfo AllocTarget = AccessTools.Method(
         typeof(TempHashSet<SourceInfo>),
@@ -170,12 +178,16 @@ internal static class ResourceSourceVisitedSetPatch
     private static TempHashSet<SourceInfo> AllocTracked()
     {
         var set = TempHashSet<SourceInfo>.Alloc();
+        var capacity = set.EnsureCapacity(0);
 
         // A nested round would clobber the outer one's record. Leave the inner
-        // set untracked; its disposal then falls back to vanilla.
-        if (_trackedSet is null)
+        // set untracked; its disposal then falls back to vanilla. A fresh set
+        // also cannot benefit: it will grow around this round's count, so its
+        // eventual capacity will not be four times larger than the entries.
+        if (_trackedSet is null && capacity > 0)
         {
             _trackedSet = set;
+            _trackedCapacity = capacity;
             (_trackedAdds ??= new List<SourceInfo>()).Clear();
         }
 
@@ -191,7 +203,21 @@ internal static class ResourceSourceVisitedSetPatch
 
         if (ReferenceEquals(_trackedSet, set))
         {
-            _trackedAdds!.Add(source);
+            var added = _trackedAdds!;
+            // Individual removal only wins for a genuinely sparse reuse. Once
+            // this round reaches the same one-quarter threshold used by the
+            // deinitializer, stop paying for a duplicate List.Add on every
+            // source and let vanilla clear the set in bulk.
+            if ((long)(added.Count + 1) * 4 >= _trackedCapacity)
+            {
+                _trackedSet = null;
+                _trackedCapacity = 0;
+                added.Clear();
+            }
+            else
+            {
+                added.Add(source);
+            }
         }
 
         return true;
@@ -206,6 +232,7 @@ internal static class ResourceSourceVisitedSetPatch
         }
 
         _trackedSet = null;
+        _trackedCapacity = 0;
         var added = _trackedAdds!;
 
         // Every recorded Add returned true and nothing removes during a round,

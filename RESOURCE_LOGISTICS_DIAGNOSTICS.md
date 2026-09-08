@@ -173,6 +173,19 @@ All paths below are under
 - `four_x_factory_and_warehouse_removed_cockpit_209_cpu_2026-08-28_22-05-48.nettrace`
 - `four_x_empty_factoryless_megawarehouse_209_cpu_2026-08-28_22-12-32.nettrace`
 - `four_x_heat_sources_sinks_disconnected_209_cpu_2026-08-28_22-26-30.nettrace`
+
+### Current-session follow-up (2026-09-09)
+
+The 20-second live-session trace
+`current_session_cpu_2026-09-09_02-38-14.nettrace` attributed 4,103 ms to
+`SearchForSources`; 601 ms of that was self time in the patch's `TrackedAdd`
+helper. The old implementation recorded every successful add even for a fresh
+or dense set, then discarded that record when the proportional-removal test
+failed and performed the normal bulk clear. Tracking now starts only when a
+set already has reusable capacity and stops at the same one-quarter threshold
+used by disposal. This removes the known losing case while retaining sparse
+cleanup for an oversized pooled set. A new-session A/B trace is still required
+to measure the net change.
 # Exact resource-path tail elimination (local experiment, 2026-08-31)
 
 `ResourceManager.SearchForSources(SinkInfo)` asks `PathManager` for cells in
