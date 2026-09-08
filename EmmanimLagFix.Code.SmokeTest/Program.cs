@@ -1872,6 +1872,40 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
+// The per-frame input-tick cap lives in one expression inside
+// NetManager.GetTargetAdjustedDeltaTime. Resolve the method and the two members
+// the postfix reads, so a rename is caught here rather than silently leaving the
+// ticks-per-frame override inert.
+{
+    var netManagerType = HarmonyLib.AccessTools.TypeByName("Cosmoteer.Game.Multiplayer.NetManager")
+        ?? throw new InvalidOperationException(
+            "Cosmoteer.Game.Multiplayer.NetManager was not found, so the per-frame input-tick "
+            + "cap cannot be raised.");
+
+    if (HarmonyLib.AccessTools.DeclaredMethod(netManagerType, "GetTargetAdjustedDeltaTime") is null)
+    {
+        throw new InvalidOperationException(
+            "NetManager.GetTargetAdjustedDeltaTime was not found, so the per-frame input-tick "
+            + "cap cannot be raised.");
+    }
+
+    var simProperty = HarmonyLib.AccessTools.Property(netManagerType, "Sim")
+        ?? throw new InvalidOperationException("NetManager.Sim was not found.");
+
+    var rulesProperty = HarmonyLib.AccessTools.Property(simProperty.PropertyType, "Rules")
+        ?? throw new InvalidOperationException("NetManager.Sim.Rules was not found.");
+
+    if (HarmonyLib.AccessTools.Property(rulesProperty.PropertyType, "PhysicsUpdatesPerSecond")
+            is null
+        && HarmonyLib.AccessTools.Field(rulesProperty.PropertyType, "PhysicsUpdatesPerSecond")
+            is null)
+    {
+        throw new InvalidOperationException(
+            "Sim.Rules.PhysicsUpdatesPerSecond was not found, so the vanilla one-tick-per-frame "
+            + "cap cannot be recomputed.");
+    }
+}
+
 // The lost-ship save is moved off vanilla's background worker onto the
 // Director's main-thread queue, so both halves of that hand-off must resolve.
 {
@@ -1951,4 +1985,4 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, frame-phase timing, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, frame-phase timing, opt-in per-frame input-tick cap, and main-thread lost-ship saving patches resolved and compiled on this game build.");

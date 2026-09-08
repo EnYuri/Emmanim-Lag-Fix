@@ -304,6 +304,10 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         // Visible nugget-pickup jobs the overlay's last refresh saw. Values far
         // above the 128 cap mean the cap is carrying real per-frame work here.
         var pickups = ResourcePickupOverlayPatch.TakePeakScannedJobs();
+        // Frames whose one-tick-per-frame credit the ticks-per-frame override
+        // actually raised. Zero means the vanilla cap was never binding here, so
+        // raising it cannot be what changes this machine's world speed.
+        var raised = NetworkTimeCatchUpPatch.TakeRaisedFrames();
 
         Halfling.Logging.Logger.Log(
             "[EmmanimLagFix.MultiplayerMemoryDiagnostics] " +
@@ -317,7 +321,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             // input/update/draw milliseconds per frame, then frames per second.
             // update carries the lockstep wait; draw carries present and vsync.
             $"phaseMs={phases} " +
-            $"{simPhases} pickups={pickups} " +
+            $"{simPhases} pickups={pickups} tickcap={NetworkTimeCatchUpPatch.TicksPerFrame}/{raised} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"players={manager._playerInfos.Count} " +
             $"inputQueued={queuedInputTicks} inputMax={maximumPlayerQueue} outgoingInputs={manager._outgoingInputs.Count} " +
@@ -343,7 +347,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"t={manager.NetworkInputTick} ft={frameTimes} cpu={cpuLoad} "
             + $"pv={ToMiB(process.PrivateMemorySize64):F0} hp={ToMiB(gcInfo.HeapSizeBytes):F0} "
             + $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} q={queuedInputTicks}/{maximumPlayerQueue} "
-            + $"cq={connectionReceiveQueue} ph={phases} {simPhases} pk={pickups} "
+            + $"cq={connectionReceiveQueue} ph={phases} {simPhases} pk={pickups} tc={NetworkTimeCatchUpPatch.TicksPerFrame}/{raised} "
             + $"fp={FastParallelIdleParkPatch.CompactCounters()}");
     }
 

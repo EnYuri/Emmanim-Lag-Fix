@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.1.10
+
+**The lockstep runs at the slowest peer's frame rate, not its CPU.**
+
+`NetManager.GetTargetAdjustedDeltaTime` ends in
+`Mathx.Min(value2, 1f / PhysicsUpdatesPerSecond)`. The second term caps the game
+time credited per rendered frame at exactly one input tick, so in multiplayer the
+whole simulation advances no faster than the slowest peer *renders*, whatever its
+CPU could actually simulate. Singleplayer has no equivalent:
+`SPManager.AdvanceNetworkTime` is a four-line stub and `GameRoot.Update`'s
+do/while loop runs the simulation from the real clock. That is why a save which
+is smooth alone crawls in multiplayer.
+
+Measured on 2026-09-08 with a 12-core host (11 FastParallel workers) and a 4-core
+client (3 workers, counted from the client's own freeze dump): the client
+rendered 10-13 fps against the host's 90-105, its simulation tick cost about 6.5x
+the host's, and the session ran at 4-8 of the nominal 30 input ticks per second.
+The host was waiting on the client 72-92% of every frame while itself idle.
+
+A new `ticks-per-frame.txt` beside the mod folder, holding an integer from 1 to
+4, raises that cap. It is off by default, and the postfix leaves any frame that
+was already inside its own delta time untouched, so a host rendering above 30 fps
+is unaffected and only a client the cap was actually binding changes at all. The
+trade is explicit: at N ticks per frame the slow client's frame costs N
+simulation ticks, so its own rendering falls while the world advances faster for
+everyone.
+
+Deterministic and lockstep-safe. `Sim.OnInputTick` takes a fixed
+`InputTickInterval`, so N ticks in one frame compute exactly what N ticks in N
+frames compute; only local pacing changes. Peers may run different values, as
+they already may for "Minimum Target F.P.S.", which feeds the same expression,
+and `IsReadyForTick` still gates every tick so a client can never run ahead of
+the inputs it holds.
+
+The diagnostics line reports `tickcap=<N>/<frames>` (`tc=` in the peer relay):
+the configured value and how many frames it actually raised. Zero frames means
+the vanilla cap was never binding on that machine.
+
 ## 2.1.9
 
 **The nugget-pickup overlay capped its lines and not its icons.**

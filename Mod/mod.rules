@@ -38,7 +38,7 @@
 
 ID = nayuri.emmanim_lag_fix
 Name = "Emmanim Lag Fix"
-Version = 2.1.9
+Version = 2.1.10
 
 ModifiesGameplay = true
 ModifiesMultiplayer = true
