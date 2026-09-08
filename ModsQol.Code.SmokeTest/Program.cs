@@ -227,8 +227,24 @@ foreach (var handler in closedHandlers)
     }
 }
 
+// The stale-cache repair reaches six private members by reflection. If any of them is
+// renamed the repair silently does nothing and the engine-room transfer stalls again, so
+// fail here rather than in a save six months from now.
+var refresh = typeof(ModsQol.Code.EntryPoint).Assembly
+    .GetType("ModsQol.Code.ProxyCacheRefresh", throwOnError: true)!;
+if (!(bool)AccessTools.Field(refresh, "Available").GetValue(null)!)
+{
+    throw new InvalidOperationException(
+        "ProxyCacheRefresh could not resolve every cache-invalidation member it needs "
+        + "(ResourceStorageProxy / MultiResourceStorage / PartNetworkResourceStore "
+        + "OnResourcesChanged and OnMaxResourcesChanged). Without them a proxy that rebinds "
+        + "to a different part leaves a stale resources figure above it, and a destination "
+        + "reads as full forever while its real store is empty.");
+}
+
 new Harmony(ModsQol.Code.EntryPoint.HarmonyId).UnpatchAll(ModsQol.Code.EntryPoint.HarmonyId);
 Console.WriteLine(
-    "PASS: sentinel targets resolved, all four non-generic proxy-owner patches installed, and no "
+    "PASS: sentinel targets resolved, all four non-generic proxy-owner patches installed, the "
+    + "stale-cache repair resolved every member it needs, and no "
     + "shared canonical ProxyHandler method is patched; sentinel resolution is prefix-scoped, so "
     + "the module stays inert without Mods QoL.");

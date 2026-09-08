@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Cosmoteer.Ships.Parts;
@@ -117,6 +117,8 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
         parts.RegisterCellAddHandler(cell, registration.CellAdd);
         parts.RegisterCellRemovingHandler(cell, registration.CellRemoving);
 
+        ProxyBindingDiagnostics.Track(handler, parentPart, cell);
+
         var existing = parts[cell, PartRectType.Normal];
         if (existing != null)
         {
@@ -126,6 +128,9 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
         {
             registration.Bound = handler._proxiedPart;
         }
+
+        ProxyCacheRefresh.After(parentPart);
+        ProxyBindingDiagnostics.Attach(handler, parentPart, cell, existing);
     }
 
     /// <summary>
@@ -138,6 +143,7 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
             return;
         }
 
+        ProxyBindingDiagnostics.Untrack(handler);
         registration.Parts.UnregisterCellAddHandler(registration.Cell, registration.CellAdd);
         registration.Parts.UnregisterCellRemovingHandler(registration.Cell, registration.CellRemoving);
         StopLateWatch(registration);
@@ -148,19 +154,34 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
     private static void OnCellAdd(
         ProxyHandler<TComponent> handler, Part parentPart, Registration registration, Part part)
     {
+        var before = ProxyBindingDiagnostics.Enabled
+            ? ProxyBindingDiagnostics.Describe(handler)
+            : string.Empty;
+
         if (AnyStorageBinder.HasSentinel(handler.Rules))
         {
             TryBind(handler, parentPart, part);
         }
         registration.Bound = handler._proxiedPart;
+
+        ProxyCacheRefresh.After(parentPart);
+        ProxyBindingDiagnostics.CellEvent(
+            "add", handler, parentPart, registration.Cell, part, before, registration.Bound, false);
     }
 
     private static void OnCellRemoving(
         ProxyHandler<TComponent> handler, Part parentPart, Registration registration, Part part)
     {
+        var before = ProxyBindingDiagnostics.Enabled
+            ? ProxyBindingDiagnostics.Describe(handler)
+            : string.Empty;
+
         var bound = registration.Bound;
         if (bound == null)
         {
+            ProxyBindingDiagnostics.CellEvent(
+                "removing/unremembered", handler, parentPart, registration.Cell,
+                part, before, null, false);
             return;
         }
 
@@ -169,6 +190,10 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
             // The proxied part really is leaving; vanilla's unbind was correct.
             StopLateWatch(registration);
             registration.Bound = null;
+            ProxyCacheRefresh.After(parentPart);
+            ProxyBindingDiagnostics.CellEvent(
+                "removing/target-left", handler, parentPart, registration.Cell,
+                part, before, bound, false);
             return;
         }
 
@@ -176,6 +201,9 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
         // always - and vanilla unbound anyway. Only step in if it actually did.
         if (handler._proxiedPart != null || handler.ProxiedComponent != null)
         {
+            ProxyBindingDiagnostics.CellEvent(
+                "removing/still-bound", handler, parentPart, registration.Cell,
+                part, before, bound, false);
             return;
         }
 
@@ -192,6 +220,11 @@ internal static class SentinelAttachment<TComponent> where TComponent : class
         }
 
         registration.Bound = handler._proxiedPart;
+
+        ProxyCacheRefresh.After(parentPart);
+        ProxyBindingDiagnostics.CellEvent(
+            "removing/repaired", handler, parentPart, registration.Cell,
+            part, before, bound, true);
     }
 
     private static void TryBind(ProxyHandler<TComponent> handler, Part parentPart, Part part)

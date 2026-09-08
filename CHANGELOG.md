@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.1.14
+
+**A rebound storage proxy no longer leaves a stale resources figure above it.**
+
+Replacing an engine room with another tier in the same cell could stop a
+Warhammer wire terminal from delivering to it, permanently: the terminal's
+staging buffer sat pinned at 1000/1000 while the engine room it fed read
+0/36000, with every proxy correctly bound and every gate open. Rotating the
+wire or reloading the save cleared it, and which recipient on a run was hit
+varied between rebuilds.
+
+Three components on that path cache what they report - `ResourceStorageProxy`
+mirrors the store it proxies, `MultiResourceStorage` sums its members, and
+`PartNetworkResourceStore` publishes the result to the subnetwork. Each is
+invalidated only by a change event from the layer below it, and a proxy
+rebinding to a *different part* is not such an event: the storage was swapped,
+not altered. A figure left too high makes
+`ResourceConverter.WantsResourceConversion` fail its
+`Resources <= MaxResources - MinToQuantityForConversion` test forever, so the
+transfer stops with the destination empty.
+
+A live capture caught the state directly - a network store on the affected run
+reported holding 379,107 against a capacity of 31,428, which is impossible
+because `TotalCapacity` is computed live while `AvailableResources` is cached.
+Rather than identify which of the three caches goes stale in which order, the
+four points where a binding settles now refresh all three bottom-up, calling
+the game's own invalidation handlers so the change events propagate normally.
+Only parts that actually aggregate or publish a proxied store are touched, so
+every other proxy keeps vanilla behaviour exactly.
+
+The smoke test asserts all six reflected members resolve; a rename now fails
+the build instead of silently disabling the repair.
+
+**Opt-in proxy and network instrumentation.**
+
+`proxy-binding-diagnostics.flag` beside the mod folder logs proxy bindings
+(`[PB.attach]`, `[PB.cell]`, `[PB.after]`, `[PB.snap]`) and network staging
+state (`[NF.store]`, `[NF.input]`) every ten seconds. It is inert without the
+flag and is what identified the fault above; the first capture also cleared
+proxy binding itself of suspicion, which reading the decompiled source alone
+had not.
+
 ## 2.1.13
 
 **Dead per-ship resource-count entries are now compacted in one pass.**
