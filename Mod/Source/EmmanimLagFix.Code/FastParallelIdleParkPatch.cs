@@ -142,17 +142,48 @@ internal static class FastParallelIdleParkPatch
     /// fastparallel-park.txt overrides it in both directions: a positive budget
     /// forces parking on, and 0 forces it off.
     /// </summary>
-    private const int ParkMinimumProcessors = 8;
+    /// <remarks>
+    /// Version 2.1.11 gated on <see cref="Environment.ProcessorCount"/> and picked
+    /// 8, on an estimate of the client's core count read off a freeze dump's
+    /// worker threads. The client's own diagnostics then reported 8 logical
+    /// processors, so the gate never fired on the machine it was written for.
+    ///
+    /// The count that matters is the worker count, not the logical processor
+    /// count: <c>FastParallel.ThreadCount</c> is <c>PhysicalCores - 1</c>, and it
+    /// is exactly the number of threads a stop-the-world collection must
+    /// rendezvous - so it is what the saving is proportional to. The wake
+    /// latency paid for it is per dispatch and does not shrink with it. Host 11
+    /// workers, client 3.
+    /// </remarks>
+    private const int ParkMinimumWorkers = 8;
 
     /// <summary>Logical processors this machine reports, for the diagnostics line.</summary>
     internal static readonly int ProcessorCount = Environment.ProcessorCount;
 
-    /// <summary>True when the processor-count rule, not an override, disabled parking.</summary>
+    /// <summary>FastParallel worker threads on this machine, the gate's input.</summary>
+    internal static readonly int WorkerCount;
+
+    /// <summary>True when the worker-count rule, not an override, disabled parking.</summary>
     internal static readonly bool DisabledByProcessorCount;
 
     static FastParallelIdleParkPatch()
     {
-        var narrow = Environment.ProcessorCount < ParkMinimumProcessors;
+        // Reading the property runs FastParallel's own static constructor, which
+        // only reads system info; Start() has not been called yet either way.
+        var workers = 0;
+        try
+        {
+            workers = FastParallel.ThreadCount;
+        }
+        catch (Exception)
+        {
+            // Unreadable worker count: fall back to the logical processor count
+            // rather than silently choosing a threading behaviour on no data.
+            workers = Environment.ProcessorCount - 1;
+        }
+
+        WorkerCount = workers;
+        var narrow = workers < ParkMinimumWorkers;
         var budget = narrow ? 0 : 60;
         var park = 200;
         var overridden = false;
@@ -227,7 +258,7 @@ internal static class FastParallelIdleParkPatch
     internal static string Counters() =>
         SpinBudget <= 0
         ? (DisabledByProcessorCount
-            ? $"off(cores={ProcessorCount})"
+            ? $"off(workers={WorkerCount})"
             : "off(override)")
         : Volatile.Read(ref ParkCount).ToString(CultureInfo.InvariantCulture)
         + "/" + Volatile.Read(ref WakeCount).ToString(CultureInfo.InvariantCulture)

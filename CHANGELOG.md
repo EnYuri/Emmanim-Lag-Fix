@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.1.12
+
+**The idle-worker parking gate now counts workers, not logical processors.**
+
+Version 2.1.11 disabled parking below 8 logical processors, on an estimate of the
+client's core count read off the worker threads in a freeze dump. The client's own
+diagnostics then reported `co=8`, so the gate never fired on the machine it was
+written for and the 2.1.11 hypothesis was left untested rather than answered.
+
+The count the saving is proportional to is the worker count, not the logical
+processor count. `FastParallel.ThreadCount` is `PhysicalCores - 1`, and it is
+exactly the number of threads a stop-the-world collection has to rendezvous; the
+wake latency paid for the parking is per dispatch and does not shrink with it.
+Parking is therefore on at 8 or more workers and off below. The host has 11, the
+client 3. The threshold is still a judgement rather than a measurement, and
+`fastparallel-park.txt` still overrides it in both directions.
+
+The diagnostics line now reports `co=<logical>/<workers>` (`cores=` in the long
+form), and a gated-off run reads `fppark=off(workers=N)`.
+
 ## 2.1.11
 
 **Idle-worker parking is off by default below 8 logical processors.**
