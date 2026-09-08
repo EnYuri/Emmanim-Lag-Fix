@@ -170,13 +170,19 @@ internal static class FastParallelIdleParkPatch
     /// peer relay, where the full triple does not fit inside the chat limit. A
     /// share near 100% means the wake handshake is not firing.
     /// </summary>
+    /// <summary>
+    /// Timeout share only. The cumulative wake count was dropped from the peer
+    /// relay in 2.1.9: it cost eight characters of a 195-character budget and
+    /// only the share is diagnostic - a value near 100% means the wake handshake
+    /// is not firing. Measured 0% on the peer and 0.2% locally across a full
+    /// 2026-09-08 session, so the handshake added in 2.1.4 is healthy.
+    /// </summary>
     internal static string CompactCounters()
     {
         var parks = Volatile.Read(ref ParkCount);
         var timeouts = Volatile.Read(ref TimeoutCount);
         var share = parks > 0 ? 100d * timeouts / parks : 0d;
-        return Volatile.Read(ref WakeCount).ToString(CultureInfo.InvariantCulture)
-            + "/" + share.ToString("F0", CultureInfo.InvariantCulture) + "%";
+        return share.ToString("F0", CultureInfo.InvariantCulture) + "%";
     }
 
     internal static string Counters() =>
@@ -363,6 +369,11 @@ internal static class FastParallelIdleParkPatch
     [HarmonyPatch]
     internal static class AddToLiveWake
     {
+        // With parking disabled by the override nothing ever parks, so the wake
+        // postfix would run on every dispatch to find an empty list. Skip it, so
+        // "0" in fastparallel-park.txt leaves FastParallel entirely unpatched.
+        private static bool Prepare() => SpinBudget > 0;
+
         private static MethodBase TargetMethod() =>
             AccessTools.DeclaredMethod(typeof(FastParallel), "AddToLive")
             ?? throw new MissingMethodException(typeof(FastParallel).FullName, "AddToLive");

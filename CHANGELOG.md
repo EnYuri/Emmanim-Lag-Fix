@@ -1,5 +1,93 @@
 # Changelog
 
+## 2.1.9
+
+**The nugget-pickup overlay capped its lines and not its icons.**
+
+`ResourcePickupOverlayPatch` has rendered at most 128 connection lines since
+2.0.11, but kept one icon per *distinct* scheduled nugget with no cap, and walks
+that list on every rendered frame. A large manual collection makes it thousands
+of entries. Both lists are now capped at 128.
+
+The evidence is a client freeze dump from 2026-09-08 at 23:21:03: of 58 threads,
+the only mod frame on the main thread is this prefix, under
+`SimOverlayRenderer.OnDrawCrewUnderlays` in the draw path. That client's draw
+phase ran a 19.6 ms median against the host's 3.8 ms on the same game. A single
+stack sample cannot prove the loop was what spent the ten seconds - a resync was
+deserializing 73 MiB on a 12.3 GiB process in the same window - so no share of
+that freeze is claimed. An unbounded per-frame walk is a defect on its own.
+
+The diagnostics line reports `pickups=` (`pk=` in the peer relay): the largest
+visible-job count any refresh saw since the last sample. A value far above 128
+means the cap is carrying real work on that machine.
+
+**Multiplayer initialization no longer lowers its worker to BelowNormal.**
+
+Version 2.0.13 dropped the launch worker's thread priority so Steam's networking
+thread would keep acking while the simulation was built. Measured with two
+players on 2026-09-08 it did the opposite: the host finished its own creation in
+8.74 seconds while the client spent **51.00 seconds** at `BelowNormal` on the
+same game, against an ack window of 10-30 seconds. Lowering a thread that holds
+locks the networking path also needs inverts the priority rather than relieving
+it - which is what the Steam assert this mod was written around,
+`service thread waited 65ms for lock`, actually describes.
+
+The worker now runs at the priority the runtime chose. Releasing the receive
+buffer before `CreateGame` is unaffected and stays; that half was a measured
+memory improvement, not a scheduling guess.
+
+**`fastparallel-park.txt` set to `0` now leaves FastParallel entirely unpatched.**
+
+The override already disabled the idle-park transpiler, but the `AddToLive` wake
+postfix stayed attached and ran on every dispatch to find an empty sleeper list.
+It is now skipped too, so `0` is a clean A/B against vanilla's spin. The patch is
+lockstep-neutral - it changes when work runs, never what it computes - so one
+peer may disable it while the other does not.
+
+**The visual smoothed-value throttle read a wall clock per manager per frame.**
+
+`PartSmoothedValueVisualThrottlePatch` gated its 20 Hz refresh on
+`Stopwatch.GetTimestamp()` - a `QueryPerformanceCounter` read for every manager
+on every rendered frame - while feeding the values accumulated *game* time. A
+20-second CPU trace on a 346-ship host put this prefix at 91.1 ms of self time,
+1.7% of everything under `GameRoot.Update`, second only to infrastructure.
+
+The gate is now the accumulator itself: add the frame's game time, refresh once
+it reaches 1/20 s, drain it. No clock read at all. Delivered time is unchanged -
+the accumulator is drained, never discarded - so smoothing rates are identical.
+
+The two clocks also disagreed whenever the simulation ran slower than real time,
+which is the ordinary state of a client that has fallen behind: the wall clock
+passed the gate while there was less than a refresh interval of game time to
+deliver. Tying the gate to the accumulator removes that by construction. No
+sample has been taken that isolates how much work this second half was costing,
+so no figure is claimed for it.
+
+**The update phase is now split into the simulation step and the game mode.**
+
+`GameRoot.Update` is a `do { ... } while (NetManager.AdvanceNetworkTime(out
+isInputTick))` loop, so a peer that has fallen behind runs several simulation
+ticks inside one rendered frame. A large `phaseMs` update figure was therefore
+ambiguous between two unrelated problems - one heavy tick (simulation scaling)
+or several cheap ones (a catch-up spiral) - and the collected data could not
+tell them apart. The 2026-09-08 session that prompted this had the host at
+4.1 ms of update per frame and the client at 56.2 ms, with the session tick rate
+falling from 21/s to 5/s as the sector grew from 6 to 346 ships.
+
+`sim=<ms>/<steps per frame> mode=<ms>/<iterations per frame>` now appears in the
+diagnostics line and in the peer relay. `Mode.Update` runs unconditionally on
+every iteration, so its count is the true loop count; `Sim.Update` is
+additionally gated on the simulation not being frozen, so its count is the
+number of real steps.
+
+**The peer relay spends its 195 characters differently.** The per-player block
+was 63 of the 167 characters a full session actually sent, and every entry in it
+read `d=0%` throughout - the host measures the same delays from the other side
+and more accurately. It is gone, and `fp=` now carries only the timeout share
+rather than a cumulative wake count. The freed room holds the sim/mode split.
+Measured across the same session, the park handshake added in 2.1.4 is healthy:
+0% timeouts on the peer, 0.2% locally.
+
 ## 2.1.8
 
 **Three defects in 2.1.7's lost-ship deferral.**

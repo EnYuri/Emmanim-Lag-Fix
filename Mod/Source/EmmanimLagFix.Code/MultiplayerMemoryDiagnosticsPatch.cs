@@ -294,12 +294,16 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         // Both lines are built from the same window, so the samples are read
         // twice and cleared once, after.
         var perPlayer = FormatPlayerSamples(compact: false);
-        var perPlayerCompact = FormatPlayerSamples(compact: true);
         Samples.Clear();
 
         var frameTimes = FormatFrameTimes();
         var cpuLoad = FormatCpuLoad(process);
         var phases = FramePhaseDiagnosticsPatch.Snapshot(ReportSeconds);
+        // Must follow the line above: it divides by that snapshot's frame count.
+        var simPhases = SimPhaseDiagnosticsPatch.Snapshot();
+        // Visible nugget-pickup jobs the overlay's last refresh saw. Values far
+        // above the 128 cap mean the cap is carrying real per-frame work here.
+        var pickups = ResourcePickupOverlayPatch.TakePeakScannedJobs();
 
         Halfling.Logging.Logger.Log(
             "[EmmanimLagFix.MultiplayerMemoryDiagnostics] " +
@@ -313,6 +317,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             // input/update/draw milliseconds per frame, then frames per second.
             // update carries the lockstep wait; draw carries present and vsync.
             $"phaseMs={phases} " +
+            $"{simPhases} pickups={pickups} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"players={manager._playerInfos.Count} " +
             $"inputQueued={queuedInputTicks} inputMax={maximumPlayerQueue} outgoingInputs={manager._outgoingInputs.Count} " +
@@ -326,14 +331,20 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         // The host cannot see why a client is late, only that it is, so the
         // client hands over the few fields that answer it. Kept short because
         // the game truncates chat text at 200 characters.
+        //
+        // 2.1.9 spent that budget differently. The per-player block was 63 of
+        // the 167 characters a 2026-09-08 session actually sent and every entry
+        // in it read d=0% for the whole session - the host measures the same
+        // delays from the other side, and more accurately. Dropping it and the
+        // cumulative park count made room for the sim/mode split, which is what
+        // separates one heavy tick from a catch-up spiral.
         PeerDiagnosticsRelayPatch.MaybeSend(
             manager,
             $"t={manager.NetworkInputTick} ft={frameTimes} cpu={cpuLoad} "
             + $"pv={ToMiB(process.PrivateMemorySize64):F0} hp={ToMiB(gcInfo.HeapSizeBytes):F0} "
             + $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} q={queuedInputTicks}/{maximumPlayerQueue} "
-            + $"cq={connectionReceiveQueue} ph={phases} "
-            + $"fp={FastParallelIdleParkPatch.CompactCounters()} "
-            + $"pp=[{perPlayerCompact}]");
+            + $"cq={connectionReceiveQueue} ph={phases} {simPhases} pk={pickups} "
+            + $"fp={FastParallelIdleParkPatch.CompactCounters()}");
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;

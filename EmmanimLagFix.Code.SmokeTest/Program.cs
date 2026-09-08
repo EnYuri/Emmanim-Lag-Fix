@@ -1843,6 +1843,35 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
+// The update phase is split into the simulation step and the game mode so a
+// large update figure can be told apart as one heavy tick or several cheap
+// catch-up ticks. GameRoot.Update runs both inside a do/while, so the call
+// counts are the loop's iteration counts and both targets must resolve.
+{
+    var simPhaseSimRootType = HarmonyLib.AccessTools.TypeByName("Cosmoteer.Simulation.SimRoot")
+        ?? throw new InvalidOperationException(
+            "Cosmoteer.Simulation.SimRoot was not found, so simulation steps cannot be counted.");
+
+    if (HarmonyLib.AccessTools.DeclaredMethod(simPhaseSimRootType, "Update", Type.EmptyTypes) == null)
+    {
+        throw new InvalidOperationException(
+            "Cosmoteer.Simulation.SimRoot.Update() was not found, so sim= would report dashes.");
+    }
+
+    // Resolved through the property's declared type, exactly as the patch does,
+    // so a namespace move is caught here rather than silently disabling mode=.
+    var simPhaseModeType = HarmonyLib.AccessTools.TypeByName("Cosmoteer.Game.GameRoot")
+        ?.GetProperty("Mode", HarmonyLib.AccessTools.all)?.PropertyType
+        ?? throw new InvalidOperationException(
+            "Cosmoteer.Game.GameRoot.Mode was not found, so the game mode cannot be timed.");
+
+    if (HarmonyLib.AccessTools.Method(simPhaseModeType, "Update", Type.EmptyTypes) == null)
+    {
+        throw new InvalidOperationException(
+            $"{simPhaseModeType.FullName}.Update() was not found, so mode= would report dashes.");
+    }
+}
+
 // The lost-ship save is moved off vanilla's background worker onto the
 // Director's main-thread queue, so both halves of that hand-off must resolve.
 {

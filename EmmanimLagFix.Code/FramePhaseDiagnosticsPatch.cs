@@ -44,6 +44,12 @@ internal static class FramePhaseDiagnosticsPatch
     private static long _drawTicks;
     private static long _frames;
 
+    /// <summary>
+    /// Frames counted by the most recent <see cref="Snapshot"/>. The sim-phase
+    /// snapshot divides by this, so it must run after this one in each sample.
+    /// </summary>
+    internal static long LastFrames { get; private set; }
+
     private static bool FlagExists(string name) => File.Exists(Path.GetFullPath(Path.Combine(
         Path.GetDirectoryName(typeof(EntryPoint).Assembly.Location)!,
         "..",
@@ -104,6 +110,7 @@ internal static class FramePhaseDiagnosticsPatch
         var input = Interlocked.Exchange(ref _inputTicks, 0);
         var update = Interlocked.Exchange(ref _updateTicks, 0);
         var draw = Interlocked.Exchange(ref _drawTicks, 0);
+        LastFrames = frames;
 
         if (!Enabled || frames <= 0)
         {

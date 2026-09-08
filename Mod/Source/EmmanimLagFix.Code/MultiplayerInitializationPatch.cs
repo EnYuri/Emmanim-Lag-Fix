@@ -53,10 +53,7 @@ internal static class MultiplayerInitializationPatch
     private sealed class Scope
     {
         public required long StartTimestamp;
-        public required Thread Thread;
-        public required ThreadPriority PreviousPriority;
         public required string Phase;
-        public bool PriorityChanged;
     }
 
     private static IEnumerable<MethodBase> TargetMethods()
@@ -79,7 +76,6 @@ internal static class MultiplayerInitializationPatch
     private static bool Prefix(MethodBase __originalMethod, object __instance, out Scope __state)
     {
         var thread = Thread.CurrentThread;
-        var previousPriority = thread.Priority;
         var phase = __originalMethod.Name.Contains("DoHostLaunchFlow", StringComparison.Ordinal)
             ? "host simulation creation"
             : "client data decode and simulation creation";
@@ -87,26 +83,20 @@ internal static class MultiplayerInitializationPatch
         __state = new Scope
         {
             StartTimestamp = Stopwatch.GetTimestamp(),
-            Thread = thread,
-            PreviousPriority = previousPriority,
             Phase = phase
         };
 
         _activeLaunchWorkerDepth++;
 
-        try
-        {
-            if (previousPriority > ThreadPriority.BelowNormal)
-            {
-                thread.Priority = ThreadPriority.BelowNormal;
-                __state.PriorityChanged = true;
-            }
-        }
-        catch (Exception ex)
-        {
-            Halfling.Logging.Logger.Log($"Emmanim Lag Fix could not lower multiplayer initialization thread priority: {ex.Message}");
-        }
-
+        // Version 2.0.13 lowered this worker to BelowNormal so Steam's networking
+        // thread would keep acking while the simulation was built. Measured on
+        // 2026-09-08 it did the opposite: the host finished its own creation in
+        // 8.74 s while the client spent 51.00 s at BelowNormal on the same game,
+        // against an ack window of 10-30 s. Lowering the priority of a thread
+        // that holds locks the networking path also needs inverts the priority
+        // rather than relieving it, which is what the shipped Steam assert
+        // ("service thread waited 65ms for lock") describes. Run at the priority
+        // the runtime chose and let the work finish.
         Halfling.Logging.Logger.Log($"Emmanim Lag Fix began {phase} (thread priority: {thread.Priority}).");
 
         if (__originalMethod.DeclaringType == ClientWorkerType)
@@ -156,18 +146,6 @@ internal static class MultiplayerInitializationPatch
         var elapsed = Stopwatch.GetElapsedTime(__state.StartTimestamp);
 
         _activeLaunchWorkerDepth = Math.Max(0, _activeLaunchWorkerDepth - 1);
-
-        if (__state.PriorityChanged)
-        {
-            try
-            {
-                __state.Thread.Priority = __state.PreviousPriority;
-            }
-            catch (Exception ex)
-            {
-                Halfling.Logging.Logger.Log($"Emmanim Lag Fix could not restore multiplayer initialization thread priority: {ex.Message}");
-            }
-        }
 
         var outcome = __exception is null ? "completed" : $"failed: {__exception.GetType().Name}";
         Halfling.Logging.Logger.Log(

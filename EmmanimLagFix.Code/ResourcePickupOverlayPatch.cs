@@ -21,14 +21,37 @@ namespace EmmanimLagFix.Code;
 /// Vanilla enumerates all of them and rebuilds every pickup line/icon on every
 /// rendered frame. It also clears the shared line renderer when a second
 /// selected/hover overlay is empty, defeating the renderer's own geometry
-/// cache. Refresh the candidate set once per second, retain an orange icon for
-/// every distinct scheduled nugget, render at most 128 connection lines, and
-/// retain the shared line cache across an empty companion overlay.
+/// cache. Refresh the candidate set once per second, render at most
+/// <see cref="MaxDisplayedPickups"/> connection lines and the same number of
+/// distinct nugget icons, and retain the shared line cache across an empty
+/// companion overlay.
+///
+/// Both lists are capped. Version 2.0.11 capped only the lines and kept one
+/// icon per distinct scheduled nugget, which is unbounded: a large manual
+/// collection produces thousands of entries and the per-frame icon loop walks
+/// all of them. A client's freeze dump taken on 2026-09-08 at 23:21:03 shows
+/// this prefix as the only mod frame on the main thread, and that client's
+/// draw phase ran 19.6 ms against the host's 3.8 ms on the same game. A single
+/// stack sample cannot prove the loop was what spent the time -- a resync was
+/// deserializing 73 MiB on a 12.3 GiB process in the same window -- but an
+/// unbounded per-frame walk is a defect either way.
 /// </summary>
 [HarmonyPatch]
 internal static class ResourcePickupOverlayPatch
 {
     private const int MaxDisplayedPickups = 128;
+
+    /// <summary>
+    /// Largest visible-job count any refresh has seen since the last read. The
+    /// diagnostics line reports it so a capped overlay can be told from a small
+    /// one: a value far above <see cref="MaxDisplayedPickups"/> means the cap is
+    /// doing real work on that machine.
+    /// </summary>
+    private static int _peakScannedJobs;
+
+    /// <summary>Reads and clears the peak visible-job count.</summary>
+    internal static int TakePeakScannedJobs() => Interlocked.Exchange(ref _peakScannedJobs, 0);
+
     private static readonly long CandidateRefreshTicks = Stopwatch.Frequency;
     private static readonly ConditionalWeakTable<object, State> States = new();
     private static readonly Type OverlayType = typeof(SimOverlayRenderer);
@@ -36,9 +59,12 @@ internal static class ResourcePickupOverlayPatch
     private sealed class State
     {
         public readonly List<ResourceTransferJob> LineJobs = new(MaxDisplayedPickups);
-        public readonly List<ResourceTransferJob> IconJobs = new();
+        public readonly List<ResourceTransferJob> IconJobs = new(MaxDisplayedPickups);
         public readonly HashSet<Nugget> UniqueNuggets = new();
         public long NextRefresh;
+
+        /// <summary>Visible transfer jobs seen by the last refresh, capped or not.</summary>
+        public int ScannedJobs;
     }
 
     private static MethodBase TargetMethod() =>
@@ -148,6 +174,7 @@ internal static class ResourcePickupOverlayPatch
         state.LineJobs.Clear();
         state.IconJobs.Clear();
         state.UniqueNuggets.Clear();
+        state.ScannedJobs = 0;
         foreach (var ship in ships)
         {
             foreach (var transferJob in ship.Resources.GetTransferJobs(autoJobs: false))
@@ -162,11 +189,18 @@ internal static class ResourcePickupOverlayPatch
                     state.LineJobs.Add(transferJob);
                 }
 
-                if (state.UniqueNuggets.Add(nugget))
+                if (state.IconJobs.Count < MaxDisplayedPickups && state.UniqueNuggets.Add(nugget))
                 {
                     state.IconJobs.Add(transferJob);
                 }
+
+                state.ScannedJobs++;
             }
+        }
+
+        if (state.ScannedJobs > _peakScannedJobs)
+        {
+            _peakScannedJobs = state.ScannedJobs;
         }
     }
 
