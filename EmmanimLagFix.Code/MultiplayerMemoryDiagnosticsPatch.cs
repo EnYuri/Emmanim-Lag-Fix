@@ -321,7 +321,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             // input/update/draw milliseconds per frame, then frames per second.
             // update carries the lockstep wait; draw carries present and vsync.
             $"phaseMs={phases} " +
-            $"{simPhases} pickups={pickups} tickcap={NetworkTimeCatchUpPatch.TicksPerFrame}/{raised} " +
+            $"{simPhases} cores={FastParallelIdleParkPatch.ProcessorCount} pickups={pickups} tickcap={NetworkTimeCatchUpPatch.TicksPerFrame}/{raised} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"players={manager._playerInfos.Count} " +
             $"inputQueued={queuedInputTicks} inputMax={maximumPlayerQueue} outgoingInputs={manager._outgoingInputs.Count} " +
@@ -347,7 +347,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"t={manager.NetworkInputTick} ft={frameTimes} cpu={cpuLoad} "
             + $"pv={ToMiB(process.PrivateMemorySize64):F0} hp={ToMiB(gcInfo.HeapSizeBytes):F0} "
             + $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} q={queuedInputTicks}/{maximumPlayerQueue} "
-            + $"cq={connectionReceiveQueue} ph={phases} {simPhases} pk={pickups} tc={NetworkTimeCatchUpPatch.TicksPerFrame}/{raised} "
+            + $"cq={connectionReceiveQueue} ph={phases} {simPhases} co={FastParallelIdleParkPatch.ProcessorCount} pk={pickups} tc={NetworkTimeCatchUpPatch.TicksPerFrame}/{raised} "
             + $"fp={FastParallelIdleParkPatch.CompactCounters()}");
     }
 

@@ -120,10 +120,42 @@ internal static class FastParallelIdleParkPatch
     /// </summary>
     internal static readonly int ParkMilliseconds;
 
+    /// <summary>
+    /// Logical processors below which parking is off by default.
+    ///
+    /// The trade this patch makes is not the same on every machine. Its benefit
+    /// is CPU handed back to the rest of the process and a cheaper GC rendezvous;
+    /// its cost is a kernel wake per parked worker per dispatch. On the 12-core
+    /// host it was measured on, 11 spinning workers starve everything else and
+    /// there are cores free to receive a woken one, so the benefit dominates.
+    /// On a 4-core client - 3 workers, counted from that client's own freeze dump
+    /// on 2026-09-08 - the game's main, render and audio threads already want
+    /// those cores, so a woken worker waits for a scheduler slot and the wake
+    /// latency is paid in full. One worker late is a third of the parallel width
+    /// there against a fourteenth here.
+    ///
+    /// That client's own numbers carry the signature: whole-process CPU held at
+    /// 1.4-1.7 cores while its update phase grew from 45 to 162 ms. More work
+    /// raises CPU; lost parallelism raises wall time and leaves CPU flat.
+    ///
+    /// This threshold is a judgement, not a measurement, which is why
+    /// fastparallel-park.txt overrides it in both directions: a positive budget
+    /// forces parking on, and 0 forces it off.
+    /// </summary>
+    private const int ParkMinimumProcessors = 8;
+
+    /// <summary>Logical processors this machine reports, for the diagnostics line.</summary>
+    internal static readonly int ProcessorCount = Environment.ProcessorCount;
+
+    /// <summary>True when the processor-count rule, not an override, disabled parking.</summary>
+    internal static readonly bool DisabledByProcessorCount;
+
     static FastParallelIdleParkPatch()
     {
-        var budget = 60;
+        var narrow = Environment.ProcessorCount < ParkMinimumProcessors;
+        var budget = narrow ? 0 : 60;
         var park = 200;
+        var overridden = false;
 
         // Optional override, one line "<budget> [parkMs]", beside the mod folder.
         // Written for calibration runs; absent in a normal install.
@@ -141,6 +173,7 @@ internal static class FastParallelIdleParkPatch
                     && int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var b))
                 {
                     budget = b;
+                    overridden = true;
                 }
                 if (fields.Length > 1
                     && int.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var p)
@@ -158,6 +191,7 @@ internal static class FastParallelIdleParkPatch
 
         SpinBudget = budget;
         ParkMilliseconds = park;
+        DisabledByProcessorCount = narrow && !overridden;
     }
 
     /// <summary>
@@ -179,6 +213,11 @@ internal static class FastParallelIdleParkPatch
     /// </summary>
     internal static string CompactCounters()
     {
+        if (SpinBudget <= 0)
+        {
+            return DisabledByProcessorCount ? "off" : "off!";
+        }
+
         var parks = Volatile.Read(ref ParkCount);
         var timeouts = Volatile.Read(ref TimeoutCount);
         var share = parks > 0 ? 100d * timeouts / parks : 0d;
@@ -186,7 +225,11 @@ internal static class FastParallelIdleParkPatch
     }
 
     internal static string Counters() =>
-        Volatile.Read(ref ParkCount).ToString(CultureInfo.InvariantCulture)
+        SpinBudget <= 0
+        ? (DisabledByProcessorCount
+            ? $"off(cores={ProcessorCount})"
+            : "off(override)")
+        : Volatile.Read(ref ParkCount).ToString(CultureInfo.InvariantCulture)
         + "/" + Volatile.Read(ref WakeCount).ToString(CultureInfo.InvariantCulture)
         + "/" + Volatile.Read(ref TimeoutCount).ToString(CultureInfo.InvariantCulture);
 

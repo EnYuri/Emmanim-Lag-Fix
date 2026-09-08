@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.1.11
+
+**Idle-worker parking is off by default below 8 logical processors.**
+
+Version 2.1.3 stopped `FastParallel`'s idle workers from spinning forever and
+parked them on an event instead. That was measured on a 12-core machine, where 11
+spinning workers starve everything else in the process and there are free cores to
+receive a woken one. The trade is not the same on a narrow machine: with 3 workers
+on 4 cores the game's own main, render and audio threads already want those cores,
+so a woken worker waits for a scheduler slot and the wake latency is paid in full,
+and one worker late is a third of the parallel width rather than a fourteenth.
+
+The client measured on 2026-09-08 is exactly that machine - 3 `FastParallel`
+workers, counted from its own freeze dump - and its numbers carry the signature of
+lost parallelism rather than added work: whole-process CPU held flat at 1.4-1.7
+cores while its update phase grew from 45 ms to 162 ms. More work raises CPU; lost
+parallelism raises wall time and leaves CPU where it was. That client also reports
+the session having been much faster before 2.1.3 shipped, on the same save.
+
+Parking now defaults off below 8 logical processors. `fastparallel-park.txt`
+overrides the rule in both directions - a positive spin budget forces parking on,
+`0` forces it off - so the A/B needs no rebuild. The diagnostics line reports
+`cores=` and `fppark=off(cores=N)`, or `off(override)` when the file did it.
+
+This is a threshold chosen from the shape of the trade, not from a measurement on
+a 4-core machine, and it is stated as such rather than presented as a fix.
+
 ## 2.1.10
 
 **The lockstep runs at the slowest peer's frame rate, not its CPU.**
