@@ -1,5 +1,7 @@
 ﻿using EmmanimLagFix.Code;
+using Halfling.Scene2D;
 using HarmonyLib;
+using System.Collections;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 
@@ -22,6 +24,7 @@ var prefixTargets = new[]
     (Type: gameAssembly.GetType("Cosmoteer.Modes.Career.Comms.CommTechsTab+<>c__DisplayClass8_3", throwOnError: true)!, Method: "<.ctor>b__2"),
     (Type: gameAssembly.GetType("Cosmoteer.Simulation.SimOverlayRenderer", throwOnError: true)!, Method: "<OnDrawCrewUnderlays>g___DrawResourceNuggetPickups|98_3"),
     (Type: gameAssembly.GetType("Cosmoteer.Ships.Parts.PartsManager+UpdateCallbacks", throwOnError: true)!, Method: "Update"),
+    (Type: gameAssembly.GetType("Cosmoteer.Ships.Parts.PartsManager+FixedUpdateCallbacks", throwOnError: true)!, Method: "FixedUpdate"),
     (Type: gameAssembly.GetType("Cosmoteer.Source.Ships.Blueprints.BaseBlueprintPartNetworkPort", throwOnError: true)!, Method: "UpdateOperational"),
     (Type: gameAssembly.GetType("Cosmoteer.Ships.Blueprints.Logic.Values.BlueprintPartStatProvider", throwOnError: true)!, Method: "UpdateOperational"),
     (Type: gameAssembly.GetType("Cosmoteer.Game.Gui.Build.Stats.BuildToolboxStatsGui", throwOnError: true)!, Method: "Update"),
@@ -291,6 +294,112 @@ foreach (var targetInfo in prefixTargets)
     {
         throw new InvalidOperationException($"Expected Emmanim prefix was not installed on {targetInfo.Type.FullName}.{targetInfo.Method}.");
     }
+}
+
+// PartsManager normally copies each bucket's callback list through TempList on
+// every invocation. The replacement must reuse an unchanged snapshot while
+// retaining vanilla's rule that mutations during a callback take effect only
+// on the following invocation.
+var updateCallbacksType = gameAssembly.GetType(
+    "Cosmoteer.Ships.Parts.PartsManager+UpdateCallbacks",
+    throwOnError: true)!;
+var updateCallbacksInstance = Activator.CreateInstance(
+    updateCallbacksType,
+    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+    binder: null,
+    args: new object[] { 0 },
+    culture: null)!;
+var updateCallbacks = (IList)(updateCallbacksType.GetProperty("Callbacks")
+    ?? throw new MissingMemberException(updateCallbacksType.FullName, "Callbacks"))
+    .GetValue(updateCallbacksInstance)!;
+var updateSnapshotPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.PartUpdateCallbackSnapshotPatch",
+    throwOnError: true)!;
+var getUpdateSnapshot = updateSnapshotPatchType.GetMethod(
+    "GetSnapshot",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(updateSnapshotPatchType.FullName, "GetSnapshot");
+var firstUpdateCount = 0;
+var secondUpdateCount = 0;
+var lateUpdateCount = 0;
+SceneComponent.UpdateCallback? firstUpdate = null;
+SceneComponent.UpdateCallback lateUpdate = _ => lateUpdateCount++;
+firstUpdate = _ =>
+{
+    firstUpdateCount++;
+    updateCallbacks.Remove(firstUpdate);
+    updateCallbacks.Add(lateUpdate);
+};
+SceneComponent.UpdateCallback secondUpdate = _ => secondUpdateCount++;
+updateCallbacks.Add(firstUpdate);
+updateCallbacks.Add(secondUpdate);
+var firstUpdateSnapshot = getUpdateSnapshot.Invoke(null, new[] { updateCallbacksInstance });
+var reusedUpdateSnapshot = getUpdateSnapshot.Invoke(null, new[] { updateCallbacksInstance });
+if (!ReferenceEquals(firstUpdateSnapshot, reusedUpdateSnapshot))
+{
+    throw new InvalidOperationException("An unchanged update-callback list did not reuse its snapshot.");
+}
+var updateCallbacksTarget = AccessTools.Method(updateCallbacksType, "Update")
+    ?? throw new MissingMethodException(updateCallbacksType.FullName, "Update");
+updateCallbacksTarget.Invoke(updateCallbacksInstance, new object?[] { null });
+if (firstUpdateCount != 1 || secondUpdateCount != 1 || lateUpdateCount != 0)
+{
+    throw new InvalidOperationException(
+        "Update-callback mutations affected the active snapshot instead of the next invocation.");
+}
+var rebuiltUpdateSnapshot = getUpdateSnapshot.Invoke(null, new[] { updateCallbacksInstance });
+if (ReferenceEquals(firstUpdateSnapshot, rebuiltUpdateSnapshot))
+{
+    throw new InvalidOperationException("A mutated update-callback list reused its stale snapshot.");
+}
+updateCallbacksTarget.Invoke(updateCallbacksInstance, new object?[] { null });
+if (firstUpdateCount != 1 || secondUpdateCount != 2 || lateUpdateCount != 1)
+{
+    throw new InvalidOperationException("The rebuilt update-callback snapshot has incorrect contents.");
+}
+
+var fixedCallbacksType = gameAssembly.GetType(
+    "Cosmoteer.Ships.Parts.PartsManager+FixedUpdateCallbacks",
+    throwOnError: true)!;
+var fixedCallbacksInstance = Activator.CreateInstance(
+    fixedCallbacksType,
+    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+    binder: null,
+    args: new object[] { 0 },
+    culture: null)!;
+var fixedCallbacks = (IList)(fixedCallbacksType.GetProperty("Callbacks")
+    ?? throw new MissingMemberException(fixedCallbacksType.FullName, "Callbacks"))
+    .GetValue(fixedCallbacksInstance)!;
+var fixedSnapshotPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.PartFixedUpdateCallbackSnapshotPatch",
+    throwOnError: true)!;
+var getFixedSnapshot = fixedSnapshotPatchType.GetMethod(
+    "GetSnapshot",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(fixedSnapshotPatchType.FullName, "GetSnapshot");
+SceneComponent.FixedUpdateCallback fixedCallback = (_, _) => { };
+fixedCallbacks.Add(fixedCallback);
+var firstFixedSnapshot = getFixedSnapshot.Invoke(null, new[] { fixedCallbacksInstance });
+var reusedFixedSnapshot = getFixedSnapshot.Invoke(null, new[] { fixedCallbacksInstance });
+if (!ReferenceEquals(firstFixedSnapshot, reusedFixedSnapshot))
+{
+    throw new InvalidOperationException("An unchanged fixed-update callback list did not reuse its snapshot.");
+}
+fixedCallbacks.Remove(fixedCallback);
+var rebuiltFixedSnapshot = getFixedSnapshot.Invoke(null, new[] { fixedCallbacksInstance });
+if (ReferenceEquals(firstFixedSnapshot, rebuiltFixedSnapshot)
+    || ((Array)rebuiltFixedSnapshot!).Length != 0)
+{
+    throw new InvalidOperationException("A changed fixed-update callback list retained its stale snapshot.");
+}
+var fixedInvocationCount = 0;
+fixedCallbacks.Add((SceneComponent.FixedUpdateCallback)((_, _) => fixedInvocationCount++));
+var fixedCallbacksTarget = AccessTools.Method(fixedCallbacksType, "FixedUpdate")
+    ?? throw new MissingMethodException(fixedCallbacksType.FullName, "FixedUpdate");
+fixedCallbacksTarget.Invoke(fixedCallbacksInstance, new object?[] { null, null });
+if (fixedInvocationCount != 1)
+{
+    throw new InvalidOperationException("The fixed-update callback snapshot was not invoked exactly once.");
 }
 
 var streamCopyInfo = Harmony.GetPatchInfo(streamCopyTarget)
@@ -1727,7 +1836,7 @@ foreach (var allocOverload in AccessTools
 // FastParallel's workers never sleep: RunThread's idle branch is SpinOnce(-1),
 // which was 39.0 s of the 65.9 s of process CPU in a 20-second trace, with 17.8 s
 // of GC rendezvous underneath the spin. The idle branch now parks past a spin
-// budget and is pulsed by AddToLive. Prove the rewrite landed and that the
+// budget and is signaled by AddToLive. Prove the rewrite landed and that the
 // park/wake handshake actually works, since a broken one silently costs
 // parallelism rather than failing.
 {
@@ -1742,6 +1851,16 @@ foreach (var allocOverload in AccessTools
         .GetType("EmmanimLagFix.Code.FastParallelIdleParkPatch", throwOnError: true)!;
     var defaultSpinBudget = AccessTools.DeclaredMethod(parkPatchType, "DefaultSpinBudget")
         ?? throw new MissingMethodException(parkPatchType.FullName, "DefaultSpinBudget");
+    var waiterType = parkPatchType.GetNestedType("Waiter", BindingFlags.NonPublic)
+        ?? throw new TypeLoadException(parkPatchType.FullName + ".Waiter");
+    var waiterEvent = AccessTools.DeclaredField(waiterType, "Event")
+        ?? throw new MissingFieldException(waiterType.FullName, "Event");
+    if (waiterEvent.FieldType != typeof(AutoResetEvent))
+    {
+        throw new InvalidOperationException(
+            "FastParallel waiters must use AutoResetEvent so waking them cannot reintroduce "
+            + "ManualResetEventSlim's managed Set/Reset monitor contention.");
+    }
     foreach (var (workers, expected) in new[] { (1, 20), (3, 20), (7, 20), (8, 60), (11, 60) })
     {
         var actual = (int)defaultSpinBudget.Invoke(null, new object[] { workers })!;
@@ -1859,7 +1978,7 @@ foreach (var allocOverload in AccessTools
     {
         // Wake counts only when it actually observed a sleeper, so passing this loop
         // is the whole handshake: the park is published with a full fence before the
-        // work test, and the pulse fences before reading it.
+        // work test, and the signal path fences before reading it.
         wake.Invoke(null, null);
         Thread.Sleep(1);
     }

@@ -24,10 +24,9 @@
 //  Chain: crew AI saturates the CPU, the game thread starves Steam's networking
 //  thread, acks go out late, the peer sees silence, somebody drops.
 //
-//  This mod attacks that chain in three places:
+//  This mod attacks that chain in two places:
 //    A. Reduce crew assignment, resource-search, and expensive-check rates.
 //    B. Remove exterior-crew visual effects.
-//    C. Widen the lockstep input delay allowance so a brief stall is survivable.
 //
 //  The optional code layer also extends the application-level session timeout
 //  from 10 to 30 seconds. Packet format, resend cadence, ordering, and
@@ -38,7 +37,7 @@
 
 ID = nayuri.emmanim_lag_fix
 Name = "Emmanim Lag Fix"
-Version = 2.1.14
+Version = 2.1.15
 
 ModifiesGameplay = true
 ModifiesMultiplayer = true
@@ -262,55 +261,7 @@ Actions
 	}
 
 	// -------------------------------------------------------------------------
-	// B. Lockstep input delay allowance
-	// -------------------------------------------------------------------------
-	// InputTicksPerSecond is 30, so vanilla MaxInputTickDelay = 60 means two
-	// seconds. Under a big mod pack, two seconds is easy to lose at a battle
-	// start, a fleet FTL jump, or a mass destruction event. Six seconds lets a
-	// client ride out the spike and catch up.
-	//
-	// Kept below ten seconds on purpose: past that the transport layer ack
-	// timeout fires first and the extra allowance buys nothing.
-	//
-	// Cost: while actually lagging, input response can trail by up to six
-	// seconds. Better than losing the session. Eight was tried first and made
-	// play effectively impossible, hence six.
-	//
-	// Note this addresses the lockstep drop path, a different mechanism from the
-	// WaitingForAck timeout described at the top. That one is not moddable;
-	// section A is what reduces it.
-	{
-		Action = Overrides
-		OverrideIn = "<cosmoteer.rules>/Simulation/Network"
-		IgnoreIfNotExisting = false
-		Overrides
-		{
-			MaxInputTickDelay = 180              // vanilla 60 (2 sec -> 6 sec)
-			InputTickDelayLatencyFactor = 1.5    // vanilla 1
-			MinInputTickDelay = 6                // vanilla 2
-
-			// MinInputTickDelay is the floor the host applies when the measured
-			// latency is low. At 52 ms - the best seen on a real session - the
-			// computed delay is only 3 ticks, and the host was measured holding a
-			// median of ZERO input ticks from the client, so it stalled on every
-			// jitter spike.
-			//
-			// Six is the floor, not the value: whenever latency is high enough to
-			// ask for more, the computed delay already exceeds it, so this only
-			// binds on a quiet connection. Cost is command latency, which is
-			// delay divided by the ACTUAL tick rate rather than the nominal 30 -
-			// about 440 ms at the 13.7 ticks/s a real session averaged.
-			//
-			// It buys jitter tolerance and nothing else. If the far peer is simply
-			// simulating slower, the fast peer drains any buffer and waits again.
-			//
-			// InputTicksPerSecond (30) is left alone. Changing it alters
-			// simulation determinism itself.
-		}
-	}
-
-	// -------------------------------------------------------------------------
-	// C. OPTIONAL: absorb Huge Crews, so load order stops mattering
+	// B. OPTIONAL: absorb Huge Crews, so load order stops mattering
 	// -------------------------------------------------------------------------
 	// The game's mod UI has no way to reorder mods. EnabledMods is stored as a
 	// HashSet and the effective load order sorts by mod ID. Keeping this mod's

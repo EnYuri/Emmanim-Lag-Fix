@@ -32,7 +32,13 @@ namespace EmmanimLagFix.Code;
 /// is found. Past it the worker parks on an event that <c>AddToLive</c> sets, so
 /// it wakes on the next dispatch rather than on a timer.
 ///
-/// Every parked worker gets its <b>own</b> event and neither side takes a lock.
+/// Every parked worker gets its <b>own</b> kernel auto-reset event. Version
+/// 2.1.14 used <c>ManualResetEventSlim</c>; despite the per-worker ownership,
+/// <c>Set</c> and <c>Reset</c> still contended on its internal monitor. In a
+/// current 20-second simulation trace, that hidden lock was 66% of all monitor
+/// contention inside <c>ParallelFixedUpdate</c>. A kernel auto-reset event keeps
+/// the same early-signal handshake without that managed lock.
+///
 /// Version 2.1.3 parked all of them on one monitor and pulsed it, which moved the
 /// cost rather than removing it: a 20-second trace showed <c>SpinWait.SpinOnce</c>
 /// gone but <c>Monitor.Wait</c>, <c>Monitor.Enter_Slowpath</c> and
@@ -73,14 +79,14 @@ internal static class FastParallelIdleParkPatch
     internal static long TimeoutCount;
 
     /// <summary>
-    /// One parked worker. The event is level-triggered, so a set that arrives
-    /// before the wait still releases it, and it is created with no spin count so
-    /// the wait goes straight to a kernel block rather than burning the CPU this
-    /// patch exists to save.
+    /// One parked worker. An auto-reset event preserves one set that arrives
+    /// before the wait and consumes it on the wait. It also avoids the managed
+    /// monitor used by ManualResetEventSlim.Set/Reset while going directly to the
+    /// kernel block this patch wants.
     /// </summary>
     private sealed class Waiter
     {
-        public readonly ManualResetEventSlim Event = new(initialState: false, spinCount: 0);
+        public readonly AutoResetEvent Event = new(initialState: false);
 
         /// <summary>Set while this worker is in, or about to enter, its wait.</summary>
         public volatile bool Parked;
@@ -303,9 +309,11 @@ internal static class FastParallelIdleParkPatch
 
         var waiter = t_waiter ??= Register();
 
-        // Reset before announcing the park, so a set that arrives from here on is
-        // the one this park consumes.
-        waiter.Event.Reset();
+        // A timeout racing a late Set can leave one signal behind. Drain it before
+        // announcing this park. A dispatch before the announcement publishes its
+        // task first and the queue probe below observes it; one after it sets the
+        // event and the signal survives until WaitOne consumes it.
+        waiter.Event.WaitOne(0);
         waiter.Parked = true;
 
         // Announce the park before testing for work. Interlocked is a full fence,
@@ -321,7 +329,7 @@ internal static class FastParallelIdleParkPatch
             }
 
             ParkCount++;
-            if (!waiter.Event.Wait(ParkMilliseconds))
+            if (!waiter.Event.WaitOne(ParkMilliseconds))
             {
                 TimeoutCount++;
             }

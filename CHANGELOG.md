@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.1.15
+
+**Stable part callback lists now reuse their invocation snapshots.**
+
+Vanilla copies every ship update-bucket callback list into a temporary array on
+every update and fixed update. In the 20-second large-session trace, the update
+copy alone spent 694 ms in reference-array write barriers, 9.15% of measured
+`SimRoot.Update` managed CPU. The mod now retains one weakly owned array per
+callback container and rebuilds it only when the backing `List` mutation version
+changes. Callbacks still run from the snapshot captured at invocation entry, so
+registering or unregistering during a callback takes effect on the next
+invocation exactly as in vanilla.
+
+**Lockstep input delay returns to the game's defaults.**
+
+The mod no longer overrides `MaxInputTickDelay`,
+`InputTickDelayLatencyFactor`, or `MinInputTickDelay`. The larger buffer could
+absorb short network jitter, but it did not improve simulation throughput and
+directly increased command latency—especially when the actual multiplayer tick
+rate was already low. This release therefore inherits the game's values
+(`60`, `1`, and `2`) instead of deliberately delaying player input.
+
+**Parked FastParallel workers no longer contend on managed event locks.**
+
+Each worker still owns its own wake event, but `ManualResetEventSlim.Set()` and
+`Reset()` internally take a monitor. A current 20-second large-session trace
+put 66% of all `Monitor.Enter_Slowpath` time inside `ParallelFixedUpdate` under
+the mod's `Wake()` method. The waiters now use kernel `AutoResetEvent`s, which
+preserve an early wake signal without a managed reset/set lock. The existing
+queue recheck, publication fence, and timeout backstop remain in place.
+
 ## 2.1.14
 
 **A rebound storage proxy no longer leaves a stale resources figure above it.**

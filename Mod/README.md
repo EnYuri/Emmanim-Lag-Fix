@@ -230,8 +230,6 @@ traced to an Extended Tech Tree beam rather than crew throughput.
 | SalvageJobExpensiveCheckInterval | 1.0 | – | 0.5 |
 | MaxCrewSearchIterations | 50 | – | 100 |
 | EqualPriorityJobDistanceThreshold | 10 | – | 20 |
-| MaxInputTickDelay | 60 (2 s) | – | 180 (6 s) |
-| InputTickDelayLatencyFactor | 1 | – | 1.5 |
 
 The two `*ExpensiveCheckInterval` fields are **rates, not intervals**, whatever the name says. The per-frame check
 budget accumulates as `jobCount * dt * <field>` — multiplied, not divided — so the number is checks
@@ -318,13 +316,22 @@ with nothing to do is a core Steam's networking thread is not getting, which is 
 starvation the disconnect asserts name.
 
 Workers now spin for a bounded budget, long enough to cover the back-to-back dispatches
-inside one frame, then block until the next batch of work wakes them — each on an event of
-its own, with no lock on either side. Work still runs the moment it arrives; only the
-waiting is free now.
+inside one frame, then block until the next batch of work wakes them — each on an auto-reset
+event of its own, avoiding the managed monitor used by the earlier reset/set path. Work still
+runs the moment it arrives; only the idle spin is removed.
 
 `fastparallel-park.txt` beside this file overrides the budget for calibration
 (`<spin budget> [backstop ms]`, default `60 5`); a budget of `0` restores vanilla
 spinning outright. It does not normally need to exist.
+
+### Stable part callback snapshots
+
+Every ship groups its ordinary update and fixed-update callbacks into bucket lists.
+Vanilla copies each list before every invocation so a callback can safely register or
+unregister another callback while that snapshot is running. Stable lists now reuse a
+weakly owned callback array and rebuild it only after the list changes. Mutations during
+an invocation still take effect on the next invocation, and destroying the callback
+container releases its cached array.
 
 ### What is deliberately left alone
 

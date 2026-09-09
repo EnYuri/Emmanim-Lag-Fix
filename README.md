@@ -23,7 +23,6 @@ inert without it - see [Mods QoL support](#mods-qol-support).
 - Reduces crew assignment, resource-search and expensive-check rates.
 - Consolidates loose vanilla resource nuggets into larger stacks.
 - Removes exterior-crew thruster effects.
-- Widens the deterministic lockstep input-delay allowance.
 - Caches the upper-right selected-ship resource aggregation for one second.
 - Limits ship-transfer and station-trade full resource snapshots to 2 Hz.
 - Spreads initial transfer/trade row insertion across frames instead of adding
@@ -65,11 +64,16 @@ inert without it - see [Mods QoL support](#mods-qol-support).
   then block on an event of their own until the next dispatch releases them.
   Machines below eight workers use a shorter 20-iteration budget instead of
   disabling parking and restoring the unbounded spin; wider machines use 60.
-  Neither the park nor the wake takes a lock: 2.1.3 shared one monitor and simply
-  relocated the cost into `Monitor.Wait` and `Enter_Slowpath`, part of it on the
-  main thread. Raising `SpinOnce`'s
+  The current auto-reset wake event avoids the managed monitor taken by the
+  earlier reset/set path: 2.1.3 shared one monitor and simply relocated the cost
+  into `Monitor.Wait` and `Enter_Slowpath`, part of it on the main thread.
+  Raising `SpinOnce`'s
   `sleep1Threshold` instead was rejected after measuring `Thread.Sleep(1)` at
   10.6 ms in a process that never calls `timeBeginPeriod`.
+- Reuses stable per-ship update and fixed-update callback snapshots, rebuilding
+  one only when its callback list changes. Runtime callback registration keeps
+  vanilla's next-invocation semantics, and weak ownership avoids extending a
+  destroyed ship's lifetime.
 
 The code patches UI aggregation/construction, resource bookkeeping, visual
 updates, and local multiplayer timeout/initialization behavior. It does not
