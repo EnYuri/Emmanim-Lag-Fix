@@ -2158,44 +2158,91 @@ if (roofSetupMethod.GetParameters().Length != 1
         "ShipRenderer.SetupRoofRendering no longer takes a single RenderTarget; the roof-decal skip is unverified.");
 }
 
-var isRoofField = AccessTools.Field(shipRenderLayerRulesType, "IsRoof")
-    ?? throw new MissingFieldException(shipRenderLayerRulesType.FullName, "IsRoof");
+var roofDecalsTargetConstant = AccessTools.Field(
+    gameAssembly.GetType("Cosmoteer.ShaderConstantIDs", throwOnError: true)!,
+    "RoofDecalsTarget")
+    ?? throw new MissingFieldException("Cosmoteer.ShaderConstantIDs", "RoofDecalsTarget");
+var halflingCore = Assembly.Load("HalflingCore");
+var shaderConstantIdType = halflingCore.GetType("Halfling.Graphics.ShaderConstantID", throwOnError: true)!;
+var shaderConstantTypeType = halflingCore.GetType("Halfling.Graphics.ShaderConstantType", throwOnError: true)!;
+if (roofDecalsTargetConstant.FieldType != shaderConstantIdType)
+{
+    throw new InvalidOperationException(
+        "Cosmoteer.ShaderConstantIDs.RoofDecalsTarget is no longer a ShaderConstantID; the roof-decal skip is unverified.");
+}
+
+var definesConstant = AccessTools.Method(
+    halflingCore.GetType("Halfling.Graphics.Shader", throwOnError: true)!,
+    "DefinesConstant",
+    new[] { shaderConstantIdType, shaderConstantTypeType })
+    ?? throw new MissingMethodException("Halfling.Graphics.Shader", "DefinesConstant(ShaderConstantID, ShaderConstantType)");
+if (definesConstant.ReturnType != typeof(bool))
+{
+    throw new InvalidOperationException(
+        "Halfling.Graphics.Shader.DefinesConstant no longer returns bool; the roof-decal predicate is unverified.");
+}
+
+var halflingMaterialType = halflingCore.GetType("Halfling.Graphics.Material", throwOnError: true)!;
+if (AccessTools.Property(halflingMaterialType, "Shader") is null)
+{
+    throw new MissingMemberException(halflingMaterialType.FullName, "Shader");
+}
+
+// Every material slot DrawLayer can bind must be readable, or a layer could be
+// classified as inert while it is in fact drawn with a roof-paint shader.
+foreach (var materialSlot in new[]
+         {
+             "Material", "StencilMaterial", "DiffuseMaterial",
+             "NormalsMaterial", "LightMaterial", "GhostMaterial",
+         })
+{
+    var slotField = AccessTools.Field(shipRenderLayerRulesType, materialSlot)
+        ?? throw new MissingFieldException(shipRenderLayerRulesType.FullName, materialSlot);
+    if (slotField.FieldType != halflingMaterialType)
+    {
+        throw new InvalidOperationException(
+            $"ShipRenderLayerRules.{materialSlot} is no longer a Halfling Material; the roof-decal skip is unverified.");
+    }
+}
+
 var roofSkipPatchType = typeof(EntryPoint).Assembly.GetType(
     "EmmanimLagFix.Code.RoofDecalTargetSkipPatch",
     throwOnError: true)!;
-var hasRoofLayer = roofSkipPatchType.GetMethod(
-    "HasRoofLayer",
+var samplesRoofDecals = roofSkipPatchType.GetMethod(
+    "SamplesRoofDecalsTarget",
     BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
-    ?? throw new MissingMethodException(roofSkipPatchType.FullName, "HasRoofLayer");
+    ?? throw new MissingMethodException(roofSkipPatchType.FullName, "SamplesRoofDecalsTarget");
 
-var plainRenderLayer = Activator.CreateInstance(shipRenderLayerRulesType)!;
-var roofRenderLayer = Activator.CreateInstance(shipRenderLayerRulesType)!;
-isRoofField.SetValue(roofRenderLayer, true);
 var addRenderLayer = layerListType.GetMethod("Add")!;
-
-var nonRoofLayers = Activator.CreateInstance(layerListType)!;
-addRenderLayer.Invoke(nonRoofLayers, new[] { plainRenderLayer });
-addRenderLayer.Invoke(nonRoofLayers, new[] { plainRenderLayer });
-if ((bool)hasRoofLayer.Invoke(null, new[] { nonRoofLayers })!)
-{
-    throw new InvalidOperationException(
-        "A stage with no IsRoof layer was reported as needing the roof decals target.");
-}
-
-var mixedRoofLayers = Activator.CreateInstance(layerListType)!;
-addRenderLayer.Invoke(mixedRoofLayers, new[] { plainRenderLayer });
-addRenderLayer.Invoke(mixedRoofLayers, new[] { roofRenderLayer });
-if (!(bool)hasRoofLayer.Invoke(null, new[] { mixedRoofLayers })!)
-{
-    throw new InvalidOperationException(
-        "A stage containing an IsRoof layer was reported as not needing the roof decals target.");
-}
+var layerMaterialField = AccessTools.Field(shipRenderLayerRulesType, "Material")!;
 
 var emptyRoofLayers = Activator.CreateInstance(layerListType)!;
-if ((bool)hasRoofLayer.Invoke(null, new[] { emptyRoofLayers })!)
+if ((bool)samplesRoofDecals.Invoke(null, new[] { emptyRoofLayers })!)
 {
     throw new InvalidOperationException(
         "An empty stage was reported as needing the roof decals target.");
+}
+
+// A layer that binds no material at all cannot sample the target.
+var materiallessLayers = Activator.CreateInstance(layerListType)!;
+addRenderLayer.Invoke(materiallessLayers, new[] { Activator.CreateInstance(shipRenderLayerRulesType)! });
+addRenderLayer.Invoke(materiallessLayers, new[] { Activator.CreateInstance(shipRenderLayerRulesType)! });
+if ((bool)samplesRoofDecals.Invoke(null, new[] { materiallessLayers })!)
+{
+    throw new InvalidOperationException(
+        "A stage whose layers bind no material was reported as needing the roof decals target.");
+}
+
+// A material carrying no shader of its own must be treated conservatively, so
+// the stage keeps the target rather than being assumed inert.
+var shaderlessLayer = Activator.CreateInstance(shipRenderLayerRulesType)!;
+layerMaterialField.SetValue(shaderlessLayer, Activator.CreateInstance(halflingMaterialType)!);
+var shaderlessLayers = Activator.CreateInstance(layerListType)!;
+addRenderLayer.Invoke(shaderlessLayers, new[] { shaderlessLayer });
+if (!(bool)samplesRoofDecals.Invoke(null, new[] { shaderlessLayers })!)
+{
+    throw new InvalidOperationException(
+        "A layer whose material carries no shader was reported as not needing the roof decals target.");
 }
 
 harmony.UnpatchAll(smokeId);
@@ -2359,4 +2406,4 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, roof-decal target skipped for non-roof stages, frame-phase timing, opt-in per-frame input-tick cap, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, opt-in per-frame input-tick cap, and main-thread lost-ship saving patches resolved and compiled on this game build.");

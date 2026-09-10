@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.1.18
+
+**Fixes asteroids rendering incorrectly, a regression introduced by 2.1.17.**
+
+2.1.17 keyed its roof-decal skip on `ShipRenderLayerRules.IsRoof`. That was the
+wrong test. `IsRoof` only gates the `RoofOpacity` fade constant inside
+`ShipRenderer.DrawLayer`. What `SetupRoofRendering` actually publishes is four
+sticky per-ship shader constants - `_roofBaseAlpha`, `_roofBaseTexture`,
+`_roofBaseTextureScale` and `_roofDecalsTarget` - and every shader compiled with
+`ENABLE_ROOF_PAINT_COLOR` or `ENABLE_ROOF_PAINT_COLOR_KEYED` reads them through
+`getRoofPaintColor()` in `base_atlas.shader`, whether or not its layer is a roof.
+
+Two vanilla layers do exactly that, and 2.1.17 broke both:
+
+- the asteroid class's single `asteroid` material layer, which sits in the **Low**
+  stage with `IsRoof` unset and renders through `roof_colored_lit.shader`; and
+- terran `external_walls`, in the **Middle** stage, through
+  `walls_external_lit.shader` / `walls_external.shader`.
+
+Both were left sampling whatever ship's roof texture and decal target happened to
+be bound last. The `roofOpacity <= 0f` early-out 2.1.17 also carried was wrong for
+the same reason: neither layer fades with the roof.
+
+The predicate now asks the shaders themselves.
+`Halfling.Graphics.Shader.DefinesConstant` is reflection over the compiled
+shader, and `getRoofPaintColor` is reachable only under those two defines, so a
+shader that never samples the target does not declare the constant either. The
+answer is cached per stage rule-list, and anything unreadable - a material with
+no shader of its own - counts as a consumer and is not cached, so an unknown
+stage keeps vanilla behaviour.
+
+This is data-driven rather than a list of layer keys, so a modded ship class or a
+custom shader is classified correctly without this patch knowing about it.
+
+What survives of the optimization is the terran **Low** stage - floors, turrets
+and low doodads, all on `parts.shader` - one of the three full-viewport passes a
+terran hull and every terran wreck pays for, rather than the two 2.1.17 claimed.
+
+The smoke test now asserts `Cosmoteer.ShaderConstantIDs.RoofDecalsTarget`,
+`Halfling.Graphics.Shader.DefinesConstant`, `Halfling.Graphics.Material.Shader`
+and all six `ShipRenderLayerRules` material slots resolve with the expected
+shapes, so a rename fails the build instead of silently disabling the predicate.
+
 ## 2.1.17
 
 **A ship no longer clears the full-viewport roof decals target for render

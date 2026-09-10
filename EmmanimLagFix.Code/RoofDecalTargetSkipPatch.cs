@@ -1,5 +1,8 @@
+using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using Cosmoteer;
 using Cosmoteer.Ships;
 using Cosmoteer.Ships.Rendering;
 using Halfling.Graphics;
@@ -13,45 +16,63 @@ namespace EmmanimLagFix.Code;
 /// switches back. It runs once per visible ship per render stage, so its cost
 /// scales with the number of ships in the camera view - a wreck field costs the
 /// same as a live fleet, because a wreck is still a ship with a
-/// <c>ShipRenderer</c>.
+/// <c>ShipRenderer</c>. Measured on a 20-second trace of a 9 fps wreck-field
+/// frame it held 7,821 ms of the 8,544 ms the main thread spent in D3D11 draw
+/// submission, 91.5% of all draw time, against 213 ms in Present - so this was
+/// never vsync or present back-pressure.
 ///
-/// Two of the three passes are unconditional and consume nothing.
-/// <c>ShipRenderer.DrawStage</c> hands the target to the Low and Middle stages
-/// with no test at all, while the High stage already declines it when
-/// <c>RoofOpacity</c> has faded to zero:
+/// <c>ShipRenderer.DrawStage</c> hands the target to the Low, Middle and High
+/// stages, and only the High stage tests anything (it declines the target once
+/// <c>RoofOpacity</c> has faded to zero). This prefix drops the target for a
+/// stage whose layers cannot read it, which skips the whole setup pass.
 ///
-/// <code>
-/// case ShipRenderStage.Low:    DrawStage(Rules.LowRenderLayers,  ..., Sim.Rendering.RoofDecalsTarget, ...);
-/// case ShipRenderStage.Middle: DrawStage(Rules.MiddleRenderLayers, ..., Sim.Rendering.RoofDecalsTarget, ...);
-/// case ShipRenderStage.High:   DrawStage(Rules.HighRenderLayers, ..., (RoofOpacity > 0f) ? Sim.Rendering.RoofDecalsTarget : null, ...);
-/// </code>
+/// <para><b>The consumer is the shader, not <c>IsRoof</c>.</b> 2.1.17 keyed the
+/// predicate on <c>ShipRenderLayerRules.IsRoof</c> and that was wrong.
+/// <c>IsRoof</c> only gates the <c>RoofOpacity</c> fade constant inside
+/// <c>DrawLayer</c>. What <c>SetupRoofRendering</c> actually publishes is four
+/// sticky per-ship shader constants - <c>_roofBaseAlpha</c>,
+/// <c>_roofBaseTexture</c>, <c>_roofBaseTextureScale</c> and
+/// <c>_roofDecalsTarget</c> - and every shader compiled with
+/// <c>ENABLE_ROOF_PAINT_COLOR</c> or <c>ENABLE_ROOF_PAINT_COLOR_KEYED</c> reads
+/// them through <c>getRoofPaintColor()</c> in <c>base_atlas.shader</c>,
+/// <c>IsRoof</c> or not. Two vanilla layers do exactly that:
 ///
-/// Only a layer with <c>IsRoof</c> reads that target - <c>DrawLayer</c> is the
-/// sole consumer, and it is also the only place the <c>RoofOpacity</c> shader
-/// constant takes the fade value. In vanilla <c>terran.rules</c> the three
-/// <c>IsRoof</c> layers (<c>roofs</c>, <c>roof_doodads</c>,
-/// <c>roof_turrets</c>) are all in the High stage; Low carries floors, turrets
-/// and low doodads, Middle carries wall, stencil and door layers. So the Low
-/// and Middle passes clear a 1920x1080 target twice per ship per frame for
-/// layers that never sample it.
+/// <list type="bullet">
+/// <item>the asteroid class's single <c>asteroid</c> material layer, which sits
+/// in the <b>Low</b> stage with <c>IsRoof</c> unset and renders through
+/// <c>roof_colored_lit.shader</c>; and</item>
+/// <item>terran <c>external_walls</c>, in the <b>Middle</b> stage, through
+/// <c>walls_external_lit.shader</c> / <c>walls_external.shader</c>.</item>
+/// </list>
 ///
-/// That the High stage already skips the setup wholesale at zero opacity is the
-/// proof that the sticky shader constants it leaves behind are not required by
-/// the non-roof layers: vanilla renders weapons, high doodads, additive lights,
-/// fire and construction without them on every faded-roof frame.
+/// Skipping those two stages left both sampling whatever ship's roof texture
+/// and decal target happened to be bound last, which is what made asteroids
+/// render wrong. The <c>roofOpacity &lt;= 0f</c> early-out 2.1.17 also carried
+/// was wrong for the same reason: neither of those layers fades with the roof.
 ///
-/// The predicate is read from <c>IsRoof</c> rather than from the stage enum, so
-/// a mod that files a roof layer under a different stage keeps working. Nothing
-/// about the rendered result changes; the skipped work has no consumer.
+/// So the predicate asks the shaders themselves.
+/// <c>Halfling.Graphics.Shader.DefinesConstant</c> is reflection over the
+/// compiled shader, and <c>getRoofPaintColor</c> is reachable only under those
+/// two defines, so a shader that does not sample the target does not declare
+/// the constant either. This is data-driven and needs no list of layer keys, so
+/// a modded ship class or a custom shader is classified correctly without this
+/// patch knowing about it.
 ///
-/// Measured on a 20-second trace of a 9 fps wreck-field frame:
-/// <c>SetupRoofRendering</c> held 7,821 ms of the 8,544 ms the main thread
-/// spent in D3D11 draw submission, 91.5% of all draw time, against 213 ms in
-/// Present - so this was not vsync or present back-pressure.
+/// What survives is the terran <b>Low</b> stage - floors, turrets and low
+/// doodads, all on <c>parts.shader</c> - which is one of the three passes a
+/// terran hull and every terran wreck pays for.
 /// </summary>
 [HarmonyPatch]
 internal static class RoofDecalTargetSkipPatch
 {
+    /// <summary>
+    /// Per-stage-list answers. The lists are the per-ship-class
+    /// <c>Rules.*RenderLayers</c> instances, so there are a handful of them for
+    /// the life of the process, and the answer cannot change: it is a property
+    /// of the shader source, which survives a device reset unchanged.
+    /// </summary>
+    private static readonly ConditionalWeakTable<object, StrongBox<bool>> Answers = new();
+
     private static MethodBase TargetMethod() =>
         AccessTools.DeclaredMethod(
             typeof(ShipRenderer),
@@ -74,35 +95,101 @@ internal static class RoofDecalTargetSkipPatch
 
     private static void Prefix(
         List<ShipRenderLayerRules> layers,
-        ref RenderTarget? roofDecalsTarget,
-        float roofOpacity)
+        ref RenderTarget? roofDecalsTarget)
     {
-        if (roofDecalsTarget is null)
+        if (roofDecalsTarget is null || layers is null)
         {
             return;
         }
 
-        if (roofOpacity <= 0f || !HasRoofLayer(layers))
+        if (!SamplesRoofDecalsTarget(layers))
         {
             roofDecalsTarget = null;
         }
     }
 
     /// <summary>
-    /// True when some layer in this stage actually samples the roof decals
-    /// target. The lists are the static per-stage rule lists, but they are
-    /// short enough that walking one costs less than a keyed cache lookup.
+    /// True when some layer in this stage is drawn with a shader that declares
+    /// the roof decals target, i.e. when <c>SetupRoofRendering</c> has a
+    /// consumer. Conservative on anything it cannot read: an unknown shader
+    /// reports true and is not cached, so the stage keeps vanilla behaviour.
     /// </summary>
-    internal static bool HasRoofLayer(List<ShipRenderLayerRules> layers)
+    internal static bool SamplesRoofDecalsTarget(List<ShipRenderLayerRules> layers)
+    {
+        if (layers is null || layers.Count == 0)
+        {
+            return false;
+        }
+
+        if (Answers.TryGetValue(layers, out var cached))
+        {
+            return cached.Value;
+        }
+
+        var conclusive = true;
+        var samples = Evaluate(layers, ref conclusive);
+
+        if (conclusive)
+        {
+            Answers.AddOrUpdate(layers, new StrongBox<bool>(samples));
+        }
+
+        return samples;
+    }
+
+    private static bool Evaluate(List<ShipRenderLayerRules> layers, ref bool conclusive)
     {
         for (var index = 0; index < layers.Count; index++)
         {
-            if (layers[index].IsRoof)
+            var layer = layers[index];
+            if (layer is null)
+            {
+                continue;
+            }
+
+            if (Samples(layer.Material, ref conclusive)
+                || Samples(layer.StencilMaterial, ref conclusive)
+                || Samples(layer.DiffuseMaterial, ref conclusive)
+                || Samples(layer.NormalsMaterial, ref conclusive)
+                || Samples(layer.LightMaterial, ref conclusive)
+                || Samples(layer.GhostMaterial, ref conclusive))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// A material with no shader of its own inherits whatever the graphics
+    /// manager last bound, which this patch cannot reason about, so it counts
+    /// as a consumer and suppresses caching rather than being assumed inert.
+    /// </summary>
+    private static bool Samples(Material? material, ref bool conclusive)
+    {
+        if (material is null)
+        {
+            return false;
+        }
+
+        var shader = material.Shader;
+        if (shader is null)
+        {
+            conclusive = false;
+            return true;
+        }
+
+        try
+        {
+            return shader.DefinesConstant(
+                ShaderConstantIDs.RoofDecalsTarget,
+                ShaderConstantType.Texture);
+        }
+        catch (Exception)
+        {
+            conclusive = false;
+            return true;
+        }
     }
 }
