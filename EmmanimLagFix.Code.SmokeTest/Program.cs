@@ -2,6 +2,7 @@
 using Halfling.Scene2D;
 using HarmonyLib;
 using System.Collections;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 
@@ -2120,6 +2121,83 @@ foreach (var allocOverload in AccessTools
     }
 }
 
+var shipRendererType = gameAssembly.GetType("Cosmoteer.Ships.Rendering.ShipRenderer", throwOnError: true)!;
+var shipRenderLayerRulesType = gameAssembly.GetType("Cosmoteer.Ships.ShipRenderLayerRules", throwOnError: true)!;
+var renderTargetType = Assembly.Load("HalflingCore").GetType("Halfling.Graphics.RenderTarget", throwOnError: true)!;
+var layerListType = typeof(List<>).MakeGenericType(shipRenderLayerRulesType);
+var roofStageTarget = AccessTools.DeclaredMethod(
+    shipRendererType,
+    "DrawStage",
+    new[]
+    {
+        layerListType,
+        renderTargetType,
+        renderTargetType,
+        renderTargetType,
+        renderTargetType,
+        renderTargetType,
+        typeof(float),
+        typeof(bool),
+        typeof(Halfling.Graphics.Color?),
+    })
+    ?? throw new MissingMethodException(shipRendererType.FullName, "DrawStage(layers, 5 targets, float, bool, Color?)");
+var roofStageInfo = Harmony.GetPatchInfo(roofStageTarget)
+    ?? throw new InvalidOperationException("Harmony did not patch ShipRenderer.DrawStage(layers, ...).");
+if (roofStageInfo.Prefixes.Count(patch => patch.owner == smokeId) != 1)
+{
+    throw new InvalidOperationException(
+        "Expected exactly one Emmanim roof-decal prefix on ShipRenderer.DrawStage(layers, ...).");
+}
+
+var roofSetupMethod = AccessTools.DeclaredMethod(shipRendererType, "SetupRoofRendering")
+    ?? throw new MissingMethodException(shipRendererType.FullName, "SetupRoofRendering");
+if (roofSetupMethod.GetParameters().Length != 1
+    || roofSetupMethod.GetParameters()[0].ParameterType != renderTargetType)
+{
+    throw new InvalidOperationException(
+        "ShipRenderer.SetupRoofRendering no longer takes a single RenderTarget; the roof-decal skip is unverified.");
+}
+
+var isRoofField = AccessTools.Field(shipRenderLayerRulesType, "IsRoof")
+    ?? throw new MissingFieldException(shipRenderLayerRulesType.FullName, "IsRoof");
+var roofSkipPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.RoofDecalTargetSkipPatch",
+    throwOnError: true)!;
+var hasRoofLayer = roofSkipPatchType.GetMethod(
+    "HasRoofLayer",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(roofSkipPatchType.FullName, "HasRoofLayer");
+
+var plainRenderLayer = Activator.CreateInstance(shipRenderLayerRulesType)!;
+var roofRenderLayer = Activator.CreateInstance(shipRenderLayerRulesType)!;
+isRoofField.SetValue(roofRenderLayer, true);
+var addRenderLayer = layerListType.GetMethod("Add")!;
+
+var nonRoofLayers = Activator.CreateInstance(layerListType)!;
+addRenderLayer.Invoke(nonRoofLayers, new[] { plainRenderLayer });
+addRenderLayer.Invoke(nonRoofLayers, new[] { plainRenderLayer });
+if ((bool)hasRoofLayer.Invoke(null, new[] { nonRoofLayers })!)
+{
+    throw new InvalidOperationException(
+        "A stage with no IsRoof layer was reported as needing the roof decals target.");
+}
+
+var mixedRoofLayers = Activator.CreateInstance(layerListType)!;
+addRenderLayer.Invoke(mixedRoofLayers, new[] { plainRenderLayer });
+addRenderLayer.Invoke(mixedRoofLayers, new[] { roofRenderLayer });
+if (!(bool)hasRoofLayer.Invoke(null, new[] { mixedRoofLayers })!)
+{
+    throw new InvalidOperationException(
+        "A stage containing an IsRoof layer was reported as not needing the roof decals target.");
+}
+
+var emptyRoofLayers = Activator.CreateInstance(layerListType)!;
+if ((bool)hasRoofLayer.Invoke(null, new[] { emptyRoofLayers })!)
+{
+    throw new InvalidOperationException(
+        "An empty stage was reported as needing the roof decals target.");
+}
+
 harmony.UnpatchAll(smokeId);
 // The frame-phase probe is opt-in at runtime, but the three Director methods it
 // times must still exist on this build or the split silently reports dashes.
@@ -2281,4 +2359,4 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, frame-phase timing, opt-in per-frame input-tick cap, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, roof-decal target skipped for non-roof stages, frame-phase timing, opt-in per-frame input-tick cap, and main-thread lost-ship saving patches resolved and compiled on this game build.");

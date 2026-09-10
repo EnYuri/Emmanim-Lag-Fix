@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.1.17
+
+**A ship no longer clears the full-viewport roof decals target for render
+stages that contain no roof layer.**
+
+`ShipRenderer.SetupRoofRendering` switches to `SimRenderManager.RoofDecalsTarget`,
+clears it, redraws every roof decal quad and switches back. It runs once per
+visible ship per render stage, so its cost scales with the number of ships in
+the camera view - and a wreck is still a ship with a `ShipRenderer`, so a debris
+field costs the same as a live fleet.
+
+Two of the three passes had no consumer. `ShipRenderer.DrawStage` handed the
+target to the Low and Middle stages unconditionally, while the High stage
+already declined it once `RoofOpacity` faded to zero. Only a layer with
+`IsRoof` reads that target - `DrawLayer` is its sole consumer - and in vanilla
+`terran.rules` all three `IsRoof` layers (`roofs`, `roof_doodads`,
+`roof_turrets`) are in the High stage. Low carries floors, turrets and low
+doodads; Middle carries the wall, stencil and door layers.
+
+A prefix now nulls the target for any stage whose layer list holds no `IsRoof`
+layer, and for a zero roof opacity. The predicate is read from `IsRoof` rather
+than from the stage enum, so a mod that files a roof layer under another stage
+keeps working. Nothing about the rendered result changes: the skipped work had
+no reader, which the High stage's existing zero-opacity skip already
+demonstrates for the sticky shader constants involved.
+
+Measured on a 20-second sampling trace of a 9 fps wreck-field frame,
+`SetupRoofRendering` held 7,821 ms of the 8,544 ms the main thread spent inside
+D3D11 draw submission - 91.5% of all draw time - against 213 ms in Present, so
+this was neither vsync nor present back-pressure.
+
+Also restores a missing `using System.Diagnostics;` in the smoke test, which
+had not compiled since `Stopwatch` was introduced to it.
+
 ## 2.1.16
 
 **The largest late-session resource search no longer clears retained hash-table
