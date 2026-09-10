@@ -121,7 +121,10 @@ internal static class PathContiguitySearchSetsPatch
     /// <summary>
     /// A visited set plus its queue, pooled per thread. Emptying removes the
     /// values that were actually added instead of zeroing the whole bucket
-    /// array, unless the set was filled densely enough that a clear is cheaper.
+    /// array. Do not switch back to <see cref="HashSet{T}.Clear"/> based on a
+    /// guessed density threshold: a 2026-09-10 low-core client trace measured
+    /// 686 ms in that bulk-zero branch over 30 seconds, versus 3.9 ms in the
+    /// proportional removal branch.
     /// </summary>
     private sealed class SearchScratch
     {
@@ -156,18 +159,13 @@ internal static class PathContiguitySearchSetsPatch
         {
             if (_added.Count > 0)
             {
-                // EnsureCapacity(0) reports the current entry capacity without
-                // growing it; the set is non-empty here, so it never allocates.
-                if (_added.Count * 4 >= _visited.EnsureCapacity(0))
+                // Every successful Add is recorded exactly once. Removing those
+                // values leaves the set just as empty as Clear, while work scales
+                // with this traversal instead of the largest traversal ever seen
+                // by the reusable scratch object.
+                for (var i = 0; i < _added.Count; i++)
                 {
-                    _visited.Clear();
-                }
-                else
-                {
-                    for (var i = 0; i < _added.Count; i++)
-                    {
-                        _visited.Remove(_added[i]);
-                    }
+                    _visited.Remove(_added[i]);
                 }
 
                 _added.Clear();

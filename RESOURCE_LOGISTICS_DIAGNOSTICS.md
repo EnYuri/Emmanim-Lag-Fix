@@ -186,6 +186,41 @@ set already has reusable capacity and stops at the same one-quarter threshold
 used by disposal. This removes the known losing case while retaining sparse
 cleanup for an oversized pooled set. A new-session A/B trace is still required
 to measure the net change.
+
+### Low-core multiplayer follow-up (2026-09-10)
+
+The 30-second client trace
+`multiplayer_later_2.1.15_2026-09-10_19-02-21.nettrace` attributed 7,319 ms of
+CPU time to `ResourceManager.SearchForSources`. Within that path,
+`PathContiguitySearchSetsPatch.SearchScratch.Release` spent 686 ms in
+`Buffer.ZeroMemoryInternal` after its 25%-density heuristic selected
+`HashSet.Clear`; proportional `HashSet.Remove` cleanup accounted for only
+3.9 ms in the same trace. The assumed crossover was therefore a measured
+regression in this workload.
+
+The density fallback has been removed in the development candidate. Every
+successfully added set is already recorded, so cleanup now removes precisely
+those entries. Search order, yielded sets, membership, and simulation state are
+unchanged; only the cost of returning scratch state to empty changes from the
+largest retained hash-table capacity to the number visited by that traversal.
+The expected upper-bound saving from the captured workload is 686 ms per 30
+seconds before paying the additional removals; a same-state trace is still
+required for the net result.
+
+The same trace also put 1,093 ms beneath
+`ResourceSourceVisitedSetPatch.TrackedAdd` and another 389 ms beneath the pooled
+set's recycle path. The earlier sparse-removal wrapper still inserted itself
+around all three `HashSet.Add` sites and deliberately fell back to bulk clearing
+for dense searches, so it could not eliminate either cost in this workload.
+
+The next development candidate replaces only this method's membership test with
+a thread-local generation-stamped identity set. `SourceInfo` has object identity
+equality on the current build; startup checks that invariant and skips the patch
+if it changes. The search never enumerates the set, so hash layout is
+unobservable. Each reset clears the SourceInfo references actually written and
+advances a bucket generation, while the real pooled `TempHashSet` remains empty.
+This targets up to 1,482 ms per 30 seconds from the captured path without
+caching a source, route, validity decision, or result across searches.
 # Exact resource-path tail elimination (local experiment, 2026-08-31)
 
 `ResourceManager.SearchForSources(SinkInfo)` asks `PathManager` for cells in

@@ -75,6 +75,9 @@ internal static class FastParallelIdleParkPatch
     /// <summary>Dispatches that found at least one parked worker to release.</summary>
     internal static long WakeCount;
 
+    /// <summary>Kernel event sets after coalescing already-pending signals.</summary>
+    internal static long SignalCount;
+
     /// <summary>Parks that ended on the backstop timeout instead of on a set.</summary>
     internal static long TimeoutCount;
 
@@ -90,6 +93,13 @@ internal static class FastParallelIdleParkPatch
 
         /// <summary>Set while this worker is in, or about to enter, its wait.</summary>
         public volatile bool Parked;
+
+        /// <summary>
+        /// One when a wake has already been deposited in <see cref="Event"/>.
+        /// AutoResetEvent collapses repeated Set calls anyway, so tracking this
+        /// in managed memory avoids paying for redundant kernel transitions.
+        /// </summary>
+        public int SignalPending;
     }
 
     [ThreadStatic]
@@ -314,6 +324,7 @@ internal static class FastParallelIdleParkPatch
         // task first and the queue probe below observes it; one after it sets the
         // event and the signal survives until WaitOne consumes it.
         waiter.Event.WaitOne(0);
+        Volatile.Write(ref waiter.SignalPending, 0);
         waiter.Parked = true;
 
         // Announce the park before testing for work. Interlocked is a full fence,
@@ -362,7 +373,14 @@ internal static class FastParallelIdleParkPatch
         {
             if (waiters[i] is { Parked: true } waiter)
             {
-                waiter.Event.Set();
+                // AddToLive is called in bursts. Until this worker consumes the
+                // first auto-reset signal, every later Set would enter the kernel
+                // only to collapse into the same single pending signal.
+                if (Interlocked.CompareExchange(ref waiter.SignalPending, 1, 0) == 0)
+                {
+                    waiter.Event.Set();
+                    Interlocked.Increment(ref SignalCount);
+                }
             }
         }
     }

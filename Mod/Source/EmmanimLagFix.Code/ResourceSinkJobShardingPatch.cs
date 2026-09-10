@@ -82,13 +82,16 @@ internal static class ResourceSinkJobShardingPatch
 
     /// <summary>
     /// One producer is the calling thread and the rest are FastParallel workers.
-    /// Size for those actual producers rather than logical processors; the old
-    /// minimum of eight made a three-worker client scan twice as many slots as
-    /// it could use after every parallel pass.
+    /// Size for those actual producers rather than logical processors, but keep
+    /// eight as the minimum. Reducing a three-worker client to four slots looked
+    /// cheaper on paper, yet a later trace measured 803 ms of lock contention in
+    /// the supposedly sharded per-sink path. The spare slots tolerate producer
+    /// turnover or an unexpected helper thread; scanning four additional nulls
+    /// is cheaper than allowing two live producers to share a lock.
     /// </summary>
     internal static int ShardCountForWorkers(int workerCount)
     {
-        var producers = Math.Clamp(workerCount, 1, 63) + 1;
+        var producers = Math.Max(8, Math.Clamp(workerCount, 1, 63) + 1);
         var n = 1;
         while (n < producers)
         {

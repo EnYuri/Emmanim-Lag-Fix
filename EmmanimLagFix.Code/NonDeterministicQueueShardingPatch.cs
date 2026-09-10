@@ -192,6 +192,26 @@ internal static class NonDeterministicQueueShardingPatch
         }
     }
 
+    /// <summary>
+    /// Drops every mod-owned reference and pending callback for a simulation
+    /// after vanilla has disposed it. The weak table does not root its key, but
+    /// the hot-path pair deliberately does; without this release an old SimRoot
+    /// can survive a resync until the replacement first posts a callback.
+    /// </summary>
+    internal static void Release(object sim)
+    {
+        var hot = Volatile.Read(ref _hot);
+        if (hot != null && ReferenceEquals(hot.Sim, sim))
+        {
+            Interlocked.CompareExchange(ref _hot, null, hot);
+        }
+
+        // Removing the value also releases callbacks whose closures refer back
+        // into the disposed game. SimRoot.Dispose runs after its workers stop,
+        // so no legitimate producer remains at this point.
+        Shards.Remove(sim);
+    }
+
     private static Type SimRootType =>
         AccessTools.TypeByName("Cosmoteer.Simulation.SimRoot")
         ?? throw new TypeLoadException("Cosmoteer.Simulation.SimRoot was not found.");
@@ -270,5 +290,16 @@ internal static class NonDeterministicQueueShardingPatch
                 Drain(__instance);
             }
         }
+    }
+
+    [HarmonyPatch]
+    private static class Dispose
+    {
+        private static MethodBase TargetMethod() =>
+            AccessTools.DeclaredMethod(SimRootType, nameof(IDisposable.Dispose))
+            ?? throw new MissingMethodException(SimRootType.FullName, nameof(IDisposable.Dispose));
+
+        /// <summary>Let vanilla finish tearing the simulation down first.</summary>
+        private static void Postfix(object __instance) => Release(__instance);
     }
 }

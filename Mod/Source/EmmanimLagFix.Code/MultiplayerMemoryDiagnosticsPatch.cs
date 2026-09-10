@@ -42,6 +42,13 @@ internal static class MultiplayerMemoryDiagnosticsPatch
     private static readonly Dictionary<object, PlayerSample> Samples = new();
 
     /// <summary>
+    /// Weak so diagnostics cannot keep a multiplayer manager (and therefore a
+    /// disposed game) alive. A manager change denotes launch or resync and
+    /// starts a fresh measurement window immediately.
+    /// </summary>
+    private static WeakReference<BaseMPManager>? _sampledManager;
+
+    /// <summary>
     /// Frame times over the reporting window, bucketed by whole milliseconds so
     /// a percentile is exact enough without keeping every sample. The last
     /// bucket collects everything at or above its index.
@@ -73,6 +80,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             return;
         }
 
+        EnsureCurrentManager(__instance);
         SamplePlayers(__instance);
         SampleFrame();
 
@@ -84,6 +92,35 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         }
 
         WriteReport(__instance);
+    }
+
+    private static void EnsureCurrentManager(BaseMPManager manager)
+    {
+        if (_sampledManager != null
+            && _sampledManager.TryGetTarget(out var sampled)
+            && ReferenceEquals(sampled, manager))
+        {
+            return;
+        }
+
+        Samples.Clear();
+        Array.Clear(FrameBuckets);
+        _lastFrameStamp = 0;
+        _frameCount = 0;
+        _frameTotalMs = 0;
+        _lastCpu = default;
+        _lastCpuStamp = 0;
+        Volatile.Write(ref _nextReport, Stopwatch.GetTimestamp() + ReportIntervalTicks);
+        _lastGen0 = GC.CollectionCount(0);
+        _lastGen1 = GC.CollectionCount(1);
+        _lastGen2 = GC.CollectionCount(2);
+
+        // These counters live outside this class but feed the same report.
+        // Discard the old manager's partial phase window before the new game
+        // starts accumulating its own.
+        _ = FramePhaseDiagnosticsPatch.Snapshot(ReportSeconds);
+        _ = SimPhaseDiagnosticsPatch.Snapshot();
+        _sampledManager = new WeakReference<BaseMPManager>(manager);
     }
 
     /// <summary>

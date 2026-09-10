@@ -256,6 +256,62 @@ instead of 60 before parking. It also replaces transfer-row `Sleep(1)` with
 5. Have the host tick "Enable Desync Debugging" in the multiplayer setup so the next
    desync names a `FixedUpdate` bucket instead of the coarse `TickStart (0)`.
 
+## 2.1.15 late-session correction (2026-09-10)
+
+The earlier four-shard recommendation above is superseded by the client's own
+30-second late-session trace,
+`multiplayer_later_2.1.15_2026-09-10_19-02-21.nettrace`. CPU-only attribution
+measured 6,155 ms in `Monitor.Enter_Slowpath`, including 803 ms directly under
+the supposedly sharded `ResourceManager.UpdateSinkJobs(int)` path. Four slots
+leave no tolerance for producer-thread turnover or an unexpected helper, so the
+development candidate restores a minimum of eight. Vanilla sorts the merged
+unique sink indexes before using them, so the extra empty slots cannot change
+simulation order.
+
+The same trace measured 3,565 ms in `FastParallelIdleParkPatch.Wake`. `AddToLive`
+arrives in bursts, and the old loop called `AutoResetEvent.Set` again for every
+dispatch while the first signal was still pending. Auto-reset events retain only
+one signal, so those kernel calls could not wake the worker more than once. The
+development candidate coalesces them with one atomic pending bit per waiter;
+the task publication, sleeper handshake, timeout backstop, and queue probe are
+unchanged.
+
+Together with the path-contiguity cleanup and subsequent generation-stamped
+source visited set recorded in `RESOURCE_LOGISTICS_DIAGNOSTICS.md`, the profiled
+regions now targeted by the development candidate total 6,536 ms per 30
+seconds, or 8.4% of the trace's 77,849 ms process CPU. The new visited set must
+still perform membership checks, and every replacement has overhead, so this is
+a ceiling rather than a predicted saving or frame-rate gain. `WaitUntilFinished`
+is mainly a consequence of worker-side work and cannot itself be removed safely.
+
+## Resync accumulation audit (2026-09-10)
+
+Two client resyncs rebuilt the game while the old graph was still resident, producing
+temporary private/managed-memory spikes. The heap then fell materially after each
+replacement, while simulation time remained high. Vanilla's lifecycle explains this:
+the resync flow creates a new `GameRoot`, pops and disposes the old one, and queues a GC;
+FTL's `SwitchSimulation` also disposes the old `SimRoot` and explicitly calls
+`GC.Collect`. Therefore another forced collection is not a safe or supported cure for
+the sustained slowdown, and the two samples do not establish an exponential leak.
+
+The static-reference audit found two bounded mod-owned retention windows and closes
+both in the development candidate:
+
+- `NonDeterministicQueueShardingPatch._hot` strongly held the last `SimRoot` until the
+  replacement first used the sharded queue. A `SimRoot.Dispose` postfix now removes its
+  shard table and pending closures and clears that hot entry immediately.
+- Multiplayer diagnostics could keep samples for players from both managers during a
+  one-minute window spanning resync. Manager identity is now weakly tracked; a switch
+  immediately clears player, frame, and CPU-window samples.
+
+Neither structure could grow once per resync without bound, so these are lifecycle
+corrections, not evidence that they caused the lasting post-resync simulation cost.
+The lasting component still matches the current simulation's resource search, status,
+worker-wake, and lock-contention load measured in the late-session trace. The combined
+development candidate attacks those measured paths; only an identical-state client
+trace before and after deployment can establish how much of the reported escalation it
+removes.
+
 ## Method notes that cost time to learn
 
 - The Speedscope export from a CPU trace is **evented**, and its time unit is

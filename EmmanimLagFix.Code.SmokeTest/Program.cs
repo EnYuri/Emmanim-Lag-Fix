@@ -1101,6 +1101,14 @@ if (Harmony.GetPatchInfo(executeQueuedTarget)?.Postfixes.Any(patch => patch.owne
         "Expected Emmanim postfix was not installed on SimRoot.ExecuteQueued, so sharded "
         + "callbacks would never run.");
 }
+var simDisposeTarget = AccessTools.DeclaredMethod(simRootType, nameof(IDisposable.Dispose))
+    ?? throw new MissingMethodException(simRootType.FullName, nameof(IDisposable.Dispose));
+if (Harmony.GetPatchInfo(simDisposeTarget)?.Postfixes.Any(patch => patch.owner == smokeId) != true)
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim postfix was not installed on SimRoot.Dispose, so a resync could "
+        + "leave the old simulation in the queue-shard hot cache.");
+}
 
 // Every callback must run exactly once, and each thread's own callbacks must
 // still run in the order that thread posted them - the only ordering vanilla's
@@ -1109,6 +1117,8 @@ var shardedEnqueue = AccessTools.DeclaredMethod(shardingPatchType, "ShardedEnque
     ?? throw new MissingMethodException(shardingPatchType.FullName, "ShardedEnqueue");
 var shardedDrain = AccessTools.DeclaredMethod(shardingPatchType, "Drain")
     ?? throw new MissingMethodException(shardingPatchType.FullName, "Drain");
+var releaseShards = AccessTools.DeclaredMethod(shardingPatchType, "Release")
+    ?? throw new MissingMethodException(shardingPatchType.FullName, "Release");
 var fakeSim = new object();
 var ranPerThread = new System.Collections.Concurrent.ConcurrentDictionary<int, List<int>>();
 // Parallel.For may run several iterations on one thread, so the ordinal has to
@@ -1149,6 +1159,34 @@ shardedDrain.Invoke(null, new object?[] { fakeSim });
 if (ranPerThread.Values.Sum(posted => posted.Count) != ranTotal)
 {
     throw new InvalidOperationException("Sharded queue ran a callback twice.");
+}
+
+// Disposing a simulation must sever the strong hot-cache reference and discard
+// callbacks belonging to that dead scene graph. A subsequent drain proves the
+// removed weak-table value cannot be rediscovered.
+var disposedSim = new object();
+var disposedCallbackRan = false;
+shardedEnqueue.Invoke(null, new object?[]
+{
+    disposedSim,
+    new Action(() => disposedCallbackRan = true),
+});
+releaseShards.Invoke(null, new object?[] { disposedSim });
+shardedDrain.Invoke(null, new object?[] { disposedSim });
+if (disposedCallbackRan)
+{
+    throw new InvalidOperationException(
+        "A callback owned by a disposed simulation survived queue-shard release.");
+}
+var hotAfterRelease = AccessTools.Field(shardingPatchType, "_hot").GetValue(null);
+if (hotAfterRelease != null)
+{
+    var hotSim = AccessTools.Field(hotAfterRelease.GetType(), "Sim").GetValue(hotAfterRelease);
+    if (ReferenceEquals(hotSim, disposedSim))
+    {
+        throw new InvalidOperationException(
+            "The queue-shard hot cache still strongly references the disposed simulation.");
+    }
 }
 
 // The codex evaluates every unshown page's IronPython show-condition against a
@@ -1244,9 +1282,9 @@ if (Harmony.GetPatchInfo(searchSetsTarget)?.Prefixes.Any(patch => patch.owner ==
 }
 
 // Dropping a visited mark would turn the breadth-first walk into an infinite
-// one, so prove both emptying branches leave the set genuinely empty and that
-// a recycled scratch treats previously seen sets as unseen. Reference equality
-// is all the game's sets use, so uninitialized instances are valid keys.
+// one, so prove proportional cleanup leaves both dense and sparse rounds empty
+// and that a recycled scratch treats previously seen sets as unseen. Reference
+// equality is all the game's sets use, so uninitialized instances are valid keys.
 var scratchType = searchSetsPatchType.GetNestedType("SearchScratch", BindingFlags.NonPublic)!;
 var scratchRent = AccessTools.Method(scratchType, "Rent")!;
 var scratchAdd = AccessTools.Method(scratchType, "Add")!;
@@ -1299,9 +1337,9 @@ foreach (var visitCount in new[] { sets.Length, 3 })
     scratchRelease.Invoke(reused, null);
 }
 
-// The resource source search now records what it marked as visited and empties
-// its pooled set in proportion to that record, instead of zeroing the whole
-// bucket array once per sink per fixed update.
+// The resource source search now uses a generation-stamped identity set and
+// leaves the pooled HashSet empty, instead of zeroing its retained bucket array
+// once per sink per fixed update.
 var sourceVisitedPatchType = typeof(EntryPoint).Assembly.GetType(
     "EmmanimLagFix.Code.ResourceSourceVisitedSetPatch",
     throwOnError: true)!;
@@ -1328,11 +1366,10 @@ catch (Exception e)
         $"Rewritten ResourceManager.SearchForSources failed to compile: {e.Message}", e);
 }
 
-// A source left behind would be treated as already considered by the next sink
-// that happened to reuse the pooled set, silently dropping it from that sink's
-// candidates. Prove both emptying branches and the untracked fallback all leave
-// the set genuinely empty. The game's sets use reference equality only, so
-// uninitialized instances are valid keys.
+// A source left behind would be treated as already considered by the next sink,
+// silently dropping it from that sink's candidates. Exercise resize plus a new
+// generation and prove the real pooled set stays empty. The game's SourceInfo
+// type uses reference equality, so uninitialized instances are valid keys.
 var sourceInfoType = resourceManagerType.GetNestedType("SourceInfo", BindingFlags.NonPublic)
     ?? throw new TypeLoadException("ResourceManager.SourceInfo was not found.");
 var allocTracked = AccessTools.Method(sourceVisitedPatchType, "AllocTracked")!;
@@ -1343,8 +1380,8 @@ var sources = Enumerable.Range(0, 1024)
     .Select(_ => RuntimeHelpers.GetUninitializedObject(sourceInfoType))
     .ToArray();
 
-// Dense first so the pooled set's capacity is grown, then sparse, which is the
-// case the patch exists for; the second round reuses the same grown instance.
+// Dense first to force the generation set to resize, then sparse to prove stale
+// bucket heads from the previous generation are invisible.
 foreach (var visitCount in new[] { sources.Length, 3, 0 })
 {
     var trackedSet = allocTracked.Invoke(null, null)!;
@@ -1582,6 +1619,32 @@ foreach (var allocOverload in AccessTools
 // happen. Prove the marker is recognised, logged once, and kept out of chat -
 // and that ordinary chat is untouched.
 {
+    // A resync replaces BaseMPManager. Its diagnostic samples must not mix old
+    // and new players or retain the disposed game until the next minute report.
+    var memoryDiagnosticsType = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.MultiplayerMemoryDiagnosticsPatch", throwOnError: true)!;
+    var ensureCurrentManager = AccessTools.DeclaredMethod(memoryDiagnosticsType, "EnsureCurrentManager")
+        ?? throw new MissingMethodException(memoryDiagnosticsType.FullName, "EnsureCurrentManager");
+    var samples = (IDictionary)AccessTools.Field(memoryDiagnosticsType, "Samples").GetValue(null)!;
+    var frameBuckets = (int[])AccessTools.Field(memoryDiagnosticsType, "FrameBuckets").GetValue(null)!;
+    var managerA = RuntimeHelpers.GetUninitializedObject(mpHostManagerType);
+    var managerB = RuntimeHelpers.GetUninitializedObject(mpHostManagerType);
+    ensureCurrentManager.Invoke(null, new[] { managerA });
+    var playerSampleType = memoryDiagnosticsType.GetNestedType("PlayerSample", BindingFlags.NonPublic)!;
+    samples.Add(new object(), Activator.CreateInstance(playerSampleType)!);
+    frameBuckets[7] = 1;
+    AccessTools.Field(memoryDiagnosticsType, "_frameCount").SetValue(null, 1L);
+    AccessTools.Field(memoryDiagnosticsType, "_nextReport").SetValue(null, 0L);
+    ensureCurrentManager.Invoke(null, new[] { managerB });
+    if (samples.Count != 0
+        || frameBuckets.Any(count => count != 0)
+        || (long)AccessTools.Field(memoryDiagnosticsType, "_frameCount").GetValue(null)! != 0
+        || (long)AccessTools.Field(memoryDiagnosticsType, "_nextReport").GetValue(null)! <= Stopwatch.GetTimestamp())
+    {
+        throw new InvalidOperationException(
+            "Multiplayer diagnostics retained samples across a manager replacement/resync.");
+    }
+
     var relayType = typeof(EntryPoint).Assembly.GetType(
         "EmmanimLagFix.Code.PeerDiagnosticsRelayPatch", throwOnError: true)!;
     var tryHandle = AccessTools.Method(relayType, "TryHandleIncoming")
@@ -1641,7 +1704,7 @@ foreach (var allocOverload in AccessTools
         "EmmanimLagFix.Code.ResourceSinkJobShardingPatch", throwOnError: true)!;
     var shardCountForWorkers = AccessTools.DeclaredMethod(shardingType, "ShardCountForWorkers")
         ?? throw new MissingMethodException(shardingType.FullName, "ShardCountForWorkers");
-    foreach (var (workers, expected) in new[] { (1, 2), (3, 4), (7, 8), (8, 16), (11, 16) })
+    foreach (var (workers, expected) in new[] { (1, 8), (3, 8), (7, 8), (8, 16), (11, 16) })
     {
         var actual = (int)shardCountForWorkers.Invoke(null, new object[] { workers })!;
         if (actual != expected)
@@ -1925,6 +1988,51 @@ foreach (var allocOverload in AccessTools
     var wake = AccessTools.DeclaredMethod(parkPatchType, "Wake")
         ?? throw new MissingMethodException(parkPatchType.FullName, "Wake");
 
+    // AutoResetEvent already retains at most one signal. Repeated dispatches
+    // while a worker has not consumed that signal must therefore be coalesced
+    // before entering the kernel again.
+    var signalCountField = AccessTools.Field(parkPatchType, "SignalCount");
+    var parkedField = AccessTools.Field(waiterType, "Parked");
+    var pendingField = AccessTools.Field(waiterType, "SignalPending");
+    var waitersField = AccessTools.Field(parkPatchType, "s_waiters");
+    var waiterCountField = AccessTools.Field(parkPatchType, "s_waiterCount");
+    var sleepersField = AccessTools.Field(parkPatchType, "s_sleepers");
+    var savedWaiters = waitersField.GetValue(null);
+    var savedWaiterCount = waiterCountField.GetValue(null);
+    var savedSleepers = sleepersField.GetValue(null);
+    var syntheticWaiter = Activator.CreateInstance(waiterType, nonPublic: true)!;
+    var syntheticEvent = (AutoResetEvent)waiterEvent.GetValue(syntheticWaiter)!;
+    try
+    {
+        var waiterArray = Array.CreateInstance(waiterType, 32);
+        waiterArray.SetValue(syntheticWaiter, 0);
+        waitersField.SetValue(null, waiterArray);
+        waiterCountField.SetValue(null, 1);
+        parkedField.SetValue(syntheticWaiter, true);
+        pendingField.SetValue(syntheticWaiter, 0);
+        sleepersField.SetValue(null, 1);
+
+        var signalsBefore = (long)signalCountField.GetValue(null)!;
+        wake.Invoke(null, null);
+        wake.Invoke(null, null);
+        var signalsAfter = (long)signalCountField.GetValue(null)!;
+        if (signalsAfter - signalsBefore != 1
+            || !syntheticEvent.WaitOne(0)
+            || syntheticEvent.WaitOne(0))
+        {
+            throw new InvalidOperationException(
+                "Repeated FastParallel wakes deposited more than one kernel signal for one park.");
+        }
+    }
+    finally
+    {
+        parkedField.SetValue(syntheticWaiter, false);
+        sleepersField.SetValue(null, savedSleepers);
+        waiterCountField.SetValue(null, savedWaiterCount);
+        waitersField.SetValue(null, savedWaiters);
+        syntheticEvent.Dispose();
+    }
+
     // Invoked by reference so the SpinWait's own Count is what drives the budget,
     // exactly as it does on a real worker.
     void Spin(ref SpinWait spin)
@@ -2173,4 +2281,4 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, proportional resource source visited-set emptying, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, frame-phase timing, opt-in per-frame input-tick cap, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, frame-phase timing, opt-in per-frame input-tick cap, and main-thread lost-ship saving patches resolved and compiled on this game build.");

@@ -23,19 +23,16 @@ namespace EmmanimLagFix.Code;
 /// This is the same defect 2.0.29 fixed for the path-contiguity search, in a
 /// method far too large to reimplement safely, so it is repaired in place
 /// instead: a transpiler routes the allocation and the three Add calls through
-/// helpers that record what was added, and a replacement pool deinitializer
-/// empties the set in proportion to that record rather than to its capacity.
-/// Recording is enabled only for a previously allocated set and is abandoned
-/// as soon as the round reaches one quarter of the captured capacity. Fresh or
-/// dense rounds therefore pay the normal bulk clear without duplicating every
-/// successful Add in a list.
+/// a thread-local generation-stamped identity set. Reset advances a generation
+/// and clears only the references written by the completed search; it never
+/// zeroes the retained bucket capacity.
 ///
 /// The set is only ever probed with Add and never enumerated, so nothing
-/// observable can depend on its internal layout, and the emptied set is
-/// indistinguishable from a cleared one. Any round this patch did not see end
-/// to end — a nested allocation, a set recycled by another call site, a shape
-/// that stopped matching — falls back to Halfling's own deinitializer, so the
-/// result is identical to vanilla in every case.
+/// observable can depend on its internal layout. <c>SourceInfo</c> inherits
+/// reference equality from <c>object</c>, which is guarded at startup, so the
+/// replacement accepts exactly the same first occurrence as vanilla. Any
+/// nested or unrecognized round falls back to the real temporary HashSet and
+/// Halfling's own deinitializer.
 /// </summary>
 [HarmonyPatch]
 internal static class ResourceSourceVisitedSetPatch
@@ -60,14 +57,11 @@ internal static class ResourceSourceVisitedSetPatch
     private static TempHashSet<SourceInfo>? _trackedSet;
 
     /// <summary>
-    /// The sources added during that round, in insertion order.
+    /// Generation-stamped visited state for the current thread. Resource source
+    /// searches are synchronous; a nested search falls back to vanilla.
     /// </summary>
     [ThreadStatic]
-    private static List<SourceInfo>? _trackedAdds;
-
-    /// <summary>Capacity captured before the tracked round adds anything.</summary>
-    [ThreadStatic]
-    private static int _trackedCapacity;
+    private static IdentityGenerationSet? _visited;
 
     private static readonly MethodInfo AllocTarget = AccessTools.Method(
         typeof(TempHashSet<SourceInfo>),
@@ -88,6 +82,17 @@ internal static class ResourceSourceVisitedSetPatch
 
     private static bool Prepare()
     {
+        // The replacement deliberately uses reference identity. Fail closed if
+        // a future game version gives SourceInfo value equality.
+        if (typeof(SourceInfo).GetMethod(nameof(object.GetHashCode), Type.EmptyTypes)?.DeclaringType != typeof(object)
+            || typeof(SourceInfo).GetMethod(nameof(object.Equals), new[] { typeof(object) })?.DeclaringType != typeof(object))
+        {
+            Halfling.Logging.Logger.Log(
+                "[EmmanimLagFix] ResourceManager.SourceInfo now overrides equality; "
+                + "leaving its visited set at vanilla behavior.");
+            return false;
+        }
+
         // TempHashSet installs the deinitializer from its static constructor,
         // which has not necessarily run yet. Force it, or the assignment below
         // is overwritten the first time the type is touched.
@@ -178,17 +183,13 @@ internal static class ResourceSourceVisitedSetPatch
     private static TempHashSet<SourceInfo> AllocTracked()
     {
         var set = TempHashSet<SourceInfo>.Alloc();
-        var capacity = set.EnsureCapacity(0);
 
-        // A nested round would clobber the outer one's record. Leave the inner
-        // set untracked; its disposal then falls back to vanilla. A fresh set
-        // also cannot benefit: it will grow around this round's count, so its
-        // eventual capacity will not be four times larger than the entries.
-        if (_trackedSet is null && capacity > 0)
+        // A nested round would clobber the outer generation. Leave it untracked;
+        // its Add calls and disposal then use the real temporary HashSet.
+        if (_trackedSet is null)
         {
             _trackedSet = set;
-            _trackedCapacity = capacity;
-            (_trackedAdds ??= new List<SourceInfo>()).Clear();
+            (_visited ??= new IdentityGenerationSet()).Begin();
         }
 
         return set;
@@ -196,31 +197,12 @@ internal static class ResourceSourceVisitedSetPatch
 
     private static bool TrackedAdd(HashSet<SourceInfo> set, SourceInfo source)
     {
-        if (!set.Add(source))
-        {
-            return false;
-        }
-
         if (ReferenceEquals(_trackedSet, set))
         {
-            var added = _trackedAdds!;
-            // Individual removal only wins for a genuinely sparse reuse. Once
-            // this round reaches the same one-quarter threshold used by the
-            // deinitializer, stop paying for a duplicate List.Add on every
-            // source and let vanilla clear the set in bulk.
-            if ((long)(added.Count + 1) * 4 >= _trackedCapacity)
-            {
-                _trackedSet = null;
-                _trackedCapacity = 0;
-                added.Clear();
-            }
-            else
-            {
-                added.Add(source);
-            }
+            return _visited!.Add(source);
         }
 
-        return true;
+        return set.Add(source);
     }
 
     private static void Deinitialize(TempHashSet<SourceInfo> set)
@@ -232,24 +214,115 @@ internal static class ResourceSourceVisitedSetPatch
         }
 
         _trackedSet = null;
-        _trackedCapacity = 0;
-        var added = _trackedAdds!;
+        _visited!.End();
 
-        // Every recorded Add returned true and nothing removes during a round,
-        // so this equality holds exactly whenever the whole round was observed.
-        // EnsureCapacity(0) reports the current capacity without growing it.
-        if (added.Count == set.Count && added.Count * 4 < set.EnsureCapacity(0))
+        // The tracked temporary HashSet remained empty. Keep invoking the
+        // original deinitializer so pool lifecycle is exactly vanilla; Clear is
+        // constant-time when Count is zero even if this pooled object once grew.
+        _vanillaDeinitializer!(set);
+    }
+
+    /// <summary>
+    /// A reference-identity set whose buckets are invalidated by generation
+    /// instead of being cleared. It is never enumerated, so bucket and chain
+    /// order are unobservable.
+    /// </summary>
+    private sealed class IdentityGenerationSet
+    {
+        private struct Entry
         {
-            for (var i = 0; i < added.Count; i++)
-            {
-                set.Remove(added[i]);
-            }
-
-            added.Clear();
-            return;
+            public int Hash;
+            public int Next;
+            public SourceInfo? Value;
         }
 
-        added.Clear();
-        _vanillaDeinitializer!(set);
+        private int[] _buckets = new int[16];
+        private uint[] _bucketGenerations = new uint[16];
+        private Entry[] _entries = new Entry[16];
+        private int _count;
+        private uint _generation = 1;
+
+        public void Begin()
+        {
+            if (_count != 0)
+            {
+                throw new InvalidOperationException("A resource visited-set generation was not released.");
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool Add(SourceInfo value)
+        {
+            var hash = RuntimeHelpers.GetHashCode(value) & int.MaxValue;
+            var bucket = hash & (_buckets.Length - 1);
+            var entry = _bucketGenerations[bucket] == _generation
+                ? _buckets[bucket] - 1
+                : -1;
+
+            while (entry >= 0)
+            {
+                ref var existing = ref _entries[entry];
+                if (existing.Hash == hash && ReferenceEquals(existing.Value, value))
+                {
+                    return false;
+                }
+                entry = existing.Next;
+            }
+
+            if (_count == _entries.Length)
+            {
+                Resize();
+                bucket = hash & (_buckets.Length - 1);
+            }
+
+            var head = _bucketGenerations[bucket] == _generation
+                ? _buckets[bucket] - 1
+                : -1;
+            _entries[_count] = new Entry { Hash = hash, Next = head, Value = value };
+            _buckets[bucket] = _count + 1;
+            _bucketGenerations[bucket] = _generation;
+            _count++;
+            return true;
+        }
+
+        public void End()
+        {
+            // Release SourceInfo references without clearing either capacity
+            // array. Stale bucket heads become invisible in the next generation.
+            for (var i = 0; i < _count; i++)
+            {
+                _entries[i].Value = null;
+            }
+            _count = 0;
+
+            _generation++;
+            if (_generation == 0)
+            {
+                Array.Clear(_bucketGenerations);
+                _generation = 1;
+            }
+        }
+
+        private void Resize()
+        {
+            var newLength = checked(_entries.Length * 2);
+            var buckets = new int[newLength];
+            var bucketGenerations = new uint[newLength];
+            Array.Resize(ref _entries, newLength);
+
+            for (var i = 0; i < _count; i++)
+            {
+                ref var item = ref _entries[i];
+                var bucket = item.Hash & (newLength - 1);
+                item.Next = bucketGenerations[bucket] == _generation
+                    ? buckets[bucket] - 1
+                    : -1;
+                buckets[bucket] = i + 1;
+                bucketGenerations[bucket] = _generation;
+            }
+
+            _buckets = buckets;
+            _bucketGenerations = bucketGenerations;
+        }
     }
 }

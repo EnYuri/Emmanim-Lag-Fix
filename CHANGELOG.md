@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.1.16
+
+**The largest late-session resource search no longer clears retained hash-table
+capacity for every sink.**
+
+`ResourceManager.SearchForSources` now performs its visited checks in a
+thread-local, generation-stamped identity set. Reset releases the `SourceInfo`
+references actually visited and advances the generation instead of zeroing the
+largest bucket array that thread has ever needed. A startup guard leaves the
+method vanilla if a future game build gives `SourceInfo` value equality, and a
+nested search uses the real temporary `HashSet`, preserving correctness.
+
+Path-contiguity searches likewise remove the sets actually visited instead of
+switching to the bulk-clear branch that dominated their cleanup in the client
+trace. Resource sink-job collection retains at least eight shards: four shards
+allowed live producers to collide on the narrow client, while vanilla's final
+sort keeps the expanded merge deterministic.
+
+**Redundant worker wakeups are coalesced.**
+
+Bursts of `FastParallel.AddToLive` previously called `AutoResetEvent.Set` once
+per dispatch even though an auto-reset event retains only one pending signal.
+One atomic pending bit per worker now suppresses kernel calls that cannot wake
+anything further. Task publication, sleeper registration, the queue recheck and
+the timeout fallback are unchanged.
+
+**Disposed simulations are released immediately across multiplayer resyncs.**
+
+The non-deterministic queue's hot cache strongly held the last `SimRoot` until
+the replacement simulation first posted a callback. A `SimRoot.Dispose`
+postfix now removes that cache entry, its shard table and callbacks belonging to
+the disposed scene graph. Multiplayer diagnostics also weakly track manager
+identity and begin a clean player, frame, phase, CPU and GC reporting window as
+soon as a resync replaces it.
+
 ## 2.1.15
 
 **Stable part callback lists now reuse their invocation snapshots.**
