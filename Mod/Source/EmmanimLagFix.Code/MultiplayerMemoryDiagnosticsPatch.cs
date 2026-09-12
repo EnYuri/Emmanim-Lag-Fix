@@ -341,10 +341,15 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         // Visible nugget-pickup jobs the overlay's last refresh saw. Values far
         // above the 128 cap mean the cap is carrying real per-frame work here.
         var pickups = ResourcePickupOverlayPatch.TakePeakScannedJobs();
-        // Frames whose one-tick-per-frame credit the ticks-per-frame override
-        // actually raised. Zero means the vanilla cap was never binding here, so
-        // raising it cannot be what changes this machine's world speed.
+        // Frames whose game-time credit the catch-up patch actually raised, out
+        // of the frames in this sample. Zero means vanilla was already crediting
+        // the full elapsed frame time here, so this machine's world speed is not
+        // what the patch can change.
         var raised = NetworkTimeCatchUpPatch.TakeRaisedFrames();
+        // Splits the sim phase into the deterministic world tick (fixed=) and
+        // the per-frame visual pass, then names the buckets that spent it. Must
+        // follow the frame-phase snapshot: it divides by that frame count.
+        var breakdown = SceneUpdateBreakdown.Take();
 
         Halfling.Logging.Logger.Log(
             "[EmmanimLagFix.MultiplayerMemoryDiagnostics] " +
@@ -359,7 +364,8 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             // update carries the lockstep wait; draw carries present and vsync.
             $"phaseMs={phases} " +
             $"{simPhases} cores={FastParallelIdleParkPatch.ProcessorCount}/{FastParallelIdleParkPatch.WorkerCount} " +
-            $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} pickups={pickups} tickcap={NetworkTimeCatchUpPatch.TicksPerFrame}/{raised} " +
+            $"{breakdown.Full} " +
+            $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} pickups={pickups} tickcap={NetworkTimeCatchUpPatch.MaxTicksPerFrame}/{raised} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"players={manager._playerInfos.Count} " +
             $"inputQueued={queuedInputTicks} inputMax={maximumPlayerQueue} outgoingInputs={manager._outgoingInputs.Count} " +
@@ -380,12 +386,19 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         // delays from the other side, and more accurately. Dropping it and the
         // cumulative park count made room for the sim/mode split, which is what
         // separates one heavy tick from a catch-up spiral.
+        //
+        // 2.2.1 drops co= for the same reason: core and worker counts are fixed
+        // for a machine and are already in the host's own line and in the peer's
+        // first sample, so repeating them every minute bought nothing. The room
+        // went to the fixed-update and bucket split, which is what names the
+        // subsystem behind a large sim= figure. A 2026-09-11 client sent 151 of
+        // the ~195 usable characters, so the replacement fits with margin.
         PeerDiagnosticsRelayPatch.MaybeSend(
             manager,
             $"t={manager.NetworkInputTick} ft={frameTimes} cpu={cpuLoad} "
             + $"pv={ToMiB(process.PrivateMemorySize64):F0} hp={ToMiB(gcInfo.HeapSizeBytes):F0} "
             + $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} q={queuedInputTicks}/{maximumPlayerQueue} "
-            + $"cq={connectionReceiveQueue} ph={phases} {simPhases} co={FastParallelIdleParkPatch.ProcessorCount}/{FastParallelIdleParkPatch.WorkerCount} pk={pickups} tc={NetworkTimeCatchUpPatch.TicksPerFrame}/{raised} "
+            + $"cq={connectionReceiveQueue} ph={phases} {simPhases} {breakdown.Compact} pk={pickups} tc={NetworkTimeCatchUpPatch.MaxTicksPerFrame}/{raised} "
             + $"fp={FastParallelIdleParkPatch.CompactCounters()}");
     }
 

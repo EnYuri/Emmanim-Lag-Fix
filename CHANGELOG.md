@@ -1,5 +1,111 @@
 # Changelog
 
+## 2.2.1
+
+**Diagnostics: the simulation phase is now split and attributed per subsystem.**
+
+`sim=` measures all of `SimRoot.Update`, which is two unrelated populations at
+once — `DoFixedUpdates()` (the deterministic world ticks, which run zero or more
+times per frame) and one `UpdateForBucket` pass per bucket (per-frame
+interpolation and visuals). Reading it as the cost of a world tick is wrong, and
+doing so produced a conclusion that had to be withdrawn from 2.2.0's notes.
+
+The log line now carries `fixed=<ms per frame>/<calls per frame>` for the world
+tick alone, plus `fb=[…]` and `ub=[…]` naming the five costliest scene buckets on
+each side. Bucket names come from `FixedUpdateBuckets`/`UpdateBuckets`, mapped
+once by reflection rather than through vanilla's per-call field walk. The peer
+relay carries a one-bucket form; `co=` was dropped to pay for it, since core and
+worker counts never change within a session.
+
+This is what a 2026-09-11 session lacked: the remote client reported
+`ph=3.0/245.2/29.9@4` with `sim=243.7/2.00` and `mode=0.0/2.00` — 243.7 ms of a
+281 ms frame inside the simulation and only 29.9 ms drawing, while using 1.6 of 8
+logical cores. A single-threaded critical path, with no record of which
+subsystem owned it.
+
+Timing only; no simulation behaviour changes, and the patches are gated on the
+existing `multiplayer-memory-diagnostics.flag` / `singleplayer-memory-diagnostics.flag`,
+so ordinary players load nothing.
+
+## 2.2.0
+
+**Multiplayer world speed is no longer capped by the slowest peer's frame rate.**
+
+`NetManager.GetTargetAdjustedDeltaTime` decides how much game time a frame is
+allowed to credit, and it ends in
+
+```csharp
+float num    = 1f / Settings.TargetFps;
+float value2 = (App.Clock.DeltaTime > num) ? (num.Squared() / App.Clock.DeltaTime)
+                                           : (float)App.Clock.DeltaTime;
+return Mathx.Min(value2, 1f / Sim.Rules.PhysicsUpdatesPerSecond);
+```
+
+That holds a slow peer back twice over. The `Min` caps the credit at exactly one
+input tick, so the lockstep runs at no more than the slowest peer's **frame
+rate** whatever its CPU could actually simulate; and the first term is a
+**quadratic** penalty, so a peer that misses its target frame rate is slowed by
+the square of how far it missed by. Singleplayer has neither — `SPManager`'s
+`AdvanceNetworkTime` is a stub and `GameRoot.Update` runs the simulation straight
+off the real clock. This is the whole reason a save that is smooth alone crawls
+in multiplayer.
+
+Measured over a 2h52m two-player session on 2026-09-11, a 12-core host against
+an 8-logical / 3-worker client:
+
+- the world ran 139,484 ticks in 172.1 minutes = **13.4 of the nominal 30 input
+  ticks per second**, 45% speed, and the last 12 minutes ran at 11%;
+- **neither peer was CPU-saturated.** The host used 1.3–1.8 of its 16 logical
+  processors and the client 1.5–2.2 of its 8, flat from start to finish;
+- **neither peer's simulation throughput degraded.** Simulation wall time per
+  real second was essentially flat — host 287 → 363 ms/s, client ≈ 395 → 487 —
+  while the world tick rate fell 14.3 → 3.1 and the part count moved 2.6%
+  (75,298 → 77,240). Work is not what collapsed. **Pacing is**;
+- the host also spent as much on drawing as on simulating (282 → 370 ms/s), and
+  the same PC ran the same save in singleplayer at 45 ticks/s;
+- the client's frame was input 2.3 ms | simulation 72.7 ms | draw 16.2 ms, so
+  **drawing is 18% of it**. Trading frames for ticks is nearly free there.
+
+> A note on reading `sim=`: it is milliseconds of `SimRoot.Update` **per frame**,
+> and most of that method's cost is per-frame work rather than per-tick, so it
+> tracks frame rate and must not be read as the cost of a world tick. An earlier
+> estimate of "46 ticks/s of unused client capacity" came from doing exactly that
+> and is withdrawn. The claim this release rests on is the simpler one above.
+
+The credit is now `Min(realElapsed, oneTick * 3)`, which is:
+
+- **never faster than real time** — vanilla's expression is always at most the
+  elapsed frame time and so is this one, so the world can never fast-forward;
+- **never slower than vanilla** — the result is written only when it exceeds what
+  vanilla returned, so a host above 30 fps is untouched and only a peer the cap
+  was binding sees any change;
+- **bounded** at three input ticks in one frame, so a hitch cannot be repaid as a
+  visible speed-up spike, and a gap longer than a second is treated as a load
+  stall and skipped entirely;
+- **self-limiting** — running N ticks per frame makes the frame N times as
+  expensive, so elapsed time grows until the peer settles at whatever rate it can
+  actually sustain. No controller and no tuning.
+
+Real elapsed time is measured with a `Stopwatch` between consecutive calls rather
+than read from `App.Clock.DeltaTime`, because that clock is itself clamped — which
+is why vanilla's `value2` pins to the cap on a slow peer instead of falling away
+quadratically as the formula suggests.
+
+Deterministic and lockstep-safe. `Sim.OnInputTick` takes a fixed
+`InputTickInterval`, so N ticks in one frame compute exactly what N ticks in N
+frames compute; only local pacing changes, exactly as peers may already run
+different "Minimum Target F.P.S." settings, which feed the same expression.
+`IsReadyForTick` still gates every tick, so a peer can never run ahead of the
+inputs it was sent, and when it is not ready `BaseMPManager.AdvanceNetworkTime`
+zeroes the accumulator, discarding surplus credit rather than banking it.
+
+This supersedes 2.1.10's opt-in `ticks-per-frame.txt`, which shipped off by
+default, needed a file nobody created, and would have credited `oneTick * N`
+unconditionally — i.e. faster than real time. The file is still read: **`1`
+restores vanilla pacing exactly**, and `2`–`8` set a different ceiling. The
+diagnostics field `tickcap=` / `tc=` now reports that ceiling and the number of
+frames whose credit was actually raised.
+
 ## 2.1.18
 
 **Fixes asteroids rendering incorrectly, a regression introduced by 2.1.17.**

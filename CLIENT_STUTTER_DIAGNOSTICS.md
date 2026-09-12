@@ -221,6 +221,10 @@ serialization spike.
 - **2.1.10** — `ticks-per-frame.txt`, opt-in, off by default. Retracted as a
   recommendation: at 10 fps, halving the frame rate to double ticks per frame buys
   11 to 13 ticks/s. Left in the build because it costs nothing when unset.
+  **Superseded by 2.2.0**, which credits `Min(realElapsed, oneTick * 3)` and is on
+  by default. The 2.1.10 retraction underestimated the gain because it priced only
+  the `Min` cap and not the quadratic `num²/Δt` term ahead of it, and because it
+  had not yet measured that drawing is only 18% of the client's frame.
 - **2.1.11** — parking gate on logical processors. Never fired on the client (`co=8`).
 - **2.1.12** — same gate on worker count. Fires. See the caveat above.
 

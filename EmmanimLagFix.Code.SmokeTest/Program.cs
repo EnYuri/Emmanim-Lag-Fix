@@ -2293,6 +2293,57 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
+// The sim phase is in turn split into the deterministic world tick and the
+// per-frame visual pass, then attributed per scene bucket. This is what makes
+// sim= readable: a 2026-09-11 client spent 243.7 of a 281 ms frame inside
+// SimRoot.Update and the subsystem behind it was not recorded.
+{
+    var breakdownSceneRoot = HarmonyLib.AccessTools.TypeByName("Halfling.Scene2D.SceneRoot")
+        ?? throw new InvalidOperationException(
+            "Halfling.Scene2D.SceneRoot was not found, so fixed-update timing cannot be installed.");
+
+    if (HarmonyLib.AccessTools.DeclaredMethod(breakdownSceneRoot, "DoFixedUpdates", Type.EmptyTypes) == null)
+    {
+        throw new InvalidOperationException(
+            "SceneRoot.DoFixedUpdates() was not found, so fixed= would report dashes.");
+    }
+
+    var breakdownSimRoot = HarmonyLib.AccessTools.TypeByName("Cosmoteer.Simulation.SimRoot")
+        ?? throw new InvalidOperationException(
+            "Cosmoteer.Simulation.SimRoot was not found, so bucket timing cannot be installed.");
+
+    // Declared, not inherited: SimRoot overrides both, and patching the base
+    // would miss the virtual dispatch entirely while still resolving.
+    foreach (var bucketMethod in new[] { "FixedUpdateForBucket", "UpdateForBucket" })
+    {
+        if (HarmonyLib.AccessTools.DeclaredMethod(breakdownSimRoot, bucketMethod, new[] { typeof(int) }) == null)
+        {
+            throw new InvalidOperationException(
+                $"SimRoot.{bucketMethod}(int) was not declared, so bucket attribution would be lost "
+                + "or would silently measure another scene.");
+        }
+    }
+
+    // The bucket numbers are meaningless without names, and vanilla's own
+    // GetBucketName walks every field per call, so the patch builds its own map.
+    foreach (var bucketConstants in new[] { "Cosmoteer.FixedUpdateBuckets", "Cosmoteer.UpdateBuckets" })
+    {
+        var constantsType = HarmonyLib.AccessTools.TypeByName(bucketConstants)
+            ?? throw new InvalidOperationException(
+                $"{bucketConstants} was not found, so buckets would be reported as bare numbers.");
+
+        var named = constantsType
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Count(f => f.IsLiteral && !f.IsInitOnly && f.FieldType == typeof(int));
+
+        if (named == 0)
+        {
+            throw new InvalidOperationException(
+                $"{bucketConstants} exposed no public const int buckets, so the name map would be empty.");
+        }
+    }
+}
+
 // The per-frame input-tick cap lives in one expression inside
 // NetManager.GetTargetAdjustedDeltaTime. Resolve the method and the two members
 // the postfix reads, so a rename is caught here rather than silently leaving the
@@ -2324,6 +2375,51 @@ harmony.UnpatchAll(smokeId);
         throw new InvalidOperationException(
             "Sim.Rules.PhysicsUpdatesPerSecond was not found, so the vanilla one-tick-per-frame "
             + "cap cannot be recomputed.");
+    }
+
+    // The postfix narrows to multiplayer with an `is BaseMPManager` test, so
+    // singleplayer keeps vanilla pacing. If that type stopped deriving from
+    // NetManager the test would never match and the patch would go inert.
+    var mpManagerType = HarmonyLib.AccessTools.TypeByName(
+            "Cosmoteer.Game.Multiplayer.BaseMPManager")
+        ?? throw new InvalidOperationException(
+            "Cosmoteer.Game.Multiplayer.BaseMPManager was not found, so the catch-up patch "
+            + "could not tell multiplayer from singleplayer.");
+
+    if (!netManagerType.IsAssignableFrom(mpManagerType))
+    {
+        throw new InvalidOperationException(
+            "BaseMPManager no longer derives from NetManager, so the catch-up patch's "
+            + "multiplayer test can never match.");
+    }
+
+    // The credit is only useful because AdvanceNetworkTime consumes an
+    // accumulator in a loop rather than one tick per call, and because
+    // IsReadyForTick still gates each tick. Both are load-bearing for the
+    // "can never run ahead of received inputs" claim in the patch's comment.
+    if (HarmonyLib.AccessTools.DeclaredMethod(mpManagerType, "AdvanceNetworkTime") is null
+        || HarmonyLib.AccessTools.DeclaredMethod(mpManagerType, "IsReadyForTick") is null)
+    {
+        throw new InvalidOperationException(
+            "BaseMPManager.AdvanceNetworkTime/IsReadyForTick were not found, so extra "
+            + "per-frame credit is no longer known to be gated by received inputs.");
+    }
+
+    // The patch is on by default now. A Prepare() that returned false with no
+    // override file present would silently restore the old opt-in behaviour.
+    var catchUpType = typeof(EmmanimLagFix.Code.EntryPoint).Assembly
+            .GetType("EmmanimLagFix.Code.NetworkTimeCatchUpPatch")
+        ?? throw new InvalidOperationException("NetworkTimeCatchUpPatch was not found.");
+
+    var prepare = HarmonyLib.AccessTools.DeclaredMethod(catchUpType, "Prepare")
+        ?? throw new InvalidOperationException("NetworkTimeCatchUpPatch.Prepare was not found.");
+
+    if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "..", "ticks-per-frame.txt"))
+        && prepare.Invoke(null, null) is not true)
+    {
+        throw new InvalidOperationException(
+            "NetworkTimeCatchUpPatch.Prepare() returned false with no ticks-per-frame.txt "
+            + "override present, so the catch-up patch would not be applied at all.");
     }
 }
 
@@ -2406,4 +2502,4 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, opt-in per-frame input-tick cap, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");

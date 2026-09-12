@@ -186,6 +186,31 @@ find a part's power storage without knowing the component's name, which no
 in *Two halves* below: for Mods QoL players this module is no longer optional
 per player.**
 
+Version 2.2.0 removes the ceiling multiplayer puts on world speed. The game
+decides how much simulated time each rendered frame may advance, and vanilla's
+formula caps that at exactly one input tick and additionally applies a
+**quadratic** slowdown to any peer below its target frame rate. Together those
+mean the whole session runs at no more than the slowest player's *frame rate*,
+squared-penalised, no matter how much CPU that machine still has spare. Single
+player has neither limit - which is exactly why a save that runs fine alone
+crawls with a friend. Measured over a 2h52m two-player session, neither machine
+was anywhere near its own CPU limit - the host used under two of sixteen logical
+processors and the client under two of eight, both flat the whole time - and yet
+the world ran at 13.4 of the nominal 30 ticks per second. 2.2.0 lets each frame
+advance the time that really elapsed, up to three input ticks, so a slow machine
+now trades some of its frame rate - and drawing is only 18% of that machine's
+frame - for the world running at full speed. It can never run faster than real
+time, never slower than vanilla, and settles by itself at whatever rate the
+machine can actually hold. To turn it off, put a file named
+`ticks-per-frame.txt` containing `1` in the mod folder.
+
+2.2.1 adds nothing a player sees. It splits the diagnostics log's `sim=` figure
+into the deterministic world tick (`fixed=`) and the per-frame visual pass, and
+names the costliest scene buckets on each side (`fb=`, `ub=`). `sim=` alone sums
+two populations that scale differently, and reading it as the cost of one world
+tick produced a claim that had to be withdrawn from 2.2.0's notes. The patches
+are timing only and load only when a diagnostics flag file is present.
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:
