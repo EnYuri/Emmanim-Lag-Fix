@@ -120,6 +120,8 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         // starts accumulating its own.
         _ = FramePhaseDiagnosticsPatch.Snapshot(ReportSeconds);
         _ = SimPhaseDiagnosticsPatch.Snapshot();
+        _ = SceneUpdateBreakdown.Take();
+        _ = HeatModulationContextSkipPatch.TakeCounters();
         _sampledManager = new WeakReference<BaseMPManager>(manager);
     }
 
@@ -364,7 +366,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             // update carries the lockstep wait; draw carries present and vsync.
             $"phaseMs={phases} " +
             $"{simPhases} cores={FastParallelIdleParkPatch.ProcessorCount}/{FastParallelIdleParkPatch.WorkerCount} " +
-            $"{breakdown.Full} " +
+            $"{breakdown.Full} focus=[{breakdown.Focused}] " +
             $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} pickups={pickups} tickcap={NetworkTimeCatchUpPatch.MaxTicksPerFrame}/{raised} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"players={manager._playerInfos.Count} " +
@@ -400,6 +402,12 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             + $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} q={queuedInputTicks}/{maximumPlayerQueue} "
             + $"cq={connectionReceiveQueue} ph={phases} {simPhases} {breakdown.Compact} pk={pickups} tc={NetworkTimeCatchUpPatch.MaxTicksPerFrame}/{raised} "
             + $"fp={FastParallelIdleParkPatch.CompactCounters()}");
+        // Separate short payload: do not let the chat limit truncate either
+        // the existing report or these rank-independent validation metrics.
+        var focused = $"kind=status-resource t={manager.NetworkInputTick} {breakdown.Focused} "
+            + $"cap={(StatusModulationListCapacityPatch.AppliedToTiles ? 1 : 0)}/{(StatusModulationListCapacityPatch.AppliedToParts ? 1 : 0)} {HeatModulationContextSkipPatch.TakeCounters()}";
+        Halfling.Logging.Logger.Log($"[EmmanimLagFix.StatusResourceDiagnostics] {focused}");
+        PeerDiagnosticsRelayPatch.MaybeSend(manager, focused);
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;

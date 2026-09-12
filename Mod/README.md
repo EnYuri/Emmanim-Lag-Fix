@@ -229,6 +229,14 @@ list reserves that many slots before the unchanged loop instead of growing in
 several steps. Status calculations, timing, iteration and callback order are
 unchanged.
 
+2.2.3 skips only unused status-context gathering during exact built-in heat
+modulation. This is automatic, with no new switch; modified rules and unknown
+types retain vanilla gathering. It does not remove heat, cooling, resistance,
+damage or diffusion. Peer diagnostics now always relay Statuses and Resources
+costs, actual bucket-pass counts, and context skip/fallback counts once a minute
+in a separate hidden payload. Numerical smoke tests passed; multiplayer
+performance and desync validation remain to be measured.
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:

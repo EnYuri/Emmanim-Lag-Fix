@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.2.3
+
+- Skip unused status-context population only for the exact built-in tile heat
+  rule (one unfiltered Constant subtract-1 modulator). Enabled automatically;
+  changed rules, unknown types and nonempty context dictionaries use vanilla.
+  Buff lookup, resistance, value arithmetic, events and heat diffusion remain
+  unchanged. Numerical equivalence passed for 18 value/resistance combinations;
+  live multiplayer performance/desync validation is still pending.
+- Extend minute-spaced peer diagnostics with a separate short
+  `kind=status-resource` payload. Statuses and Resources costs are always
+  reported regardless of ranking, with actual bucket-pass counts and heat
+  context skip/fallback counters. No new flags or lockstep packet changes.
+- Clear scene-breakdown and heat-context counter windows when the multiplayer
+  manager changes, preventing old-session samples from entering the new window.
+
+Every multiplayer participant must install 2.2.3 and restart the game.
+
 ## 2.2.2
 
 **Regression fix: 2.2.0's multi-tick catch-up made a slow peer far worse, and is

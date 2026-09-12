@@ -8,6 +8,81 @@ using System.Runtime.CompilerServices;
 
 var gameAssembly = Assembly.Load("Cosmoteer");
 var halflingAssembly = Assembly.Load("HalflingCore");
+// Exact heat-context guard and numerical equivalence with populated/empty
+// context. No real ship is necessary because this rule never reads context.
+{
+    var patch = typeof(EntryPoint).Assembly.GetType("EmmanimLagFix.Code.HeatModulationContextSkipPatch", true)!;
+    var guard = AccessTools.Method(patch, "CanSkip")!;
+    var type = gameAssembly.GetType("Cosmoteer.Ships.Statuses.StatusType", true)!;
+    var heat = RuntimeHelpers.GetUninitializedObject(type);
+    var idField = AccessTools.Field(type, "ID")!;
+    idField.SetValue(heat, Activator.CreateInstance(idField.FieldType, new object[] { "cosmoteer.heat" }));
+    var layerField = AccessTools.Field(type, "Layer")!;
+    layerField.SetValue(heat, Enum.Parse(layerField.FieldType, "Tile"));
+    var provider = Activator.CreateInstance(gameAssembly.GetType("Cosmoteer.Ships.Statuses.TileStatusEffectDataProvider", true)!)!;
+    var constantType = gameAssembly.GetType("Cosmoteer.Ships.Statuses.ConstantValueModulatorRules", true)!;
+    var constant = Activator.CreateInstance(constantType)!;
+    AccessTools.Field(constantType, "Value").SetValue(constant, 1f);
+    var mode = AccessTools.Field(constantType, "ModificationMode")!;
+    mode.SetValue(constant, Enum.Parse(mode.FieldType, "Subtract"));
+    var rangeProperty = AccessTools.Property(constantType, "AffectedValueRange")!;
+    var range = Activator.CreateInstance(rangeProperty.PropertyType, new object[] { 0f, float.PositiveInfinity })!;
+    rangeProperty.SetValue(constant, range);
+    var multiType = gameAssembly.GetType("Cosmoteer.Ships.Statuses.MultiValueModulatorRules", true)!;
+    var multi = Activator.CreateInstance(multiType)!;
+    var modulatorsField = AccessTools.Field(multiType, "Modulators")!;
+    var modulators = Array.CreateInstance(modulatorsField.FieldType.GetElementType()!, 1);
+    modulators.SetValue(constant, 0);
+    modulatorsField.SetValue(multi, modulators);
+    AccessTools.Field(type, "ValueModulators").SetValue(heat, multi);
+    bool Allows(object? source = null, int count = 0) =>
+        (bool)guard.Invoke(null, new[] { heat, source ?? provider, count })!;
+    if (!Allows() || Allows(source: new object()) || Allows(count: 1))
+        throw new InvalidOperationException("Heat-context provider/empty-dictionary guards failed.");
+    var filterField = AccessTools.Field(constantType, "StatusFilter")!;
+    filterField.SetValue(constant, RuntimeHelpers.GetUninitializedObject(filterField.FieldType));
+    if (Allows()) throw new InvalidOperationException("Filtered heat incorrectly skipped context.");
+    filterField.SetValue(constant, null);
+    AccessTools.Field(constantType, "Value").SetValue(constant, 2f);
+    if (Allows()) throw new InvalidOperationException("Modified heat rule incorrectly passed exact guard.");
+    AccessTools.Field(constantType, "Value").SetValue(constant, 1f);
+    idField.SetValue(heat, Activator.CreateInstance(idField.FieldType, new object[] { "cosmoteer.fire" }));
+    if (Allows()) throw new InvalidOperationException("Non-heat status incorrectly skipped context.");
+    idField.SetValue(heat, Activator.CreateInstance(idField.FieldType, new object[] { "cosmoteer.heat" }));
+
+    var dataType = gameAssembly.GetType("Cosmoteer.Ships.Statuses.ValueModulationData", true)!;
+    var constructor = dataType.GetConstructors().Single();
+    var timeType = constructor.GetParameters()[3].ParameterType;
+    var time = Activator.CreateInstance(timeType, new object[] { 1d / 30d })!;
+    var infoType = gameAssembly.GetType("Cosmoteer.Ships.Statuses.IStatusLocationInfo", true)!;
+    var dictionaryType = typeof(Dictionary<,>).MakeGenericType(type, infoType);
+    var empty = (IDictionary)Activator.CreateInstance(dictionaryType)!;
+    var populated = (IDictionary)Activator.CreateInstance(dictionaryType)!;
+    populated.Add(heat, null);
+    var populateCore = AccessTools.Method(patch, "PopulateCore")!;
+    // Eligible skip must not enter the provider (null ship/status would fail
+    // there). Non-heat status must enter vanilla, proving fallback is real.
+    populateCore.Invoke(null, new object?[] { heat, provider, null, null, empty });
+    if (empty.Count != 0) throw new InvalidOperationException("Skipped context was mutated.");
+    idField.SetValue(heat, Activator.CreateInstance(idField.FieldType, new object[] { "cosmoteer.fire" }));
+    try
+    {
+        populateCore.Invoke(null, new object?[] { heat, provider, null, null, empty });
+        throw new InvalidOperationException("Non-heat context did not call vanilla provider.");
+    }
+    catch (TargetInvocationException e) when (e.InnerException is NullReferenceException) { }
+    idField.SetValue(heat, Activator.CreateInstance(idField.FieldType, new object[] { "cosmoteer.heat" }));
+    var modulate = AccessTools.Method(multiType, "ModulateValue")!;
+    foreach (var value in new[] { -1f, 0f, 0.01f, 1f, 100f, 100000f })
+    foreach (var resistance in new[] { 0f, 0.5f, 1f })
+    {
+        object Data(IDictionary context) => constructor.Invoke(new object?[] { value, resistance, range, time, null, context });
+        var vanilla = (float)modulate.Invoke(multi, new[] { Data(populated) })!;
+        var optimized = (float)modulate.Invoke(multi, new[] { Data(empty) })!;
+        if (BitConverter.SingleToInt32Bits(vanilla) != BitConverter.SingleToInt32Bits(optimized))
+            throw new InvalidOperationException("Heat-context skip changed a modulation result.");
+    }
+}
 // Korean IME integration is implemented by the Windows platform assembly,
 // which the game has loaded before input is initialized. Load it explicitly in
 // this standalone smoke host so the same Harmony target types are resolvable.
@@ -1648,6 +1723,28 @@ foreach (var allocOverload in AccessTools
 
     var relayType = typeof(EntryPoint).Assembly.GetType(
         "EmmanimLagFix.Code.PeerDiagnosticsRelayPatch", throwOnError: true)!;
+    var breakdownType = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.SceneUpdateBreakdown", throwOnError: true)!;
+    var formatFocused = AccessTools.Method(breakdownType, "FormatFocused")!;
+    var focused = (string)formatFocused.Invoke(null, new object[]
+    {
+        new[] { new KeyValuePair<int, long>(1, Stopwatch.Frequency), new KeyValuePair<int, long>(2, Stopwatch.Frequency * 2) },
+        new[] { new KeyValuePair<int, long>(1, 20), new KeyValuePair<int, long>(2, 40) },
+        new Dictionary<int, string> { [1] = "Statuses", [2] = "Resources" }, 100L
+    })!;
+    if (focused != "frames=100 st=10.000/20 res=20.000/40")
+        throw new InvalidOperationException($"Focused bucket report mismatch: {focused}");
+    var unknown = (string)formatFocused.Invoke(null, new object[]
+    {
+        Array.Empty<KeyValuePair<int, long>>(), Array.Empty<KeyValuePair<int, long>>(),
+        new Dictionary<int, string> { [1] = "Statuses" }, 100L
+    })!;
+    if (unknown != "frames=100 st=0.000/0 res=-/-")
+        throw new InvalidOperationException($"Missing bucket was confused with zero work: {unknown}");
+    var focusedPayload = "#ELFDIAG#kind=status-resource t=2147483647 frames=999999 st=9999.999/99999999 res=9999.999/99999999"
+        + " cap=1/1 ctx=on sk=9999999999 vf=9999999999";
+    if (focusedPayload.Length > 195)
+        throw new InvalidOperationException("Focused diagnostics exceed the chat budget.");
     var tryHandle = AccessTools.Method(relayType, "TryHandleIncoming")
         ?? throw new MissingMethodException(relayType.FullName, "TryHandleIncoming");
     var receivedBefore = (int)AccessTools.Property(relayType, "Received")!.GetValue(null)!;
@@ -2471,7 +2568,8 @@ harmony.UnpatchAll(smokeId);
         foreach (var (target, label) in new[] { (tileTarget, "IntVector2"), (partTarget, "Part") })
         {
             var mine = HarmonyLib.Harmony.GetPatchInfo(target)?.Transpilers
-                .Count(patch => patch.owner == smokeId + ".statuscapacity") ?? 0;
+                .Count(patch => patch.owner == smokeId + ".statuscapacity"
+                    && patch.PatchMethod.DeclaringType == capacityPatchType) ?? 0;
             if (mine != 1)
             {
                 throw new InvalidOperationException(
@@ -2480,6 +2578,12 @@ harmony.UnpatchAll(smokeId);
             }
 
             System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(target.MethodHandle);
+            var contextPatchType = typeof(EntryPoint).Assembly.GetType(
+                "EmmanimLagFix.Code.HeatModulationContextSkipPatch", true)!;
+            var contextCount = Harmony.GetPatchInfo(target)?.Transpilers.Count(patch =>
+                patch.owner == smokeId + ".statuscapacity" && patch.PatchMethod.DeclaringType == contextPatchType) ?? 0;
+            if (contextCount != (label == "IntVector2" ? 1 : 0))
+                throw new InvalidOperationException("Heat context rewrite covered an unexpected handler.");
         }
 
         foreach (var flagName in new[] { "AppliedToTiles", "AppliedToParts" })

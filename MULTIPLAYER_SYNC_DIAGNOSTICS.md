@@ -436,6 +436,44 @@ One row lists four entries rather than two. `Samples` is keyed by the `MPPlayer`
 object, and a resync constructs new ones, so both generations appear in the
 minute that spans the resync. That is a reading artifact, not double counting.
 
+## Rank-independent status/resource validation
+
+With the existing multiplayer-memory and frame-phase diagnostics enabled, the
+client sends a second hidden chat report once per minute, tagged
+`kind=status-resource`, with the same `t=` as its main report. No new flag is
+required. The host logs it under `PeerDiagnostics`; each process also writes
+`StatusResourceDiagnostics` locally.
+
+`frames=N st=milliseconds/count res=milliseconds/count` reports each fixed
+bucket's milliseconds per rendered frame and its total actual bucket passes
+over that window, regardless of the top-bucket ranking. Per-pass milliseconds
+are `milliseconds * frames / count`; zero count means no per-pass estimate.
+`-/-` means unavailable, while `0.000/0` means a known bucket did no work.
+These counts are not the enclosing `DoFixedUpdates` invocation count.
+`cap=tile/part` reports installation of the existing list-capacity patch.
+`ctx=on/off sk=N vf=N` reports installation of the heat-context specialization and total
+skipped/vanilla-fallback calls in this window. Counters are gathered only while
+frame diagnostics are enabled. `vf` counts calls failing the eligibility guard.
+Both counters cover only tile modulation context population, not other effects.
+
+### Always-on heat-context skip
+
+The specialization applies automatically on both peers running this build.
+There is no enable/disable flag. Existing diagnostics flags control reporting
+only, not optimization. Running games require a restart after deployment to load
+the updated assembly.
+
+Only the exact built-in tile provider and `cosmoteer.heat` status with one exact
+`Constant` modulator, subtracting 1 with delta-time scaling, raw output, range
+`[0, infinity]`, and no status filter qualify. Any changed rule, unknown subclass,
+non-heat status, or nonempty context dictionary follows vanilla. Dictionary
+allocation and clearing, buff lookup, resistance, arithmetic, event ordering,
+effects, and heat diffusion remain untouched. Only the modulation-local
+`PopulateStatuses` call is guarded. Smoke tests check the guards, tile-only IL
+rewrite, and bit-identical modulation for populated versus empty context over
+18 value/resistance combinations. Live performance and multiplayer desync
+validation remain necessary before claiming a measured improvement.
+
 ## 2026-09-04: 2.0.29 optimizations measured live
 
 Same-session 20-second CPU trace, host, 421-444 ships, `ParallelFixedUpdate`

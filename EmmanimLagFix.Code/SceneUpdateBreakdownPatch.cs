@@ -46,6 +46,7 @@ internal static class SceneUpdateBreakdown
     private static long _fixedTicks;
     private static long _fixedCalls;
     private static readonly Dictionary<int, long> FixedBucketTicks = new();
+    private static readonly Dictionary<int, long> FixedBucketCalls = new();
     private static readonly Dictionary<int, long> UpdateBucketTicks = new();
     private static readonly object Gate = new();
 
@@ -81,6 +82,11 @@ internal static class SceneUpdateBreakdown
         {
             map.TryGetValue(bucket, out var prior);
             map[bucket] = prior + ticks;
+            if (fixedUpdate)
+            {
+                FixedBucketCalls.TryGetValue(bucket, out var calls);
+                FixedBucketCalls[bucket] = calls + 1;
+            }
         }
     }
 
@@ -88,11 +94,13 @@ internal static class SceneUpdateBreakdown
     {
         public readonly string Full;
         public readonly string Compact;
+        public readonly string Focused;
 
-        public Report(string full, string compact)
+        public Report(string full, string compact, string focused)
         {
             Full = full;
             Compact = compact;
+            Focused = focused;
         }
     }
 
@@ -106,6 +114,7 @@ internal static class SceneUpdateBreakdown
         long fixedCalls;
         KeyValuePair<int, long>[] fixedBuckets;
         KeyValuePair<int, long>[] updateBuckets;
+        KeyValuePair<int, long>[] bucketCalls;
 
         lock (Gate)
         {
@@ -115,6 +124,8 @@ internal static class SceneUpdateBreakdown
             _fixedCalls = 0;
             fixedBuckets = FixedBucketTicks.ToArray();
             updateBuckets = UpdateBucketTicks.ToArray();
+            bucketCalls = FixedBucketCalls.ToArray();
+            FixedBucketCalls.Clear();
             FixedBucketTicks.Clear();
             UpdateBucketTicks.Clear();
         }
@@ -122,7 +133,7 @@ internal static class SceneUpdateBreakdown
         var frames = FramePhaseDiagnosticsPatch.LastFrames;
         if (!FramePhaseDiagnosticsPatch.Enabled || frames <= 0)
         {
-            return new Report("fixed=-/- fb=[] ub=[]", "fx=-");
+            return new Report("fixed=-/- fb=[] ub=[]", "fx=-", "frames=0 st=-/- res=-/-");
         }
 
         var perFrameMs = 1000d / Stopwatch.Frequency / frames;
@@ -133,7 +144,26 @@ internal static class SceneUpdateBreakdown
                 + $"ub=[{Format(updateBuckets, UpdateNames(), perFrameMs, TopBuckets, 0)}]",
             $"fx={fixedTicks * perFrameMs:F1} "
                 + $"fb={Format(fixedBuckets, FixedNames(), perFrameMs, 1, 6)} "
-                + $"ub={Format(updateBuckets, UpdateNames(), perFrameMs, 1, 6)}");
+                + $"ub={Format(updateBuckets, UpdateNames(), perFrameMs, 1, 6)}",
+            FormatFocused(fixedBuckets, bucketCalls, FixedNames(), frames));
+    }
+
+    // Actual bucket passes, not DoFixedUpdates calls (one such call may run
+    // zero or several world ticks). A missing name is unknown, not zero cost.
+    internal static string FormatFocused(
+        KeyValuePair<int, long>[] ticks, KeyValuePair<int, long>[] calls,
+        IReadOnlyDictionary<int, string> names, long frames)
+    {
+        string Bucket(string name)
+        {
+            var matches = names.Where(pair => pair.Value == name).ToArray();
+            if (frames <= 0 || matches.Length != 1) return "-/-";
+            var id = matches[0].Key;
+            var elapsed = ticks.Where(pair => pair.Key == id).Sum(pair => pair.Value);
+            var count = calls.Where(pair => pair.Key == id).Sum(pair => pair.Value);
+            return FormattableString.Invariant($"{elapsed * 1000d / Stopwatch.Frequency / frames:F3}/{count}");
+        }
+        return $"frames={frames} st={Bucket("Statuses")} res={Bucket("Resources")}";
     }
 
     private static string Format(
