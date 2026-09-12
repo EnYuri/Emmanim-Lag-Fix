@@ -1,5 +1,68 @@
 # Changelog
 
+## 2.2.2
+
+**Regression fix: 2.2.0's multi-tick catch-up made a slow peer far worse, and is
+now off by default.**
+
+2.2.0 let a frame credit up to 3 input ticks on the theory that running N ticks
+in one frame is self-limiting, because the frame simply becomes N times as
+expensive. 2.2.1's new per-bucket diagnostics measured it and refuted it. In a
+2026-09-13 session the remote client pinned at exactly the ceiling and stayed
+there:
+
+```
+01:46  ft=64.0/346   sim=40.0/1.79   fx=33.3   tc=3/503   lat=1545ms
+01:47  ft=436.7/627  sim=394.8/4.00  fx=353.5  tc=3/138   lat=924ms
+01:48  ft=412.9/608  sim=368.3/4.00  fx=327.5  tc=3/146   lat=751ms
+```
+
+Three things went wrong at once. Frame rate collapsed to 2 fps, so input,
+rendering and the Steam networking thread — the documented root cause of this
+mod's disconnects — were serviced twice a second, and measured peer latency rose
+to 0.75–1.5 seconds. The per-tick cost inflated rather than staying flat, from
+18.6 ms/tick to 82 ms/tick, so the trade was not the neutral one assumed. And
+world speed, the entire point of the change, got *worse*: 28 ticks/s before the
+ceiling bound, 9.7 after.
+
+The half of 2.2.0 that is unambiguously right is the removal of vanilla's
+quadratic frame-rate penalty, and that needs no extra ticks at all. The default
+ceiling is now **1 input tick per frame**, which is vanilla's own cap — so a
+frame never carries more world-tick work than vanilla would have given it, while
+a peer holding 90 fps still earns a full second of game time per second instead
+of the fraction the quadratic term leaves it.
+
+`ticks-per-frame.txt` still overrides. `0` now disables the patch entirely and
+restores vanilla pacing; values above `1` are additionally gated at run time on
+a rolling average of real frame time, so extra ticks are only credited while a
+peer's frames already fit inside one tick.
+
+**Every player must run the same version.** A peer still on 2.2.0 will keep
+collapsing.
+
+**Crew job rates go back to vanilla.** The same diagnostics measured what this
+mod's oldest tuning section actually costs, and the answer is: almost nothing.
+Across ten host samples of a two-player, 116,000-part session the `Jobs` bucket
+held flat at 0.2–0.3 ms per frame out of a 3.0–4.6 ms fixed update — about 6%,
+and never the top bucket, while `Statuses` alone ran 0.7–1.1 ms. Because these
+fields are per-second caps whose cost scales linearly, holding them at 90
+instead of vanilla's 120 was buying roughly 0.07 ms per frame, under 2% of a
+tick, in exchange for slower crew response on every job.
+`JobAssignmentsPerSecond` and `ResourceSearchesPerSecond` are therefore vanilla
+numbers again. The section stays, because writing the fields at all is what
+keeps Huge Crews' 8× inflation from multiplying that 6%.
+`LowPriorityJobAssignmentsPerSecond` stays at 70 — that one is a pickup
+responsiveness fix, not an optimization.
+
+**Status modulation no longer repeatedly grows its temporary change list.** A
+CPU trace placed `List<(Status,float)>.AddWithResize` at 5.7% of all parallel
+fixed-update work. Vanilla can append at most one change record per active
+status, so the pooled list now reserves `StatusCount` slots before the unchanged
+loop runs. This does not cache or defer status values: iteration, calculations,
+callback order and list disposal are identical. Exact-shape guards require one
+and only one matching allocation in both the tile- and part-status methods, and
+the smoke test compiles both rewritten bodies before release.
+
 ## 2.2.1
 
 **Diagnostics: the simulation phase is now split and attributed per subsystem.**

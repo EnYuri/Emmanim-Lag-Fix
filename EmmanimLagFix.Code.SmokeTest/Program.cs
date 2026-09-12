@@ -2421,6 +2421,123 @@ harmony.UnpatchAll(smokeId);
             "NetworkTimeCatchUpPatch.Prepare() returned false with no ticks-per-frame.txt "
             + "override present, so the catch-up patch would not be applied at all.");
     }
+
+    // 2.2.0's ceiling of 3 pinned a slow peer at 4 world ticks per frame and
+    // collapsed it to 2 fps while *lowering* its tick rate. The safe default is
+    // one tick - vanilla's own cap - so only the quadratic penalty is removed.
+    // A future edit that raises this constant again must be deliberate.
+    var ceiling = catchUpType
+            .GetField("MaxTicksPerFrame",
+                System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.Static)
+        ?? throw new InvalidOperationException(
+            "NetworkTimeCatchUpPatch.MaxTicksPerFrame was not found.");
+
+    if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "..", "ticks-per-frame.txt"))
+        && ceiling.GetValue(null) is not 1)
+    {
+        throw new InvalidOperationException(
+            "NetworkTimeCatchUpPatch defaults to more than one input tick per frame. "
+            + "That is the 2.2.0 behaviour measured to collapse a slow peer to 2 fps; "
+            + $"found {ceiling.GetValue(null)}.");
+    }
+}
+
+// Status value modulation builds a temporary list of changed statuses. The
+// capacity patch must resolve both concrete handler bodies and rewrite exactly
+// one allocation in each; merely seeing a registered transpiler is insufficient
+// because a guarded transpiler can still fall back without changing the IL.
+{
+    var capacityPatchType = typeof(EmmanimLagFix.Code.EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.StatusModulationListCapacityPatch", throwOnError: true)!
+        ?? throw new InvalidOperationException(
+            "StatusModulationListCapacityPatch was not found.");
+    var findTarget = HarmonyLib.AccessTools.DeclaredMethod(capacityPatchType, "FindTarget")
+        ?? throw new InvalidOperationException(
+            "StatusModulationListCapacityPatch.FindTarget was not found.");
+    var partType = gameAssembly.GetType("Cosmoteer.Ships.Parts.Part", throwOnError: true)!;
+    var tileTarget = (System.Reflection.MethodInfo?)findTarget.Invoke(
+            null, new object[] { typeof(Halfling.Geometry.IntVector2) })
+        ?? throw new InvalidOperationException("The tile modulation target did not resolve.");
+    var partTarget = (System.Reflection.MethodInfo?)findTarget.Invoke(
+            null, new object[] { partType })
+        ?? throw new InvalidOperationException("The part modulation target did not resolve.");
+
+    var capacityProbe = new HarmonyLib.Harmony(smokeId + ".statuscapacity");
+    capacityProbe.PatchAll(typeof(EmmanimLagFix.Code.EntryPoint).Assembly);
+    try
+    {
+        foreach (var (target, label) in new[] { (tileTarget, "IntVector2"), (partTarget, "Part") })
+        {
+            var mine = HarmonyLib.Harmony.GetPatchInfo(target)?.Transpilers
+                .Count(patch => patch.owner == smokeId + ".statuscapacity") ?? 0;
+            if (mine != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Expected exactly one capacity transpiler on StatusHandler<{label}> "
+                    + $"modulation, found {mine}.");
+            }
+
+            System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(target.MethodHandle);
+        }
+
+        foreach (var flagName in new[] { "AppliedToTiles", "AppliedToParts" })
+        {
+            var getter = HarmonyLib.AccessTools.DeclaredPropertyGetter(capacityPatchType, flagName)
+                ?? throw new InvalidOperationException(
+                    $"StatusModulationListCapacityPatch.{flagName} was not found.");
+            if (getter.Invoke(null, null) is not true)
+            {
+                throw new InvalidOperationException(
+                    $"StatusModulationListCapacityPatch.{flagName} is false, so the "
+                    + "guarded transpiler did not rewrite its target.");
+            }
+        }
+
+        // Exercise the helper without constructing any game state: it reads
+        // only StatusCount and allocates the same pooled TempList as vanilla.
+        // This catches a wrong generic element type or an accidentally inert
+        // EnsureCapacity call independently of the IL shape assertions above.
+        var handlerDefinition = gameAssembly.GetType(
+                "Cosmoteer.Ships.Statuses.StatusHandler`1", throwOnError: true)!;
+        var tileHandlerType = gameAssembly.GetType(
+                "Cosmoteer.Ships.Statuses.TileStatusHandler", throwOnError: true)!;
+        var tileHandlerBase = handlerDefinition.MakeGenericType(
+            typeof(Halfling.Geometry.IntVector2));
+        var statusCountField = HarmonyLib.AccessTools.Field(
+                tileHandlerBase, "<StatusCount>k__BackingField")
+            ?? throw new InvalidOperationException(
+                "StatusHandler<T>.StatusCount backing field was not found.");
+        var uninitializedHandler = System.Runtime.CompilerServices.RuntimeHelpers
+            .GetUninitializedObject(tileHandlerType);
+        statusCountField.SetValue(uninitializedHandler, 37);
+
+        var allocator = HarmonyLib.AccessTools.DeclaredMethod(
+                capacityPatchType, "AllocWithCapacity")!
+            .MakeGenericMethod(typeof(Halfling.Geometry.IntVector2));
+        var allocatedList = allocator.Invoke(null, new[] { uninitializedHandler })
+            ?? throw new InvalidOperationException(
+                "StatusModulationListCapacityPatch allocator returned null.");
+        try
+        {
+            var capacity = (int)(allocatedList.GetType().GetProperty("Capacity")!
+                .GetValue(allocatedList) ?? -1);
+            if (capacity < 37)
+            {
+                throw new InvalidOperationException(
+                    $"Status modulation list capacity is {capacity}, expected at least 37.");
+            }
+        }
+        finally
+        {
+            ((IDisposable)allocatedList).Dispose();
+        }
+    }
+    finally
+    {
+        capacityProbe.UnpatchAll(smokeId + ".statuscapacity");
+    }
 }
 
 // The lost-ship save is moved off vanilla's background worker onto the
@@ -2502,4 +2619,4 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");

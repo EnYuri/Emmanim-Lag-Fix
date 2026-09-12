@@ -37,7 +37,7 @@
 
 ID = nayuri.emmanim_lag_fix
 Name = "Emmanim Lag Fix"
-Version = 2.2.1
+Version = 2.2.2
 
 ModifiesGameplay = true
 ModifiesMultiplayer = true
@@ -64,13 +64,21 @@ Actions
 	// -------------------------------------------------------------------------
 	// A-1. Crew AI workload
 	// -------------------------------------------------------------------------
-	// Crew job and resource searching is the largest CPU consumer in a late game
-	// fleet. Cost scales with crew count times candidate count, so mod packs that
-	// add thousands of parts make it explode.
+	// Crew job and resource searching was long assumed to be the largest CPU
+	// consumer in a late game fleet. 2.2.1's per-bucket diagnostics measured it
+	// and it is not: on a 116,000-part two-player session the Jobs bucket is
+	// 0.2-0.3 ms of a 3.0-4.6 ms fixed update, about 6%, while Statuses is
+	// 0.7-1.1 ms. The section is kept because these budgets are per-second caps
+	// and cost scales with them linearly, so leaving Huge Crews' 8x inflation in
+	// place would multiply that 6% - but it is no longer where the time goes,
+	// and the two main queues are back at vanilla numbers accordingly.
 	//
 	// ManualTransferJobExpensiveCheckInterval matters most for the stalls people
 	// notice when moving resources or crew between ships. Despite the name it is
-	// a RATE, not an interval - see the note on it below.
+	// a RATE, not an interval - see the note on it below. It is also the one
+	// field here that is still doing real work: it scales the reachability pass
+	// over every outstanding manual transfer job, and this session carried up to
+	// 8,269 of them.
 	//
 	// If "Huge Crews" is enabled it pushes these same fields the other way, to
 	// roughly 8x vanilla, and lifts the crew cap to 100,000. This mod does not
@@ -105,9 +113,27 @@ Actions
 			// Mods QoL repairs the beam. Version 1.3.0 therefore restored the last
 			// intentional optimization baseline from 1.1.0. Version 1.3.1 raises only
 			// the low-priority queue to 70 as a responsiveness compromise.
-			JobAssignmentsPerSecond = 90                     // vanilla 120 / HugeCrews 1000
+			//
+			// 2.2.2 MEASURED THIS AND PUT THE TWO MAIN QUEUES BACK TO VANILLA.
+			// 2.2.1's per-bucket diagnostics give the cost of crew work directly:
+			// across ten host samples of a 2-player 116,000-part session the Jobs
+			// bucket held flat at 0.2-0.3 ms per frame out of a 3.0-4.6 ms fixed
+			// update - about 6%, and never the top bucket. Statuses alone was
+			// 0.7-1.1 ms, three to five times as much. These budgets are per-second
+			// caps on assignment attempts, so cost scales with them linearly, which
+			// means 90 instead of 120 was buying roughly 0.07 ms per frame - under
+			// 2% of a tick - in exchange for slower crew response on every job.
+			// That is not a trade worth a deviation from vanilla, so the two main
+			// queues are vanilla numbers again. What still holds Huge Crews' 8x
+			// inflation off is simply that this mod writes the fields at all.
+			//
+			// LowPriorityJobAssignmentsPerSecond stays at 70, above vanilla's 30.
+			// It is not an optimization and reverting it would be a regression: it
+			// is what keeps marked mining and salvage pickup responsive on a large
+			// fleet, and its cost is inside the same measured 6%.
+			JobAssignmentsPerSecond = 120                    // vanilla 120 / HugeCrews 1000
 			LowPriorityJobAssignmentsPerSecond = 70          // vanilla 30  / HugeCrews 250
-			ResourceSearchesPerSecond = 90                   // vanilla 120 / HugeCrews 1000
+			ResourceSearchesPerSecond = 120                  // vanilla 120 / HugeCrews 1000
 
 			// --- These two are RATES, despite being named "Interval" ---
 			// Read the field name and you assume a bigger number means a longer

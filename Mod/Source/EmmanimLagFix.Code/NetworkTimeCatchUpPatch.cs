@@ -70,11 +70,39 @@ namespace EmmanimLagFix.Code;
 /// <item><b>Bounded.</b> At most <c>MaxTicksPerFrame</c> ticks in one frame, so
 /// a hitch cannot be repaid as one visible speed-up spike. A gap longer than a
 /// second is treated as a load stall and skipped entirely.</item>
-/// <item><b>Self-limiting.</b> Running N ticks per frame makes the frame N times
-/// as expensive, so real elapsed time grows until the peer settles at whatever
-/// tick rate it can actually sustain - 30/s if it has the headroom, gracefully
-/// less if it does not. No controller or tuning is involved.</item>
+/// <item><b>Adaptively gated.</b> More than one tick per frame is only credited
+/// while the peer's own frames are already shorter than a tick, i.e. while it
+/// demonstrably has the headroom. See below for why this is not optional.</item>
 /// </list>
+///
+/// <b>2.2.2: the default ceiling is 1, and more than 1 is measured to be
+/// harmful on the peer that needs help.</b> 2.2.0 shipped a ceiling of 3 on the
+/// theory that running N ticks in one frame is self-limiting, because the frame
+/// simply becomes N times as expensive. The 2026-09-13 session refuted it. The
+/// remote client pinned at exactly the ceiling and stayed there:
+///
+/// <code>
+/// 01:46  ft=64.0/346   sim=40.0/1.79  fx=33.3   tc=3/503   lat=1545ms
+/// 01:47  ft=436.7/627  sim=394.8/4.00 fx=353.5  tc=3/138   lat=924ms
+/// 01:48  ft=412.9/608  sim=368.3/4.00 fx=327.5  tc=3/146   lat=751ms
+/// </code>
+///
+/// Three things go wrong at once, and none of them is visible from the
+/// single-peer reasoning above. Frame rate collapses to 2 fps, so input,
+/// rendering and - the documented root cause of this mod's disconnects - the
+/// Steam networking thread are all serviced twice a second. The per-tick cost
+/// itself inflates rather than staying flat (18.6 ms/tick at 1.79 calls per
+/// frame, 82 ms/tick at 4.00), so the trade is not the neutral one assumed.
+/// And world speed, the entire point of the change, gets <b>worse</b>: 28
+/// ticks/s before the ceiling bound, 9.7 after.
+///
+/// The half of the patch that is unambiguously right is the removal of the
+/// quadratic term, and that needs no extra ticks at all. With
+/// <c>Min(realElapsed, oneTick)</c> the credit is bounded by vanilla's own cap,
+/// so a frame never carries more world-tick work than vanilla would have given
+/// it and the collapse above cannot occur - while a peer holding 90 fps still
+/// earns a full second of game time per second instead of the fraction the
+/// quadratic term leaves it.
 ///
 /// Real elapsed time is measured from a <c>Stopwatch</c> between consecutive
 /// calls rather than read from <c>App.Clock.DeltaTime</c>, because that clock is
@@ -93,8 +121,21 @@ namespace EmmanimLagFix.Code;
 [HarmonyPatch(typeof(NetManager), "GetTargetAdjustedDeltaTime")]
 internal static class NetworkTimeCatchUpPatch
 {
-    /// <summary>Default ceiling when no override file is present.</summary>
-    private const int DefaultMaxTicksPerFrame = 3;
+    /// <summary>
+    /// Default ceiling when no override file is present. 1 means "credit at most
+    /// one input tick per frame", which is vanilla's own cap - so the patch only
+    /// removes the quadratic penalty and can never make a frame more expensive
+    /// than vanilla would have. See the class remarks for the measurement that
+    /// brought this down from 3.
+    /// </summary>
+    private const int DefaultMaxTicksPerFrame = 1;
+
+    /// <summary>
+    /// Weight of the newest frame in the rolling frame-time average that gates
+    /// ceilings above 1. Low enough that one fast frame after a stall cannot
+    /// re-open the gate.
+    /// </summary>
+    private const float FrameAverageWeight = 0.05f;
 
     /// <summary>
     /// A gap longer than this is a load stall or an alt-tab, not a slow frame,
@@ -112,14 +153,23 @@ internal static class NetworkTimeCatchUpPatch
     /// <summary>Timestamp of the previous call, for the real elapsed time.</summary>
     private static long _lastTimestamp;
 
+    /// <summary>
+    /// Rolling average of real frame time in seconds, used only to gate ceilings
+    /// above 1. Single-threaded in practice (this runs on the game thread); a
+    /// torn read would cost one frame's pacing and nothing else.
+    /// </summary>
+    private static float _averageFrameSeconds;
+
     static NetworkTimeCatchUpPatch()
     {
         var ticks = DefaultMaxTicksPerFrame;
 
         // Optional override, a single integer, beside the mod folder. Absent in a
-        // normal install. 1 restores vanilla pacing exactly; the upper bound keeps
-        // a single frame from burning through a long input backlog at once, which
-        // is a visible speed-up spike and the reason vanilla caps this at all.
+        // normal install, which means a ceiling of one input tick per frame. 0
+        // disables the patch outright and restores vanilla's quadratic pacing.
+        // Values above 1 are accepted but are gated on measured frame time at
+        // run time, because an ungated ceiling of 3 is what 2.2.0 shipped and
+        // what collapsed a slow peer to 2 fps.
         try
         {
             var path = Path.GetFullPath(Path.Combine(
@@ -133,7 +183,7 @@ internal static class NetworkTimeCatchUpPatch
                     CultureInfo.InvariantCulture,
                     out var parsed))
             {
-                ticks = Math.Clamp(parsed, 1, 8);
+                ticks = Math.Clamp(parsed, 0, 8);
             }
         }
         catch (Exception)
@@ -145,13 +195,14 @@ internal static class NetworkTimeCatchUpPatch
     }
 
     /// <summary>Harmony skips the class entirely when the override asks for vanilla.</summary>
-    private static bool Prepare() => MaxTicksPerFrame > 1;
+    private static bool Prepare() => MaxTicksPerFrame > 0;
 
     /// <summary>
     /// Raises the frame's game-time credit to the real time that elapsed,
-    /// bounded by <see cref="MaxTicksPerFrame"/> input ticks. Multiplayer only:
-    /// singleplayer already advances from the real clock and must not be paced
-    /// by this.
+    /// bounded by <see cref="MaxTicksPerFrame"/> input ticks, and by one tick
+    /// whenever this peer's own frames are not already shorter than a tick.
+    /// Multiplayer only: singleplayer already advances from the real clock and
+    /// must not be paced by this.
     /// </summary>
     private static void Postfix(NetManager __instance, ref Time __result)
     {
@@ -173,8 +224,21 @@ internal static class NetworkTimeCatchUpPatch
             return;
         }
 
+        var average = _averageFrameSeconds <= 0f
+            ? elapsed
+            : _averageFrameSeconds + ((elapsed - _averageFrameSeconds) * FrameAverageWeight);
+        _averageFrameSeconds = average;
+
         var oneTick = 1f / __instance.Sim.Rules.PhysicsUpdatesPerSecond;
-        var credit = Math.Min(elapsed, oneTick * MaxTicksPerFrame);
+
+        // Extra ticks are only affordable for a peer whose frames already fit
+        // inside one tick. Anything else is at or past its own limit, and piling
+        // N ticks into its frame multiplies the frame cost instead of buying
+        // world speed - measured at 28 -> 9.7 ticks/s while frame rate fell to
+        // 2 fps, which is also what starves the Steam networking thread.
+        var allowed = average < oneTick ? MaxTicksPerFrame : 1;
+
+        var credit = Math.Min(elapsed, oneTick * allowed);
         if (credit <= (float)__result)
         {
             return;

@@ -196,13 +196,24 @@ player has neither limit - which is exactly why a save that runs fine alone
 crawls with a friend. Measured over a 2h52m two-player session, neither machine
 was anywhere near its own CPU limit - the host used under two of sixteen logical
 processors and the client under two of eight, both flat the whole time - and yet
-the world ran at 13.4 of the nominal 30 ticks per second. 2.2.0 lets each frame
-advance the time that really elapsed, up to three input ticks, so a slow machine
-now trades some of its frame rate - and drawing is only 18% of that machine's
-frame - for the world running at full speed. It can never run faster than real
-time, never slower than vanilla, and settles by itself at whatever rate the
-machine can actually hold. To turn it off, put a file named
-`ticks-per-frame.txt` containing `1` in the mod folder.
+the world ran at 13.4 of the nominal 30 ticks per second. 2.2.0 let each frame
+advance the time that really elapsed, up to three input ticks.
+
+2.2.2 keeps the first half of that and withdraws the second. 2.2.1's new
+per-bucket diagnostics measured the three-tick ceiling on the peer it was meant
+to help, and it made things much worse: the client pinned at four world ticks per
+frame, its frame rate collapsed from 16 fps to 2, the per-tick cost itself
+inflated from 19 ms to 82 ms, measured latency to it rose past a second - because
+at 2 fps the Steam networking thread is serviced twice a second, which is this
+mod's whole subject - and the world tick rate, the entire point, fell from 28/s
+to 9.7/s. The useful half is removing the quadratic penalty, and that needs no
+extra ticks: a frame now credits the real elapsed time bounded by **one** input
+tick, which is vanilla's own cap, so a frame can never carry more world-tick work
+than vanilla would have given it, while a peer holding 90 fps earns a full second
+of game time per second instead of a fraction of one. To restore vanilla pacing
+entirely, put a file named `ticks-per-frame.txt` containing `0` in the mod
+folder; a value above `1` re-enables multi-tick catch-up, now additionally gated
+on that peer's own frames already fitting inside a tick.
 
 2.2.1 adds nothing a player sees. It splits the diagnostics log's `sim=` figure
 into the deterministic world tick (`fixed=`) and the per-frame visual pass, and
@@ -210,6 +221,13 @@ names the costliest scene buckets on each side (`fb=`, `ub=`). `sim=` alone sums
 two populations that scale differently, and reading it as the cost of one world
 tick produced a claim that had to be withdrawn from 2.2.0's notes. The patches
 are timing only and load only when a diagnostics flag file is present.
+
+2.2.2 also removes repeated growth of the temporary list used while fire and
+heat values are modulated. A trace attributed 5.7% of parallel fixed-update work
+to that list's `AddWithResize`. Its maximum count is known exactly, so the pooled
+list reserves that many slots before the unchanged loop instead of growing in
+several steps. Status calculations, timing, iteration and callback order are
+unchanged.
 
 ## Why you drop
 
@@ -248,13 +266,25 @@ traced to an Extended Tech Tree beam rather than crew throughput.
 
 | Field | Vanilla | With Huge Crews | This mod |
 |---|---|---|---|
-| JobAssignmentsPerSecond | 120 | 1000 | 90 |
+| JobAssignmentsPerSecond | 120 | 1000 | 120 |
 | LowPriorityJobAssignmentsPerSecond | 30 | 250 | 70 |
-| ResourceSearchesPerSecond | 120 | 1000 | 90 |
+| ResourceSearchesPerSecond | 120 | 1000 | 120 |
 | ManualTransferJobExpensiveCheckInterval | 1.0 | – | 0.5 |
 | SalvageJobExpensiveCheckInterval | 1.0 | – | 0.5 |
 | MaxCrewSearchIterations | 50 | – | 100 |
 | EqualPriorityJobDistanceThreshold | 10 | – | 20 |
+
+Version 2.2.2 put the two main queues back to vanilla, because 2.2.1's per-bucket diagnostics finally
+measured what they cost. Across ten host samples of a two-player, 116,000-part session the `Jobs`
+bucket held flat at **0.2–0.3 ms per frame out of a 3.0–4.6 ms fixed update — about 6%**, and it was
+never the top bucket; `Statuses` alone ran 0.7–1.1 ms. These fields are per-second caps on assignment
+attempts, so their cost scales with them linearly, which means the old value of 90 was buying roughly
+0.07 ms per frame — under 2% of a tick — in exchange for slower crew response on every job. That is
+not worth a deviation from vanilla. The section still exists, because writing the fields at all is
+what keeps Huge Crews' 8× inflation from multiplying that 6%; it simply no longer pretends crew AI is
+where a late-game fleet's time goes. `LowPriorityJobAssignmentsPerSecond` stays at 70: it is a
+responsiveness fix for marked mining and salvage pickup, not an optimization, and its cost is inside
+the same measured 6%.
 
 The two `*ExpensiveCheckInterval` fields are **rates, not intervals**, whatever the name says. The per-frame check
 budget accumulates as `jobCount * dt * <field>` — multiplied, not divided — so the number is checks
@@ -461,7 +491,7 @@ Every value in `mod.rules` carries its vanilla number in a comment. Restart the 
 
 | Symptom | Adjustment |
 |---|---|
-| Crew AI consumes too much CPU | Lower `JobAssignmentsPerSecond` / `ResourceSearchesPerSecond` below 90 cautiously |
+| Crew AI consumes too much CPU | Lower `JobAssignmentsPerSecond` / `ResourceSearchesPerSecond` below 120 cautiously, though measurement says this buys little |
 | Marked mining or salvage pickup is slow | Raise `LowPriorityJobAssignmentsPerSecond` above 70 cautiously; this increases crew-search work |
 | Only some Q-beam-mined resources have no pickup marker | Use Mods QoL 1.4.7 or later; assignment rates cannot replace the skipped salvage callback |
 | Transfer or salvage orders feel sluggish | Raise the corresponding expensive-check rate above 0.5 cautiously |
