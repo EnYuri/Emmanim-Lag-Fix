@@ -137,7 +137,8 @@ internal static class SingleplayerMemoryDiagnosticsPatch
             $"phaseMs={phases} {simPhases} {breakdown.Full} " +
             $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
-            $"fpinl={FastParallelNestedDispatchPatch.Counters()}");
+            $"fpinl={FastParallelNestedDispatchPatch.Counters()} " +
+            $"fpbs={FastParallelBatchSize.Counters()}");
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;

@@ -1,5 +1,69 @@
 # Changelog
 
+## 2.2.7
+
+- Give a **top-level** `FastParallel.For` a finer batch size than vanilla's
+  automatic one. `FastParallel` *claims* batches rather than pre-assigning them —
+  `RunParallelTask` is
+  `while ((num = Interlocked.Increment(ref task.CurBatch) - 1) < task.BatchCount)` —
+  so a pass finishes when its most expensive **single batch** finishes, not at the
+  average. Vanilla's sizing is
+  `batchSize ?? Mathx.Max(num / (ThreadCount * 8), 1)`, i.e. eight batches per
+  worker, which is a sound default for uniform work. A fixed-update bucket is the
+  opposite of uniform: `SimRoot.ParallelFixedUpdate` dispatches one entry per
+  ship, and a 10,000-part megaship's `Jobs` or `Statuses` work is orders of
+  magnitude above a twenty-part fighter's. At the 2026-09-14 session's 607 ships
+  and 2.2.6's seven workers vanilla batches **10 ships together**, so the
+  megaship arrives bundled with nine others and the seven remaining participants
+  idle through the difference. Targeting 32 batches per participant asks for 2
+  instead, bounding the tail at about a fifth of a vanilla batch.
+  The cost is one extra `Interlocked.Increment` on one shared counter per added
+  batch — roughly 240 per bucket pass at that shape, about 28,000 per second
+  across the ten parallel buckets at 11.5 world ticks per second, single-digit
+  milliseconds of one core against a tail measured in milliseconds *per tick*.
+  Conservative in four ways: an explicit caller-supplied `batchSize` is never
+  overridden, a range vanilla already batches at 1 is left alone (1 is the floor),
+  a **nested** dispatch is left alone because the outer one has already spread the
+  work, and the refinement only ever *lowers* the batch size so it can never
+  coarsen a pass vanilla had balanced. Cannot change results: batch partitioning
+  and thread assignment are already arbitrary in vanilla — that session's peers
+  ran eleven workers against three with matching integrity hashes throughout — and
+  the body is invoked over the identical half-open range either way.
+  This shares the existing `FastParallel.For` prefix rather than adding a second
+  one, because a prefix returning false suppresses every prefix after it and two
+  would make the refinement depend on Harmony's undeclared ordering; `batchSize` is
+  taken by `ref`, which the smoke test asserts. Reported as
+  `fpbs=<refined>/<unchanged>@<batches per participant>`, and
+  `fastparallel-batches.txt` overrides the target with `0` restoring vanilla.
+
+**Considered and rejected in this version**, recorded because the reasoning is the
+useful part. Removing `JobManager`'s `TempList<CrewSoul>` /
+`TempHashSet<CrewSoul>` traffic was planned alongside the above and dropped after
+reading the source:
+
+- The *clear cost* half was based on a wrong premise. `_Insert` trims `crew`,
+  `priorities` and `crewHash` at `desiredCrew` on every insertion, and
+  `desiredCrew` is small — `_partCrew.Rules.Crew` for a `PartCrewJob`,
+  `_headedToSink.Count + ceil(needed / MaxPickUp)` for a `ResourceTransferJob`. The
+  grown-capacity `Clear()` pathology seen on `TempHashSet<SourceInfo>` does not
+  arise here.
+- The *pool contention* half is real but not worth its implementation risk.
+  `FixedSizePool` is a CAS stack over one shared `_nextAvailableIndex`, so about
+  42,000 `Alloc`/`Recycle` pairs per second across worker threads is genuine
+  cache-line ping-pong — but at roughly 1.2% of one core. Against that, the
+  collections allocated in `AsyncGetCrewForNextJob` are stored into `_foundCrews`
+  and outlive the parallel region, disposed on the main thread in
+  `AssignFoundCrewToJobs` via `EnqueueDeterministic`; replacing them means
+  rewriting both methods and their cross-thread handoff. The obvious shortcut —
+  making the pool itself per-thread — is closed: `ObjectPool<T>` is constrained to
+  reference types, so every closed generic shares one canonical body, the exact
+  trap that made the 2.1.0 proxy sentinel inert.
+
+Validated on Cosmoteer 0.30.4c by the smoke test. Unmeasured in a live
+multiplayer session; the in-game check is `fpbs=` showing a non-zero refined count
+and the widened `fb=[…]` list's parallel buckets falling. Every multiplayer
+participant must install 2.2.7 and restart the game.
+
 ## 2.2.6
 
 - Size the `FastParallel` pool by **logical processors** instead of physical

@@ -1335,3 +1335,103 @@ remaining plan inverts. Read the new `fb=[…]` before doing anything else.
 
 Also check: `fpinl=` inlined-vs-vanilla counts, `fppark=` wakes per second (was ~5,400/s),
 `idelay=`, `cores=` on both peers, and whether remote `delay=%` leaves the 69-92% band.
+
+## 2026-09-14 (continued) — 2.2.7: batch granularity, and one change not made
+
+### The pool claims batches, which is why granularity matters
+
+`RunParallelTask` is the whole argument:
+
+```csharp
+while ((num = Interlocked.Increment(ref task.CurBatch) - 1) < task.BatchCount)
+{
+    if (num == task.BatchCount - 1) RemoveFromLive(task);
+    RunParallelBatch(task, num, profilerJobs);
+}
+```
+
+Every participant takes the next unclaimed batch, so a pass finishes when its most
+expensive **single batch** finishes. Vanilla's sizing is
+
+```csharp
+int num2 = ((ThreadCount <= 0) ? num : (batchSize ?? Mathx.Max(num / (ThreadCount * 8), 1)));
+int num3 = (num + num2 - 1) / num2;
+if (num3 == 1) { body(fromInclusive, toExclusive, data); return; }
+```
+
+— eight batches per worker. Sound for uniform work; a fixed-update bucket is one entry
+per ship, and this session's 607 ships span two orders of magnitude in per-ship cost.
+At 2.2.6's seven workers that is a batch of 10 ships, so a megaship arrives bundled
+with nine others while the seven other participants idle out the difference.
+
+2.2.7 targets 32 batches per participant — **participant, not worker**: `For` runs
+`RunParallelBatch(task, 0, …)` then `RunParallelTask(…)` on the calling thread before
+`_WaitUntilFinished()`, so the dispatcher is a full participant. 607 / (8 × 32) = 2.
+
+Cost accounting: ~240 extra `Interlocked.Increment`s per bucket pass at that shape,
+×10 parallel buckets × 11.5 ticks/s ≈ 28,000/s, single-digit milliseconds of one core,
+against a tail measured in milliseconds per tick.
+
+Four guards, each one a way this could have gone wrong: an explicit caller `batchSize`
+is never overridden; a range vanilla already batches at 1 is skipped (1 is the floor);
+a **nested** dispatch is skipped, because the outer one has already spread the work and
+2.2.5 already removes the small nested ones; and the value is only ever lowered, so a
+pass vanilla had balanced can never be coarsened.
+
+It shares the existing `FastParallel.For` prefix rather than adding a second one.
+**A Harmony prefix returning false suppresses every prefix after it**, so a second
+prefix on a method where one can skip would depend on undeclared ordering. `batchSize`
+is taken by `ref`; the smoke test asserts that, because by value the write is silently
+invisible to the original method and the patch would be inert with no symptom.
+
+Top-level is detected as `FastParallel.IsRunning && s_liveTasks.Count == 0`, the same
+signal the inline path uses inverted. One known imprecision, harmless: `RemoveFromLive`
+runs as soon as the last batch is *claimed*, while that batch's body is still running,
+so a nested dispatch from the final batch reads as top-level and gets finer sizing. A
+sizing choice either way, never a correctness one.
+
+### The change that was planned and not made
+
+`JobManager`'s `TempList<CrewSoul>` / `TempHashSet<CrewSoul>` traffic was approved
+alongside the above on the stated basis that it was low risk. Reading the source before
+writing code changed that, so it was dropped and the user was told before implementation
+began — the approval's premise had moved.
+
+**Clear cost: wrong premise.** `_Insert` trims on every insertion (`JobManager.cs:944`):
+
+```csharp
+if (priorities.Count > desiredCrew)
+{
+    crewHash.Remove(crew[crew.Count - 1]);
+    crew.RemoveAt(desiredCrew);
+    priorities.RemoveAt(desiredCrew);
+}
+```
+
+and `desiredCrew` is small — `_partCrew.Rules.Crew` for `PartCrewJob`,
+`_headedToSink.Count + ceil(needed / MaxPickUp)` for `ResourceTransferJob`. So the
+grown-capacity `Clear()` pathology measured on `TempHashSet<SourceInfo>` does not
+generalise to every pooled temp collection. Check for a trim first.
+
+**Pool contention: real, and not worth it.** `FixedSizePool` is a CAS stack over one
+shared `_nextAvailableIndex`, so ~42,000 `Alloc`/`Recycle` pairs per second across
+workers is genuine cache-line ping-pong — at roughly 1.2% of one core. Against that,
+the collections allocated in `AsyncGetCrewForNextJob` are written into `_foundCrews`,
+outlive the parallel region, and are disposed on the main thread in
+`AssignFoundCrewToJobs` reached via `EnqueueDeterministic`; substituting persistent
+buffers means rewriting both methods and their cross-thread handoff, and the disposal
+site would return our buffers to the pool. `GetCrewForJob`'s own locals
+(`TempList<int> priorities`, `TempList<Ship>`, `TempList<(CrewSoul, float)> sorted`,
+`TempHashSet<int>`) are the larger share of the traffic and are genuinely call-scoped,
+but the obvious shortcut of making the pool per-thread is closed: `ObjectPool<T>` is
+`where T : class`, so every closed generic shares one canonical body — the 2.1.0 proxy
+sentinel trap. Patching that body would reach every pooled type in the game.
+
+1.2% for a cross-thread rewrite is a bad trade; noted here so it is not re-derived.
+
+### What the next session checks
+
+Unchanged from 2.2.6's list, plus `fpbs=<refined>/<unchanged>@32`. A refined count of
+zero means the top-level test never fired and the patch is inert. If it fires and the
+parallel buckets in `fb=[…]` do not fall, batch imbalance was not the constraint and
+the serial 47 buckets are the remaining target.

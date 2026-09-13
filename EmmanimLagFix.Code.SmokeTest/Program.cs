@@ -2450,6 +2450,93 @@ foreach (var allocOverload in AccessTools
             "A full-int32 range was reported inlinable, so the length test overflowed.");
     }
 
+    // The prefix now also refines the batch size of a top-level dispatch, and it
+    // must take batchSize by ref or the write is invisible to the original method.
+    var forPrefix = AccessTools.DeclaredMethod(nestedPatchType, "Prefix")
+        ?? throw new MissingMethodException(nestedPatchType.FullName, "Prefix");
+    var batchSizeParam = forPrefix.GetParameters()
+        .SingleOrDefault(parameter => parameter.Name == "batchSize")
+        ?? throw new InvalidOperationException(
+            "The FastParallel.For prefix no longer names a batchSize parameter, so Harmony "
+            + "cannot bind it and the batch-size refinement is silently inert.");
+    if (!batchSizeParam.ParameterType.IsByRef)
+    {
+        throw new InvalidOperationException(
+            "The prefix's batchSize parameter is by value; a Harmony prefix only changes an "
+            + "argument the original method sees when it takes it by ref.");
+    }
+
+    // Batch sizing. FastParallel claims batches rather than pre-assigning them
+    // (RunParallelTask: Interlocked.Increment(ref task.CurBatch)), so a pass
+    // finishes when its most expensive batch does. Vanilla's eight-batches-per-
+    // worker default bundles a megaship with nine fighters; the refinement only
+    // ever lowers the batch size, and never touches a caller's explicit one.
+    var batchType = typeof(EntryPoint).Assembly
+        .GetType("EmmanimLagFix.Code.FastParallelBatchSize", throwOnError: true)!;
+    var batchesPerParticipant =
+        (int)AccessTools.Field(batchType, "BatchesPerParticipant").GetValue(null)!;
+    if (batchesPerParticipant <= 8)
+    {
+        throw new InvalidOperationException(
+            $"BatchesPerParticipant is {batchesPerParticipant}, at or below vanilla's implied 8: "
+            + "the refinement can then only ever coarsen or do nothing, which is not its point. "
+            + (AccessTools.PropertyGetter(batchType, "FailureReason").Invoke(null, null) as string
+               ?? "no reason recorded")
+            + ".");
+    }
+
+    var refine = AccessTools.DeclaredMethod(batchType, "Refine")
+        ?? throw new MissingMethodException(batchType.FullName, "Refine");
+    int? Refine(int from, int to, bool copy, int? batch, int threads, int perParticipant) =>
+        (int?)refine.Invoke(
+            null, new object?[] { from, to, copy, batch, threads, perParticipant });
+
+    // Vanilla's own formula, restated so the expectations below are not circular.
+    static int VanillaBatch(int count, int threads) => Math.Max(count / (threads * 8), 1);
+
+    foreach (var (count, threads, per, expected, why) in new (int, int, int, int?, string)[]
+    {
+        // 607 ships on the 2026-09-14 client at 2.2.6's seven workers: vanilla
+        // batches 10, eight participants x 32 batches asks for 2.
+        (607, 7, 32, 2, "the measured session's shape must actually be refined"),
+        // Vanilla is already at 1 below ThreadCount * 16, and 1 is the floor.
+        (16, 7, 32, null, "a range vanilla already batches at 1 has nothing finer to ask for"),
+        // A coarser target than vanilla's must be ignored, not installed.
+        (607, 7, 2, null, "the refinement must only ever lower the batch size"),
+        (607, 7, 0, null, "a zero target disables the refinement"),
+        (607, 0, 32, null, "a pool with no workers runs the range inline in vanilla"),
+    })
+    {
+        var got = Refine(0, count, false, null, threads, per);
+        if (got != expected)
+        {
+            throw new InvalidOperationException(
+                $"Refine({count} items, {threads} workers, {per}/participant) should be "
+                + $"{(expected?.ToString() ?? "vanilla")}, got {(got?.ToString() ?? "vanilla")}: {why}.");
+        }
+        if (got.HasValue && got.Value >= VanillaBatch(count, threads))
+        {
+            throw new InvalidOperationException(
+                $"Refine({count}, {threads}) returned {got} which does not beat vanilla's "
+                + $"{VanillaBatch(count, threads)}.");
+        }
+    }
+
+    if (Refine(0, 607, false, 4, 7, 32) != null || Refine(0, 607, true, null, 7, 32) != null
+        || Refine(0, 0, false, null, 7, 32) != null)
+    {
+        throw new InvalidOperationException(
+            "An explicit batchSize, copyStackData, or an empty range must all be left to vanilla, "
+            + "exactly as the inline path leaves them.");
+    }
+
+    // Overflow guard, same shape as the inline one: a full-int32 range must not wrap.
+    if (Refine(int.MinValue, int.MaxValue, false, null, 7, 32) is { } wrapped && wrapped <= 0)
+    {
+        throw new InvalidOperationException(
+            $"A full-int32 range produced a batch size of {wrapped}, so the length test overflowed.");
+    }
+
     // Pool size. Vanilla sizes the pool at physical cores minus one, which leaves
     // half the hardware threads of an SMT machine unreachable; that was the right
     // call while idle workers spun forever, and stopped being right in 2.1.3 when
@@ -3005,4 +3092,4 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, inlined small nested FastParallel dispatches, a logical-processor-sized worker pool, urgent input-tick-delay HostUpdates, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, inlined small nested FastParallel dispatches, finer top-level batch sizing, a logical-processor-sized worker pool, urgent input-tick-delay HostUpdates, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");

@@ -59,6 +59,11 @@ namespace EmmanimLagFix.Code;
 /// <c>num3 == 1</c> branch. That branch is also why raw exception propagation is
 /// correct here rather than <c>AggregateException</c>: vanilla's inline path
 /// propagates raw as well.
+///
+/// The same prefix also carries the top-level batch-size refinement described in
+/// <see cref="FastParallelBatchSize"/>. The two share one prefix on purpose: a
+/// prefix returning false suppresses every prefix after it, so two separate
+/// prefixes would make the refinement depend on Harmony's undeclared ordering.
 /// </summary>
 [HarmonyPatch]
 internal static class FastParallelNestedDispatchPatch
@@ -165,23 +170,68 @@ internal static class FastParallelNestedDispatchPatch
             })
         ?? throw new MissingMethodException(typeof(FastParallel).FullName, nameof(FastParallel.For));
 
+    /// <summary>
+    /// One prefix for both levers, so Harmony never has to order two of them: a
+    /// prefix returning false suppresses every prefix after it, which would make
+    /// the batch-size refinement depend on undeclared patch order.
+    ///
+    /// <paramref name="batchSize"/> is taken by <c>ref</c> because a Harmony
+    /// prefix's argument writes are visible to the original method.
+    /// </summary>
     private static bool Prefix(
         int fromInclusive,
         int toExclusive,
         FastParallelAction body,
         object? data,
         bool copyStackData,
-        int? batchSize)
+        ref int? batchSize)
     {
-        if (!ShouldRunInline(fromInclusive, toExclusive, body, copyStackData, batchSize))
+        if (ShouldRunInline(fromInclusive, toExclusive, body, copyStackData, batchSize))
         {
-            Interlocked.Increment(ref VanillaCount);
-            return true;
+            Interlocked.Increment(ref InlinedCount);
+            body(fromInclusive, toExclusive, data);
+            return false;
         }
 
-        Interlocked.Increment(ref InlinedCount);
-        body(fromInclusive, toExclusive, data);
-        return false;
+        Interlocked.Increment(ref VanillaCount);
+
+        // A nested dispatch is left on vanilla's sizing: the outer dispatch has
+        // already spread this work across the pool, so refining a nested range
+        // only adds claim-counter traffic. A zero live count is what identifies
+        // the outer dispatch, exactly as the inline decision uses it.
+        if (IsTopLevelDispatch())
+        {
+            var refined = FastParallelBatchSize.RefineLive(
+                fromInclusive, toExclusive, copyStackData, batchSize);
+            if (refined.HasValue)
+            {
+                batchSize = refined;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// True when no task still has unclaimed batches, i.e. this call is not
+    /// running inside another one's body.
+    ///
+    /// Note the one imprecision, which is harmless: <c>RunParallelTask</c> calls
+    /// <c>RemoveFromLive</c> as soon as the <i>last</i> batch is claimed, while
+    /// that batch's body is still running. A nested dispatch from that final
+    /// batch therefore reads as top-level and gets the finer sizing. It is a
+    /// sizing choice either way, never a correctness one.
+    /// </summary>
+    private static bool IsTopLevelDispatch()
+    {
+        try
+        {
+            return FastParallel.IsRunning && FastParallel.s_liveTasks.Count == 0;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private static bool ShouldRunInline(
