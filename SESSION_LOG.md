@@ -1177,3 +1177,86 @@ many are visible, and advising the player to keep fewer ships on screen is meani
 save the count swings 6 → 236 and `parts=` 14,174 → 53,829 within minutes as the camera moves
 through a sector holding 5,411 stasis spawners. Normal for a populated system, and not on its own
 evidence of anything.
+
+## 2026-09-14 — two-player session: one saturated thread, and a lockstep gate with no slack
+
+Log: `Logs/log 2026-09-13 23_47_17.txt`. Host PID 5072, `nayuri.emmanim_lag_fix` 2.2.4,
+`znayuri.mods_qol` 1.78.12, Cosmoteer 0.30.4c, `cosmoteer.huge_crews` and `huge_ships` enabled.
+Peers: Nayuri (host, 16 logical processors), MIMMIMME (client, 8).
+
+### Per-thread OS CPU, 12 s window, host
+
+```
+main thread 10492      71.3% of one core
+audio/render 452       19.1%
+11 pool workers        1-7% each   (~0.45 core total)
+-------------------------------------------------
+1.48 of 16 cores
+```
+
+Total CPU is not the constraint; one thread is. The client's own line reports `cpu=1.5`-`1.9` of 8,
+the same shape. This is why the world ran at 8.6-11.5 of 30 ticks/s while neither machine was busy.
+
+### Per-tick costs (ms/frame x frames / passes)
+
+Peacetime, 00:01 sample:
+
+| | host | client |
+| --- | ---: | ---: |
+| whole tick | 8.25 | 22.25 |
+| `Resources` | 1.95 (24%) | 5.84 (26%) |
+| `Statuses` | 0.59 | 1.59 |
+| unnamed remainder | 2.95 (36%) | 14.8 (67%) |
+
+Combat, 00:05 sample: client `Resources` **5.87** — unchanged from peacetime, so that cost is not
+engagement-driven. `Statuses` rose 1.59 -> 8.28 and the unnamed remainder 14.8 -> 30.9.
+
+Late session, 01:11, 607 ships / 98,187 parts: `Jobs` became the **top** bucket on both peers —
+host 5.8 ms/tick of 27.0, client 15.05 of 63.3 (24%), with `Statuses` 14.16. This refutes the
+2026-09-13 "`Jobs` is ~6% and never the top bucket"; the ranking is scale-dependent and must be
+re-measured per session. Corrected in `CLAUDE.md` and `Mod/README.md`.
+
+### Only 10 of 57 fixed-update buckets are parallel
+
+`Cosmoteer.Simulation.SimRoot..ctor` registers `ParallelFixedUpdate` for buckets
+-25, -24, -17, -15, -14, -13, -10, -6, 6, 16 — `ConvertResourcesEarly`, `ConvertResources`,
+`Resources`, `Jobs`, `CrewPreUpdate`, `ShipCrew`, `SetThrusterActivations`, `FireWeaponsAsyncStep`,
+`Statuses`, `AimWeapons`. Everything else takes `SceneRoot.FixedUpdateForBucket`'s plain `for` loop
+on the main thread, including all nine bullet/shield/weapon buckets. So `fb=[...]` only ever names
+parallel buckets, and the unnamed 36-67% is serial work on the thread that is already full.
+`SceneUpdateBreakdownPatch.TopBuckets` is 5 and peers relay 1; widening it is the next measurement.
+
+### The gate: `q=0` is zero slack, not a healthy queue
+
+`BaseMPManager.Update` stamps `_curInputTick + GetInputTickDelay()`.
+`MPHostManager.CalculateInputTickDelay` is
+`clamp(ceil(latency * InputTickDelayLatencyFactor * InputTicksPerSecond), Min, Max)`;
+`cosmoteer.rules` gives factor 1, 30 Hz, min 2, max 60, and a full sweep of local mods and
+`workshop/content/799600` found no override. At `lat=397ms` that is D = 12-13, matching the host's
+own `q=13 avg=14.4`.
+
+`AdvanceNetworkTime` -> `IsReadyForTick(tick)` requires every player to have queued that exact tick
+and otherwise sets `_realDeltaTime = Time.Zero`, discarding the accumulated credit rather than
+banking it. Solving the two-peer gate gives `D >= 1 + R*L`, i.e. the gate permits
+`R = (D-1)/L = 13/0.397 ~ 33` ticks/s — **latency was not the cap**; the client's 11.5 ticks/s of
+frame capacity was. But D carries no term for peer frame-time jitter, so the remote sat at
+`q=0 avg=0.0` for the whole session while holding the gate on 69% -> 92.3% of host frames. Every
+client hitch is therefore an immediate host stall: that is the stutter.
+
+Do not remove the `_realDeltaTime` zeroing to let a peer catch up — that is exactly 2.2.0's
+multi-tick regression, measured and reverted in 2.2.2.
+
+### Shipped as 2.2.5
+
+1. Inline a small nested `FastParallel.For`. `For` skips the dispatch only at one batch, and
+   `batchSize = max(n/(ThreadCount*8), 1)` is 1 below `n = ThreadCount*16`, so any ship with two
+   sinks paid `AddToLive`, a kernel wake per parked worker and a nested `SpinOnce(-1)` wait — about
+   14,000 dispatches/s from `ResourceManager.FixedUpdate` alone at 607 ships. `fppark` showed 27.0M
+   wakes over 84 minutes (~5,400/s). Ranges over `ThreadCount * 8` still dispatch. `fpinl=`.
+2. Send a `HostUpdate` at once on a **risen** `InputTickDelay`. The 6 Hz throttle added in an
+   earlier version delayed the client's adoption of D by up to 167 ms, and with zero slack that is
+   a stall, not a late report. A fall still waits for the schedule. `idelay=`.
+
+Both pass the smoke test on 0.30.4c and are **unmeasured live** — the session ended before a
+follow-up capture. Next session: compare `fpinl=` inlined-vs-vanilla counts, `fppark=` wake rate
+per second, `idelay=`, and whether remote `delay=%` falls from the 69-92% band.

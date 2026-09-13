@@ -397,6 +397,41 @@ if (!hostOnTickInfo.Prefixes.Any(patch => patch.owner == smokeId))
 {
     throw new InvalidOperationException("Expected multiplayer HostUpdate throttle prefix was not installed.");
 }
+
+// A raised input-tick delay is the lead by which the client stamps its own
+// outgoing inputs, and IsReadyForTick stalls the world on an under-stamped
+// lead, so it must not wait up to 167 ms for the next scheduled HostUpdate.
+// The postfix is what records what actually went out; Harmony runs a postfix
+// even when a prefix skipped the original, so its absence would latch the
+// last-sent value and send on every tick forever.
+if (!hostOnTickInfo.Postfixes.Any(patch => patch.owner == smokeId))
+{
+    throw new InvalidOperationException(
+        "Expected multiplayer HostUpdate delay-tracking postfix was not installed.");
+}
+var isUrgentDelayChange = hostUpdatePatchType.GetMethod(
+    "IsUrgentDelayChange",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingMethodException(hostUpdatePatchType.FullName, "IsUrgentDelayChange");
+var unknownDelay = (int)(hostUpdatePatchType.GetField(
+    "UnknownDelay",
+    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+    ?? throw new MissingFieldException(hostUpdatePatchType.FullName, "UnknownDelay"))
+    .GetValue(null)!;
+foreach (var (delay, lastSent, expected, why) in new[]
+{
+    (2, unknownDelay, true, "the first delay of a session has never been sent"),
+    (13, 12, true, "a rise leaves peers under-stamping their lead"),
+    (12, 12, false, "an unchanged delay is what the 6 Hz schedule is for"),
+    (11, 12, false, "a fall only costs peers a little surplus lead"),
+})
+{
+    if ((bool)isUrgentDelayChange.Invoke(null, new object[] { delay, lastSent })! != expected)
+    {
+        throw new InvalidOperationException(
+            $"Urgent-HostUpdate decision for delay {delay} after {lastSent} should be {expected}: {why}.");
+    }
+}
 var forwardInputTickInfo = Harmony.GetPatchInfo(forwardInputTickTarget)
     ?? throw new InvalidOperationException("Harmony did not patch MPHostManager.ForwardInputTick.");
 if (!forwardInputTickInfo.Prefixes.Any(patch => patch.owner == smokeId))
@@ -2281,6 +2316,77 @@ foreach (var allocOverload in AccessTools
             "AddToLive's wake never observed a parked worker, so a dispatch would leave the pool "
             + "asleep until the backstop timeout.");
     }
+
+    // Nested dispatch. Ten fixed-update buckets already hand every worker a batch
+    // of ships, and the bucket members dispatch again - ResourceManager.FixedUpdate
+    // alone twice per ship per world tick. A small nested range now runs inline, so
+    // prove the prefix landed on the seven-argument For and that the boundary is
+    // exactly ThreadCount * 8, since an over-wide limit would serialize a
+    // megaship's genuinely large sink-job range.
+    var forTarget = AccessTools.DeclaredMethod(
+        fastParallelType,
+        "For",
+        new[]
+        {
+            typeof(int), typeof(int),
+            halflingAssembly.GetType("Halfling.Performance.FastParallelAction", throwOnError: true)!,
+            typeof(object), typeof(bool), typeof(int?), typeof(string),
+        })
+        ?? throw new MissingMethodException(fastParallelType.FullName, "For(int, int, FastParallelAction, object, bool, int?, string)");
+    if (forTarget.IsGenericMethod || forTarget.DeclaringType!.IsGenericType)
+    {
+        throw new InvalidOperationException(
+            "FastParallel.For became generic; a shared canonical body cannot be patched per "
+            + "instantiation, the defect that made the 2.1.0 proxy sentinel inert.");
+    }
+
+    var nestedPatchType = typeof(EntryPoint).Assembly
+        .GetType("EmmanimLagFix.Code.FastParallelNestedDispatchPatch", throwOnError: true)!;
+    var smallRangeLimit = (int)AccessTools.Field(nestedPatchType, "SmallRangeLimit").GetValue(null)!;
+    var expectedLimit = (int)AccessTools.PropertyGetter(fastParallelType, "ThreadCount")
+        .Invoke(null, null)! * 8;
+    if (smallRangeLimit != expectedLimit || smallRangeLimit <= 0)
+    {
+        throw new InvalidOperationException(
+            $"Expected a nested-inline limit of {expectedLimit}, got {smallRangeLimit}: "
+            + (AccessTools.Field(nestedPatchType, "FailureReason").GetValue(null) as string
+               ?? "no reason recorded")
+            + ".");
+    }
+    if (Harmony.GetPatchInfo(forTarget)?.Prefixes.Count(patch => patch.owner == smokeId) != 1)
+    {
+        throw new InvalidOperationException(
+            "Expected exactly one Emmanim nested-dispatch prefix on FastParallel.For.");
+    }
+
+    var isInlinableRange = AccessTools.DeclaredMethod(nestedPatchType, "IsInlinableRange")
+        ?? throw new MissingMethodException(nestedPatchType.FullName, "IsInlinableRange");
+    bool Inlinable(int from, int to, bool copyStackData, int? batchSize) =>
+        (bool)isInlinableRange.Invoke(null, new object?[] { from, to, copyStackData, batchSize })!;
+    foreach (var (from, to, copy, batch, expected, why) in new (int, int, bool, int?, bool, string)[]
+    {
+        (0, smallRangeLimit, false, null, true, "a range exactly at the limit is inlinable"),
+        (0, smallRangeLimit + 1, false, null, false, "a range past the limit must keep its dispatch"),
+        (0, 4, false, 1, false, "an explicit batch size is the caller's partitioning"),
+        (0, 4, true, null, false, "copyStackData captures the dispatcher's stack for other threads"),
+        (0, 0, false, null, false, "vanilla owns the empty-range early-out"),
+        (7, 7 + smallRangeLimit, false, null, true, "the limit is a length, not an upper bound"),
+    })
+    {
+        if (Inlinable(from, to, copy, batch) != expected)
+        {
+            throw new InvalidOperationException(
+                $"Nested-inline decision for [{from}, {to}) copyStackData={copy} batchSize={batch} "
+                + $"should be {expected}: {why}.");
+        }
+    }
+
+    // Overflow guard: the length test must not wrap for a caller passing extremes.
+    if (Inlinable(int.MinValue, int.MaxValue, false, null))
+    {
+        throw new InvalidOperationException(
+            "A full-int32 range was reported inlinable, so the length test overflowed.");
+    }
 }
 
 var shipRendererType = gameAssembly.GetType("Cosmoteer.Ships.Rendering.ShipRenderer", throwOnError: true)!;
@@ -2788,4 +2894,4 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, inlined small nested FastParallel dispatches, urgent input-tick-delay HostUpdates, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");

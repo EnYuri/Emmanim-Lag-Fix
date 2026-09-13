@@ -293,7 +293,12 @@ traced to an Extended Tech Tree beam rather than crew throughput.
 Version 2.2.2 put the two main queues back to vanilla, because 2.2.1's per-bucket diagnostics finally
 measured what they cost. Across ten host samples of a two-player, 116,000-part session the `Jobs`
 bucket held flat at **0.2–0.3 ms per frame out of a 3.0–4.6 ms fixed update — about 6%**, and it was
-never the top bucket; `Statuses` alone ran 0.7–1.1 ms. These fields are per-second caps on assignment
+never the top bucket; `Statuses` alone ran 0.7–1.1 ms. **That last clause no longer holds at
+larger scale** — a 2026-09-14 two-player session at 607 ships / 98,187 parts measured `Jobs` as the
+*largest* fixed-update bucket on both peers, 5.8 ms per world tick on the host and 15.05 ms on the
+client, i.e. 24% of a 63.3 ms tick. The conclusion below is unchanged, because these fields cap
+assignment *attempts* rather than the work each ship's queue does, but do not quote the 6% as a
+ceiling. These fields are per-second caps on assignment
 attempts, so their cost scales with them linearly, which means the old value of 90 was buying roughly
 0.07 ms per frame — under 2% of a tick — in exchange for slower crew response on every job. That is
 not worth a deviation from vanilla. The section still exists, because writing the fields at all is

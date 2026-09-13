@@ -369,6 +369,8 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"{breakdown.Full} focus=[{breakdown.Focused}] " +
             $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} pickups={pickups} tickcap={NetworkTimeCatchUpPatch.MaxTicksPerFrame}/{raised} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
+            $"fpinl={FastParallelNestedDispatchPatch.Counters()} " +
+            $"idelay={MultiplayerHostUpdateThrottlePatch.UrgentSends} " +
             $"players={manager._playerInfos.Count} " +
             $"inputQueued={queuedInputTicks} inputMax={maximumPlayerQueue} outgoingInputs={manager._outgoingInputs.Count} " +
             $"hashes={hostHashes}/{ourHashes}/{theirHashes} connectionQueued={connectionReceiveQueue} " +

@@ -1,5 +1,54 @@
 # Changelog
 
+## 2.2.5
+
+- Run a small **nested** `FastParallel.For` on the calling thread instead of
+  dispatching it. Ten of Cosmoteer's fifty-seven fixed-update buckets are
+  parallel, and each hands the pool one batch of ships; the bucket members then
+  dispatch again, `ResourceManager.FixedUpdate` alone twice per ship per world
+  tick. Vanilla only skips the dispatch when the range collapses to one batch,
+  and its automatic batch size is 1 below `ThreadCount * 16`, so any ship with
+  two or more sinks pays `AddToLive` contention, a kernel wake per parked
+  worker, and a nested unbounded `_WaitUntilFinished` spin on a thread already
+  running an outer batch. A 2026-09-14 two-player session measured 607 ships at
+  11.5 world ticks/s — about 14,000 such dispatches per second from that one
+  manager — against 27.0 million park wakes over 84 minutes. Those inner
+  dispatches buy no parallelism, because the outer dispatch has already given
+  every worker work to claim. Ranges longer than `ThreadCount * 8` still
+  dispatch, so a megaship's genuinely large sink-job range keeps spreading.
+  Argument validation, the empty-range early-out, an explicit `batchSize`,
+  `copyStackData` and the profiler's `ProfilerTask` bookkeeping are all left to
+  vanilla, so the inline path is only reached where it is indistinguishable from
+  vanilla's own single-batch branch. `fpinl=<inlined>/<vanilla>@<limit>` reports
+  it; `fastparallel-inline.txt` overrides the limit and `0` disables the patch.
+- Send a HostUpdate at once when the input-tick delay has **risen**, instead of
+  waiting up to 167 ms for the 6 Hz schedule this mod introduced. The delay is
+  not merely a report: `MPClientManager.OnHostUpdateReceived` assigns it to the
+  client's own `_inputTickDelay`, and `BaseMPManager.Update` stamps outgoing
+  inputs at `_curInputTick + GetInputTickDelay()`. `IsReadyForTick` admits a
+  world tick only when every player has queued that exact tick number and
+  discards the accumulated `_realDeltaTime` when one has not, so a peer that has
+  not yet heard a raised delay under-stamps its lead and stalls the world rather
+  than merely reporting late. The same session had the remote peer at
+  `q=0 avg=0.0` throughout while holding the readiness gate on 92.3% of host
+  frames — no slack for that window to be absorbed by. A fall still waits for
+  the schedule, since surplus lead costs only a little input latency; that
+  asymmetry is what keeps the throttle worthwhile when the delay oscillates
+  between adjacent tick counts. The integrity hash, the expensive half of the
+  original 30 Hz cost, stays on its own 6 Hz schedule. `idelay=<n>` counts the
+  extra sends.
+- Corrected a standing claim rather than code: `Jobs` is no longer "~6% and
+  never the top bucket". At 607 ships / 98,187 parts it was the **largest**
+  fixed-update bucket on both peers — 5.8 ms per world tick on the host and
+  15.05 ms (24% of a 63.3 ms tick) on the client. A 12-second per-thread OS
+  sample on the host measured 1.48 of 16 cores busy, with the main thread at
+  71% of one core and the eleven pool workers at 1–7% each, so the binding
+  resource is one saturated thread and not total CPU.
+
+Validated on Cosmoteer 0.30.4c by the smoke test; both changes are unmeasured in
+a live multiplayer session. Every multiplayer participant must install 2.2.5 and
+restart the game.
+
 ## 2.2.4
 
 - Reduce planetary avoidance-tag allocations during resource hauling. All four

@@ -136,7 +136,8 @@ internal static class SingleplayerMemoryDiagnosticsPatch
             // near 100% means the wake handshake is not firing.
             $"phaseMs={phases} {simPhases} {breakdown.Full} " +
             $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} " +
-            $"fppark={FastParallelIdleParkPatch.Counters()}");
+            $"fppark={FastParallelIdleParkPatch.Counters()} " +
+            $"fpinl={FastParallelNestedDispatchPatch.Counters()}");
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;
