@@ -54,6 +54,17 @@ internal static class SingleplayerMemoryDiagnosticsPatch
         var allocatedDelta = allocated - Interlocked.Exchange(ref _lastAllocated, allocated);
 
         var sim = game.Sim;
+        long archivedSimBytes = 0;
+        int archivedSimCount;
+        // SaveSim writes this dictionary on the background FTL worker.
+        lock (game.SimArchive._archive)
+        {
+            archivedSimCount = game.SimArchive._archive.Count;
+            foreach (var payload in game.SimArchive._archive.Values)
+            {
+                archivedSimBytes += payload.LongLength;
+            }
+        }
         var liveParts = 0;
         var blueprintParts = 0;
         foreach (var ship in sim.Ships)
@@ -63,11 +74,24 @@ internal static class SingleplayerMemoryDiagnosticsPatch
         }
 
         var preloadedStasis = 0;
+        var serializedShips = 0;
+        long serializedShipBytes = 0;
         foreach (var spawner in sim.Stasis)
         {
             if (MemoryDiagnosticsCommon.IsSpawnerPreloaded(spawner))
             {
                 preloadedStasis++;
+            }
+
+            // Never wait for background serialization just to report memory.
+            // Completed payloads are retained world state, not preload graphs.
+            if (spawner is SimStasisManager.SerializedStasisShip serialized)
+            {
+                serializedShips++;
+                if (serialized._asyncShipDataTask.IsCompletedSuccessfully)
+                {
+                    serializedShipBytes += serialized.ShipData.LongLength;
+                }
             }
         }
 
@@ -89,6 +113,13 @@ internal static class SingleplayerMemoryDiagnosticsPatch
         var gen1Delta = gen1 - Interlocked.Exchange(ref _lastGen1, gen1);
         var gen2Delta = gen2 - Interlocked.Exchange(ref _lastGen2, gen2);
 
+        // These probes share the frame counter. Snapshot it first, then drain
+        // both simulation probes on every SP report, just as the MP reporter
+        // does. Otherwise a later sample includes the entire earlier session.
+        var phases = FramePhaseDiagnosticsPatch.Snapshot(elapsedSeconds);
+        var simPhases = SimPhaseDiagnosticsPatch.Snapshot();
+        var breakdown = SceneUpdateBreakdown.Take();
+
         Halfling.Logging.Logger.Log(
             "[EmmanimLagFix.SingleplayerMemoryDiagnostics] " +
             $"game={RuntimeHelpers.GetHashCode(game):X8} sim={RuntimeHelpers.GetHashCode(sim):X8} " +
@@ -99,9 +130,11 @@ internal static class SingleplayerMemoryDiagnosticsPatch
             $"allocatedMiBs={ToMiB(allocatedDelta) / elapsedSeconds:F1} gc={gen0Delta}/{gen1Delta}/{gen2Delta} " +
             $"ships={sim.Ships.Count} parts={liveParts}/{blueprintParts} " +
             $"stasis={sim.Stasis.Count}/{preloadedStasis} decals={decalPickers}/{decalItems} " +
+            $"serializedShips={serializedShips}/{ToMiB(serializedShipBytes):F1}MiB " +
+            $"archivedSims={archivedSimCount}/{ToMiB(archivedSimBytes):F1}MiB " +
             // parks/wakes/timeouts of the FastParallel idle park. A timeout share
             // near 100% means the wake handshake is not firing.
-            $"phaseMs={FramePhaseDiagnosticsPatch.Snapshot(elapsedSeconds)} " +
+            $"phaseMs={phases} {simPhases} {breakdown.Full} " +
             $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} " +
             $"fppark={FastParallelIdleParkPatch.Counters()}");
     }

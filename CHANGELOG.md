@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.2.4
+
+- Reduce planetary avoidance-tag allocations during resource hauling. All four
+  transfer-job avoidance call sites use concrete HashSet enumeration while
+  retaining tag comparers, geometry, buffers and danger-zone decisions. Live
+  singleplayer traces confirmed the replacement executes; observational
+  15-second samples fell from 466 MiB to 22 MiB of tag enumerators and from
+  116 to 43 GC starts. Workloads differed; this is not a controlled speedup.
+- Allocate manual-transfer expiry callback state only when actually queuing a
+  request change or finished-job removal. This internal job category also
+  includes trades and carried-resource transfers. Preserve check order, MP
+  confirmed/displayed values, deterministic queue timing and pooled-list
+  ownership. Vanilla comparison fixtures and queued-value tests pass; warmed
+  empty and unchanged-job fixtures allocate zero bytes. Live collection ran
+  without reported errors; the final expiry change was not separately traced.
+- Include archived-sector and completed serialized-ship payload sizes in
+  singleplayer minute diagnostics, and reset/report simulation bucket windows.
+  No unbounded memory leak has been established by this investigation.
+
+Validated on Cosmoteer 0.30.4c. Multiplayer validation of these changes remains
+pending. Every multiplayer participant must install 2.2.4 and restart the game.
+
 ## 2.2.3
 
 - Skip unused status-context population only for the exact built-in tile heat

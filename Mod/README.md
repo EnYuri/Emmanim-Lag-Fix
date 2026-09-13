@@ -237,6 +237,14 @@ costs, actual bucket-pass counts, and context skip/fallback counts once a minute
 in a separate hidden payload. Numerical smoke tests passed; multiplayer
 performance and desync validation remain to be measured.
 
+2.2.4 reduces planetary avoidance-tag allocations during resource hauling
+without changing danger-zone decisions. Trade/carried-resource job expiry now
+creates callback state only when scheduling an actual change or removal.
+Singleplayer minute logs include archived-sector and serialized-ship sizes,
+plus simulation bucket costs. Smoke tests and live singleplayer observations
+passed; no unbounded leak or controlled overall speedup has been established,
+and multiplayer validation remains pending.
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:

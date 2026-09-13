@@ -20,6 +20,9 @@ inert without it - see [Mods QoL support](#mods-qol-support).
 
 ## Current optimizations
 
+- Avoids repeated planetary tag-enumerator allocations in resource hauling,
+  preserving danger-zone decisions. Transfer expiry creates callback state
+  only when scheduling a change or removal. See [2.2.4 validation](CHANGELOG.md).
 - Reduces crew assignment, resource-search and expensive-check rates.
 - Consolidates loose vanilla resource nuggets into larger stacks.
 - Removes exterior-crew thruster effects.

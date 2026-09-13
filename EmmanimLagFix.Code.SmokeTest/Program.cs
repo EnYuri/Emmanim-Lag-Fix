@@ -238,6 +238,71 @@ var resyncTimingTargets = new[]
 const string smokeId = "nayuri.emmanim_lag_fix.smoke_test";
 var harmony = new Harmony(smokeId);
 harmony.PatchAll(typeof(EntryPoint).Assembly);
+ManualTransferExpiryTests.Run(gameAssembly, typeof(EntryPoint).Assembly);
+
+// Avoidance tag comparisons must retain HashSet.Overlaps receiver-comparer
+// semantics, including different comparers on the two input sets. The concrete
+// path must allocate nothing once JIT compilation has warmed up.
+{
+    var type = typeof(EntryPoint).Assembly.GetType("EmmanimLagFix.Code.DoodadAvoidanceTagAllocationPatch", true)!;
+    if (!(bool)AccessTools.Field(type, "Applied").GetValue(null)!)
+        throw new InvalidOperationException("Planet avoidance tag allocation patch did not apply.");
+    var target = (MethodBase)AccessTools.Method(type, "TargetMethod").Invoke(null, null)!;
+    if (Harmony.GetPatchInfo(target)?.Transpilers.All(p => p.owner != smokeId) != false)
+        throw new InvalidOperationException("Planet avoidance tag transpiler is missing.");
+    RuntimeHelpers.PrepareMethod(target.MethodHandle);
+    var overlaps = AccessTools.Method(type, "Overlaps").MakeGenericMethod(typeof(string))
+        .CreateDelegate<Func<HashSet<string>, IEnumerable<string>, bool>>();
+    var tagSets = new[]
+    {
+        new HashSet<string>(StringComparer.Ordinal),
+        new HashSet<string>(new[] { "a", "b" }, StringComparer.Ordinal),
+        new HashSet<string>(new[] { "A", "C" }, StringComparer.Ordinal),
+        new HashSet<string>(new[] { "A", "C" }, StringComparer.OrdinalIgnoreCase)
+    };
+    foreach (var left in tagSets)
+    foreach (var right in tagSets)
+    {
+        if (overlaps(left, right) != left.Overlaps(right)
+            || overlaps(left, right.ToArray()) != left.Overlaps(right.ToArray()))
+            throw new InvalidOperationException("Avoidance overlap changed membership/comparer semantics.");
+    }
+    for (var i = 0; i < 10000; i++) _ = overlaps(tagSets[1], tagSets[2]);
+    var before = GC.GetAllocatedBytesForCurrentThread();
+    for (var i = 0; i < 10000; i++) _ = overlaps(tagSets[1], tagSets[2]);
+    var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+    if (allocated != 0)
+        throw new InvalidOperationException($"Concrete avoidance tag overlap still allocates: {allocated} bytes.");
+    var routePatch = typeof(EntryPoint).Assembly.GetType("EmmanimLagFix.Code.ResourceTransferAvoidanceAllocationPatch", true)!;
+    if ((int)AccessTools.Field(routePatch, "ReplacedSites").GetValue(null)! != 4)
+        throw new InvalidOperationException("Expected all four transfer avoidance call sites to be replaced.");
+    var managerType = gameAssembly.GetType("Cosmoteer.Simulation.Doodads.SimDoodadsManager", true)!;
+    var manager = RuntimeHelpers.GetUninitializedObject(managerType);
+    var avoidersField = AccessTools.Field(managerType, "_avoidableDoodads");
+    var avoiders = (System.Collections.IList)Activator.CreateInstance(avoidersField.FieldType)!;
+    avoidersField.SetValue(manager, avoiders);
+    var planetType = gameAssembly.GetType("Cosmoteer.Simulation.Doodads.PlanetDoodad", true)!;
+    var planet = RuntimeHelpers.GetUninitializedObject(planetType);
+    var tagsProperty = AccessTools.Property(planetType, "Tags");
+    var tags = Activator.CreateInstance(tagsProperty.PropertyType)!;
+    var idType = tagsProperty.PropertyType.GetGenericArguments()[0];
+    tagsProperty.PropertyType.GetMethod("Add")!.Invoke(tags, new[] { Activator.CreateInstance(idType) });
+    tagsProperty.SetValue(planet, tags);
+    var avoiderType = planetType.GetNestedType("DamageAvoider", BindingFlags.Public | BindingFlags.NonPublic)!;
+    avoiders.Add(Activator.CreateInstance(avoiderType, new object[] { planet, 5f })!);
+    var shapeType = typeof(Halfling.Geometry.Circle);
+    var replacement = AccessTools.Method(routePatch, "ShouldAvoidLocation").MakeGenericMethod(shapeType);
+    var original = managerType.GetMethods().Single(m => m.Name == "ShouldAvoidLocation" && m.GetParameters().Length == 3).MakeGenericMethod(shapeType);
+    foreach (var distance in new[] { 0f, 4f, 7f, 100f })
+    foreach (var buffer in new[] { 0f, 2f })
+    foreach (var candidateTags in new[] { tags, Activator.CreateInstance(tagsProperty.PropertyType), null })
+    {
+        var shape = new Halfling.Geometry.Circle(new Halfling.Geometry.Vector2(distance, 0f), 1f);
+        var expected = (bool)original.Invoke(manager, new object?[] { shape, candidateTags, buffer })!;
+        var actual = (bool)replacement.Invoke(null, new object?[] { manager, shape, candidateTags, buffer })!;
+        if (actual != expected) throw new InvalidOperationException("Transfer avoidance changed geometry/tag behaviour.");
+    }
+}
 
 var timeoutPatchType = typeof(EntryPoint).Assembly.GetType(
     "EmmanimLagFix.Code.MultiplayerSessionTimeoutPatch",
