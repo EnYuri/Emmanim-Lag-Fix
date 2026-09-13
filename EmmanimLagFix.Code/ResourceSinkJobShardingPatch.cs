@@ -65,7 +65,14 @@ internal static class ResourceSinkJobShardingPatch
     /// ResourceManager, so the two fields cannot collide and a ship's shards are
     /// collected with it.
     /// </summary>
-    private static readonly ConditionalWeakTable<object, object?[]> Slots = new();
+    private sealed class ShardSlots
+    {
+        internal object?[] Values = new object?[ShardMask + 1];
+    }
+
+    private static readonly ConditionalWeakTable<object, ShardSlots> Slots = new();
+    // Bound retained empty shard lists even if background producers turn over.
+    private const int MaximumShardSlots = 128;
 
     /// <summary>Power of two, so a thread id maps with a mask rather than a modulo.</summary>
     private static readonly int ShardMask = ShardCountForWorkers(
@@ -73,8 +80,8 @@ internal static class ResourceSinkJobShardingPatch
 
     // FastParallel owns a stable worker set. Assign those threads and the
     // calling thread consecutive slots on first use; hashing ManagedThreadId
-    // with a mask allowed two live producers to collide even when enough slots
-    // existed, which put Monitor.Enter_Slowpath back inside the sharded path.
+    // with a mask allowed two live producers to collide. Registration must also
+    // never wrap: background-thread turnover can exceed the initial slot count.
     private static int s_nextShardIndex;
 
     [ThreadStatic]
@@ -112,7 +119,7 @@ internal static class ResourceSinkJobShardingPatch
             return registered - 1;
         }
 
-        var index = (Interlocked.Increment(ref s_nextShardIndex) - 1) & ShardMask;
+        var index = Interlocked.Increment(ref s_nextShardIndex) - 1;
         t_shardIndexPlusOne = index + 1;
         return index;
     }
@@ -120,8 +127,9 @@ internal static class ResourceSinkJobShardingPatch
     /// <summary>
     /// Replaces a load of <c>_jobUpdates</c> / <c>_highPriorityFlags</c> inside
     /// the per-sink pass. Stable FastParallel workers receive distinct slots
-    /// while capacity remains. A wrapped slot still retains the original lock,
-    /// so unexpected extra producer threads are slower but remain correct.
+    /// even after helper-thread turnover. Grow lazily instead of wrapping an
+    /// extra producer onto a worker's slot. Beyond the bounded capacity, retain
+    /// vanilla's shared list and lock.
     /// </summary>
     internal static List<T> Shard<T>(List<T> real)
     {
@@ -130,15 +138,36 @@ internal static class ResourceSinkJobShardingPatch
             return real;
         }
 
-        var slots = Slots.GetValue(real, static _ => new object?[ShardMask + 1]);
         var index = CurrentShardIndex();
-        if (slots[index] is List<T> existing)
+        if ((uint)index >= MaximumShardSlots)
+        {
+            return real;
+        }
+
+        var state = Slots.GetValue(real, static _ => new ShardSlots());
+        var slots = Volatile.Read(ref state.Values);
+        if (index < slots.Length && Volatile.Read(ref slots[index]) is List<T> existing)
         {
             return existing;
         }
 
-        var created = new List<T>();
-        return Interlocked.CompareExchange(ref slots[index], created, null) as List<T> ?? created;
+        // Serialize first registration with growth. A writer must not publish
+        // into an old array after another thread has copied and replaced it.
+        lock (state)
+        {
+            slots = state.Values;
+            if (index >= slots.Length)
+            {
+                var length = slots.Length;
+                while (length <= index) length *= 2;
+                Array.Resize(ref slots, length);
+                Volatile.Write(ref state.Values, slots);
+            }
+            if (slots[index] is List<T> registered) return registered;
+            var created = new List<T>();
+            Volatile.Write(ref slots[index], created);
+            return created;
+        }
     }
 
     /// <summary>
@@ -148,11 +177,12 @@ internal static class ResourceSinkJobShardingPatch
     /// </summary>
     internal static List<T> DrainInto<T>(List<T> real)
     {
-        if (!Slots.TryGetValue(real, out var slots))
+        if (!Slots.TryGetValue(real, out var state))
         {
             return real;
         }
 
+        var slots = Volatile.Read(ref state.Values);
         for (var i = 0; i < slots.Length; i++)
         {
             if (slots[i] is List<T> { Count: > 0 } shard)

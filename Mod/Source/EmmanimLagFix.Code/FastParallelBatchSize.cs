@@ -1,10 +1,13 @@
 using System.Globalization;
 using Halfling.Performance;
+using Halfling.Pooling;
+using Halfling.Scene2D;
+using Cosmoteer.Simulation;
 
 namespace EmmanimLagFix.Code;
 
 /// <summary>
-/// Chooses a finer batch size for a <b>top-level</b> <c>FastParallel.For</c> than
+/// Chooses a finer batch size for a <b>top-level scene bucket</b> than
 /// vanilla's automatic one, so that a bucket containing one very expensive member
 /// no longer sets the whole pass's finish time.
 ///
@@ -57,6 +60,19 @@ namespace EmmanimLagFix.Code;
 /// </summary>
 internal static class FastParallelBatchSize
 {
+    // SimRoot's two dispatchers wrap exactly these tuples. Individual bucket
+    // members may be very unequal in cost. Other callers retain vanilla sizing:
+    // item count alone does not establish that extra claim traffic is useful.
+    internal static bool IsSceneBucket(object? data) =>
+        data is TempWrapper<(SimRoot, IUpdateableSceneObject[])>
+        || data is TempWrapper<(SimRoot, IFixedUpdateableSceneObject[])>;
+
+    internal static int? RefineForWorkload(
+        int fromInclusive, int toExclusive, bool copyStackData, int? batchSize,
+        int threadCount, int batchesPerParticipant, object? data) =>
+        IsSceneBucket(data)
+        ? Refine(fromInclusive, toExclusive, copyStackData, batchSize, threadCount, batchesPerParticipant)
+        : null;
     /// <summary>
     /// Batches to aim for per participant. Vanilla's implied figure is 8 against
     /// <c>ThreadCount</c> (which excludes the calling thread, itself a full
@@ -159,14 +175,15 @@ internal static class FastParallelBatchSize
     }
 
     /// <summary>
-    /// The live decision, reading the pool's current worker count. Counts both
+    /// The live workload decision, reading the pool's current worker count. Counts both
     /// outcomes so a session can be checked for the patch doing anything at all.
     /// </summary>
     internal static int? RefineLive(
         int fromInclusive,
         int toExclusive,
         bool copyStackData,
-        int? batchSize)
+        int? batchSize,
+        object? data)
     {
         int threadCount;
         try
@@ -178,9 +195,9 @@ internal static class FastParallelBatchSize
             return null;
         }
 
-        var refined = Refine(
+        var refined = RefineForWorkload(
             fromInclusive, toExclusive, copyStackData, batchSize,
-            threadCount, BatchesPerParticipant);
+            threadCount, BatchesPerParticipant, data);
 
         if (refined.HasValue)
         {

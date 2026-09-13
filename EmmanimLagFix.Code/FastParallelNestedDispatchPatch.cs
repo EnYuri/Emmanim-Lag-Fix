@@ -202,7 +202,7 @@ internal static class FastParallelNestedDispatchPatch
         if (IsTopLevelDispatch())
         {
             var refined = FastParallelBatchSize.RefineLive(
-                fromInclusive, toExclusive, copyStackData, batchSize);
+                fromInclusive, toExclusive, copyStackData, batchSize, data);
             if (refined.HasValue)
             {
                 batchSize = refined;

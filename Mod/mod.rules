@@ -37,7 +37,7 @@
 
 ID = nayuri.emmanim_lag_fix
 Name = "Emmanim Lag Fix"
-Version = 2.2.7
+Version = 2.2.13
 
 ModifiesGameplay = true
 ModifiesMultiplayer = true
@@ -64,76 +64,21 @@ Actions
 	// -------------------------------------------------------------------------
 	// A-1. Crew AI workload
 	// -------------------------------------------------------------------------
-	// Crew job and resource searching was long assumed to be the largest CPU
-	// consumer in a late game fleet. 2.2.1's per-bucket diagnostics measured it
-	// and it is not: on a 116,000-part two-player session the Jobs bucket is
-	// 0.2-0.3 ms of a 3.0-4.6 ms fixed update, about 6%, while Statuses is
-	// 0.7-1.1 ms. The section is kept because these budgets are per-second caps
-	// and cost scales with them linearly, so leaving Huge Crews' 8x inflation in
-	// place would multiply that 6% - but it is no longer where the time goes,
-	// and the two main queues are back at vanilla numbers accordingly.
-	//
-	// ManualTransferJobExpensiveCheckInterval matters most for the stalls people
-	// notice when moving resources or crew between ships. Despite the name it is
-	// a RATE, not an interval - see the note on it below. It is also the one
-	// field here that is still doing real work: it scales the reachability pass
-	// over every outstanding manual transfer job, and this session carried up to
-	// 8,269 of them.
-	//
-	// If "Huge Crews" is enabled it pushes these same fields the other way, to
-	// roughly 8x vanilla, and lifts the crew cap to 100,000. This mod does not
-	// touch the crew cap, so the two combine: keep the big crews, drop the tick
-	// rates back to sane numbers.
-	//
-	// >>> LOAD ORDER <<<
-	// Both mods write these fields and the later one wins, so this mod must load
-	// AFTER Huge Crews.
-	//
-	// The game has no UI for reordering mods. Load order is the ASCII sort order
-	// of mod IDs: digits, then uppercase, then lowercase. That is why this mod's
-	// ID starts with a lowercase letter:
-	//
-	//     cosmoteer.huge_crews      <- 'c' = 0x63
-	//     nayuri.emmanim_lag_fix    <- 'n' = 0x6E, sorts after, wins
-	//
-	// An uppercase author name (Nayuri, 0x4E) would sort BEFORE cosmoteer and
-	// silently lose. Keep this ID lowercase.
+	// Assignment rates default to vanilla. The code rule-load hook captures
+	// Huge Crews' applied rates and uses max(vanilla, Huge Crews / 4).
+	// Keep this lowercase mod ID after cosmoteer.huge_crews in load order.
+	// Resource-search frequency is a separate budget and remains unchanged.
 	{
 		Action = Overrides
 		OverrideIn = "<crew/crew.rules>"
 		IgnoreIfNotExisting = false
 		Overrides
 		{
-			// --- Frequencies: optimized workload ---
-			// Version 1.2.x raised these while investigating mined nuggets that lacked
-			// pickup markers: first to vanilla/Huge Crews values and briefly to 600 for
-			// the low-priority queue. That diagnosis was wrong. Extended Tech Tree's Q
-			// mining beams destroyed only some asteroid parts with "unbreak" instead of
-			// "salvage", so those drops never entered the assignment queues at all.
-			// Mods QoL repairs the beam. Version 1.3.0 therefore restored the last
-			// intentional optimization baseline from 1.1.0. Version 1.3.1 raises only
-			// the low-priority queue to 70 as a responsiveness compromise.
-			//
-			// 2.2.2 MEASURED THIS AND PUT THE TWO MAIN QUEUES BACK TO VANILLA.
-			// 2.2.1's per-bucket diagnostics give the cost of crew work directly:
-			// across ten host samples of a 2-player 116,000-part session the Jobs
-			// bucket held flat at 0.2-0.3 ms per frame out of a 3.0-4.6 ms fixed
-			// update - about 6%, and never the top bucket. Statuses alone was
-			// 0.7-1.1 ms, three to five times as much. These budgets are per-second
-			// caps on assignment attempts, so cost scales with them linearly, which
-			// means 90 instead of 120 was buying roughly 0.07 ms per frame - under
-			// 2% of a tick - in exchange for slower crew response on every job.
-			// That is not a trade worth a deviation from vanilla, so the two main
-			// queues are vanilla numbers again. What still holds Huge Crews' 8x
-			// inflation off is simply that this mod writes the fields at all.
-			//
-			// LowPriorityJobAssignmentsPerSecond stays at 70, above vanilla's 30.
-			// It is not an optimization and reverting it would be a regression: it
-			// is what keeps marked mining and salvage pickup responsive on a large
-			// fleet, and its cost is inside the same measured 6%.
-			JobAssignmentsPerSecond = 120                    // vanilla 120 / HugeCrews 1000
-			LowPriorityJobAssignmentsPerSecond = 70          // vanilla 30  / HugeCrews 250
-			ResourceSearchesPerSecond = 120                  // vanilla 120 / HugeCrews 1000
+			// Vanilla assignment baseline; the code hook handles Huge Crews.
+			// Without the optional code loader, this baseline remains in effect.
+			JobAssignmentsPerSecond = 120
+			LowPriorityJobAssignmentsPerSecond = 30
+			ResourceSearchesPerSecond = 120
 
 			// --- These two are RATES, despite being named "Interval" ---
 			// Read the field name and you assume a bigger number means a longer
@@ -297,7 +242,7 @@ Actions
 	// things, and only one of them is wanted here:
 	//
 	//   1. Lifts the Career crew cap to 100,000   <- wanted
-	//   2. Raises crew tick rates to ~8x vanilla  <- exactly what section A undoes
+	//   2. Raises crew tick rates to ~8x vanilla  <- the code hook quarters assignment rates
 	//
 	// Uncommenting the block below reproduces (1) here. Then DISABLE Huge Crews
 	// entirely: nothing else writes those tick rates, section A wins by default,

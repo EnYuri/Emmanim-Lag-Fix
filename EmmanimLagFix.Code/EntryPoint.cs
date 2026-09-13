@@ -16,6 +16,13 @@ public static class EntryPoint
         var harmony = new Harmony(HarmonyId);
         harmony.PatchAll(typeof(EntryPoint).Assembly);
         Halfling.Logging.Logger.Log(
+            "[EmmanimLagFix] Crew oxygen validity guard and nonwrapping resource sink-job shards initialized (local 2.2.13); first-pass thruster transform: "
+            + (ThrusterFirstPassTransformPatch.Applied ? "on" : "vanilla fallback")
+            + "; resource traversal lookup reuse: "
+            + (ResourceSearchTraversalPatch.Applied ? "on" : "vanilla fallback")
+            + "; resource source visited local context: "
+            + (ResourceSourceVisitedSetPatch.Applied ? "on." : "vanilla fallback."));
+        Halfling.Logging.Logger.Log(
             "Emmanim Lag Fix code patches initialized (Windows IME backend: "
             + KoreanImeInputPatch.BackendName
             + ", result-string delivery: "

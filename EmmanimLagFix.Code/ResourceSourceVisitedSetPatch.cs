@@ -126,10 +126,11 @@ internal static class ResourceSourceVisitedSetPatch
                 "SearchForSources(SinkInfo)");
     }
 
-    private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+    private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions, ILGenerator generator)
     {
-        var allocReplacement = AccessTools.Method(typeof(ResourceSourceVisitedSetPatch), nameof(AllocTracked));
-        var addReplacement = AccessTools.Method(typeof(ResourceSourceVisitedSetPatch), nameof(TrackedAdd));
+        var allocReplacement = AccessTools.Method(typeof(ResourceSourceVisitedSetPatch), nameof(AllocLocal));
+        var addReplacement = AccessTools.Method(typeof(ResourceSourceVisitedSetPatch), nameof(LocalAdd));
+        var visitedLocal = generator.DeclareLocal(typeof(IdentityGenerationSet));
         var allocs = 0;
         var adds = 0;
 
@@ -144,12 +145,20 @@ internal static class ResourceSourceVisitedSetPatch
             if (Equals(instruction.operand, AllocTarget))
             {
                 allocs++;
-                yield return Retarget(instruction, allocReplacement);
+                var load = new CodeInstruction(OpCodes.Ldloca, visitedLocal);
+                load.labels.AddRange(instruction.labels);
+                load.blocks.AddRange(instruction.blocks);
+                yield return load;
+                yield return new CodeInstruction(OpCodes.Call, allocReplacement);
             }
             else if (Equals(instruction.operand, AddTarget))
             {
                 adds++;
-                yield return Retarget(instruction, addReplacement);
+                var load = new CodeInstruction(OpCodes.Ldloc, visitedLocal);
+                load.labels.AddRange(instruction.labels);
+                load.blocks.AddRange(instruction.blocks);
+                yield return load;
+                yield return new CodeInstruction(OpCodes.Call, addReplacement);
             }
             else
             {
@@ -166,18 +175,6 @@ internal static class ResourceSourceVisitedSetPatch
         }
 
         Applied = true;
-    }
-
-    /// <summary>
-    /// Both replacements take the same arguments and return the same type as the
-    /// call they stand in for, so the evaluation stack is untouched.
-    /// </summary>
-    private static CodeInstruction Retarget(CodeInstruction instruction, MethodInfo replacement)
-    {
-        var rewritten = new CodeInstruction(OpCodes.Call, replacement);
-        rewritten.labels.AddRange(instruction.labels);
-        rewritten.blocks.AddRange(instruction.blocks);
-        return rewritten;
     }
 
     private static TempHashSet<SourceInfo> AllocTracked()
@@ -204,6 +201,20 @@ internal static class ResourceSourceVisitedSetPatch
 
         return set.Add(source);
     }
+
+    // Capture the generation set once per synchronous search. A nested search
+    // gets null and continues through the real HashSet without touching the
+    // outer search's generation. Disposal still uses the original lifecycle.
+    private static TempHashSet<SourceInfo> AllocLocal(out IdentityGenerationSet? visited)
+    {
+        var set = AllocTracked();
+        visited = ReferenceEquals(_trackedSet, set) ? _visited : null;
+        return set;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool LocalAdd(HashSet<SourceInfo> set, SourceInfo source, IdentityGenerationSet? visited)
+        => visited is null ? set.Add(source) : visited.Add(source);
 
     private static void Deinitialize(TempHashSet<SourceInfo> set)
     {

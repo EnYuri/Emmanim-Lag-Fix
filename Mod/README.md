@@ -2,6 +2,13 @@
 
 Reduces multiplayer lag and `WaitingForAck` disconnects in heavily modded games.
 
+Version 2.2.13 limits finer parallel batching to scene updates and includes
+guarded crew oxygen, resource-search and first-pass thruster optimizations.
+Build and smoke validation pass; game-level FPS gains are not established.
+With Huge Crews and the code loader, assignment budgets are one quarter of
+Huge Crews' values, independently clamped to vanilla floors. Without the code
+loader or without Huge Crews, the assignment budgets are vanilla.
+
 Version 2.0 adds an optional, source-available .NET 10 code layer. Its dedicated
 loader only accepts this exact mod ID and only loads the bundled Harmony library
 plus the code modules named in its compiled allow-list - `EmmanimLagFix.Code.dll`
@@ -282,31 +289,25 @@ traced to an Extended Tech Tree beam rather than crew throughput.
 
 | Field | Vanilla | With Huge Crews | This mod |
 |---|---|---|---|
-| JobAssignmentsPerSecond | 120 | 1000 | 120 |
-| LowPriorityJobAssignmentsPerSecond | 30 | 250 | 70 |
+| JobAssignmentsPerSecond | 120 | 1000 | 120; 250 with Huge Crews + code loader |
+| LowPriorityJobAssignmentsPerSecond | 30 | 250 | 30; 62.5 with Huge Crews + code loader |
 | ResourceSearchesPerSecond | 120 | 1000 | 120 |
 | ManualTransferJobExpensiveCheckInterval | 1.0 | – | 0.5 |
 | SalvageJobExpensiveCheckInterval | 1.0 | – | 0.5 |
 | MaxCrewSearchIterations | 50 | – | 100 |
 | EqualPriorityJobDistanceThreshold | 10 | – | 20 |
 
-Version 2.2.2 put the two main queues back to vanilla, because 2.2.1's per-bucket diagnostics finally
-measured what they cost. Across ten host samples of a two-player, 116,000-part session the `Jobs`
-bucket held flat at **0.2–0.3 ms per frame out of a 3.0–4.6 ms fixed update — about 6%**, and it was
-never the top bucket; `Statuses` alone ran 0.7–1.1 ms. **That last clause no longer holds at
-larger scale** — a 2026-09-14 two-player session at 607 ships / 98,187 parts measured `Jobs` as the
-*largest* fixed-update bucket on both peers, 5.8 ms per world tick on the host and 15.05 ms on the
-client, i.e. 24% of a 63.3 ms tick. The conclusion below is unchanged, because these fields cap
-assignment *attempts* rather than the work each ship's queue does, but do not quote the 6% as a
-ceiling. These fields are per-second caps on assignment
-attempts, so their cost scales with them linearly, which means the old value of 90 was buying roughly
-0.07 ms per frame — under 2% of a tick — in exchange for slower crew response on every job. That is
-not worth a deviation from vanilla. The section still exists, because writing the fields at all is
-what keeps Huge Crews' 8× inflation from multiplying that 6%; it simply no longer pretends crew AI is
-where a late-game fleet's time goes. `LowPriorityJobAssignmentsPerSecond` stays at 70: it is a
-responsiveness fix for marked mining and salvage pickup, not an optimization, and its cost is inside
-the same measured 6%.
+Version 2.2.2 restored normal assignment and resource-search caps to vanilla;
+low-priority assignment remained 70/s at that time. Earlier measurements found
+crew work relatively small, while later large-fleet sessions found much higher
+costs. Those measurements describe different scenes and do not establish a
+universal percentage or a linear FPS gain from changing these caps.
 
+Version 2.2.13 uses vanilla assignment caps without Huge Crews, and
+`max(vanilla, Huge Crews / 4)` for each assignment queue with Huge Crews and the
+code loader. The loader captures the mod's applied values before rule
+serialization and hashing. Resource search remains 120/s. This change adjusts
+responsiveness and workload; actual game performance still depends on the scene.
 The two `*ExpensiveCheckInterval` fields are **rates, not intervals**, whatever the name says. The per-frame check
 budget accumulates as `jobCount * dt * <field>` — multiplied, not divided — so the number is checks
 per job per second, and a larger value means *more* work. Version 1.0.0 set them to 2.0 and doubled
@@ -330,8 +331,9 @@ transfer job that was never created.
 Version 1.2.2 raised `MaxPerNugget` for loose resources to reduce the number of simulated objects.
 Version 1.2.4 removes those overrides after testing showed that nugget size was not the cause of
 missing automatic pickup markers. The temporary 1.2.3 low-priority budget increase likewise did
-not make Q-beam drops enter the skipped salvage callback. The current low-priority value is the
-separately chosen compromise of 70.
+not make Q-beam drops enter the skipped salvage callback. Version 2.2.13 uses
+vanilla low-priority assignment rates, or one quarter of Huge Crews' rates with
+the code loader, with a vanilla floor.
 
 Version 1.3.2 restores nugget consolidation as an independent performance measure, not as a pickup
 fix. Every tangible vanilla resource nugget may now contain one complete storage stack. Total

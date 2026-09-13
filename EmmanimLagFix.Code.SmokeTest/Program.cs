@@ -1,4 +1,4 @@
-﻿using EmmanimLagFix.Code;
+using EmmanimLagFix.Code;
 using Halfling.Scene2D;
 using HarmonyLib;
 using System.Collections;
@@ -238,7 +238,12 @@ var resyncTimingTargets = new[]
 const string smokeId = "nayuri.emmanim_lag_fix.smoke_test";
 var harmony = new Harmony(smokeId);
 harmony.PatchAll(typeof(EntryPoint).Assembly);
+CrewAssignmentRateTests.Run(gameAssembly, smokeId);
+ParallelBatchPolicyTests.Run(gameAssembly);
+ResourceTraversalTests.Run(typeof(EntryPoint).Assembly);
 ManualTransferExpiryTests.Run(gameAssembly, typeof(EntryPoint).Assembly);
+CrewOxygenValidityTests.Run(gameAssembly, typeof(EntryPoint).Assembly);
+ThrusterFirstPassTests.Run(gameAssembly, typeof(EntryPoint).Assembly);
 
 // Avoidance tag comparisons must retain HashSet.Overlaps receiver-comparer
 // semantics, including different comparers on the two input sets. The concrete
@@ -1606,6 +1611,43 @@ if (untrackedLeftOver != 0)
 }
 
 
+// The new search-local context must keep nested rounds on the vanilla set,
+// isolate simultaneous searches, and release the outer generation on failure.
+var allocLocal = AccessTools.Method(sourceVisitedPatchType, "AllocLocal")!;
+var localAdd = AccessTools.Method(sourceVisitedPatchType, "LocalAdd")!;
+void CheckLocalRound()
+{
+    object?[] outerArgs = { null };
+    var outer = allocLocal.Invoke(null, outerArgs)!;
+    try
+    {
+        if (outerArgs[0] is null || localAdd.Invoke(null, new[] { outer, sources[0], outerArgs[0] }) is not true)
+            throw new InvalidOperationException("Local outer generation was not captured.");
+        object?[] innerArgs = { null };
+        var inner = allocLocal.Invoke(null, innerArgs)!;
+        try
+        {
+            if (innerArgs[0] is not null
+                || localAdd.Invoke(null, new[] { inner, sources[0], innerArgs[0] }) is not true
+                || localAdd.Invoke(null, new[] { inner, sources[0], innerArgs[0] }) is not false
+                || (int)setCountProperty.GetValue(inner)! != 1)
+                throw new InvalidOperationException("Nested local search lost vanilla fallback.");
+        }
+        finally { ((IDisposable)inner).Dispose(); }
+        if (localAdd.Invoke(null, new[] { outer, sources[0], outerArgs[0] }) is not false
+            || localAdd.Invoke(null, new[] { outer, sources[1], outerArgs[0] }) is not true
+            || (int)setCountProperty.GetValue(outer)! != 0)
+            throw new InvalidOperationException("Nested search corrupted the outer generation.");
+        // Simulate a failure inside the game's try/finally.
+        throw new ApplicationException("Expected local-search cleanup fixture");
+    }
+    catch (ApplicationException) { }
+    finally { ((IDisposable)outer).Dispose(); }
+}
+CheckLocalRound();
+CheckLocalRound();
+Parallel.For(0, 32, _ => CheckLocalRound());
+
 // Every status dictionary the game enumerates through an interface now goes
 // through a pooled wrapper around the dictionary's own struct enumerator.
 // Applied is set only once every one of the thirteen target methods resolved
@@ -1985,14 +2027,24 @@ foreach (var allocOverload in AccessTools
     }
     var currentShardIndex = AccessTools.DeclaredMethod(shardingType, "CurrentShardIndex")
         ?? throw new MissingMethodException(shardingType.FullName, "CurrentShardIndex");
-    var assignedIndexes = new int[configuredShardCount];
+    // Include more producers than the original capacity: helper-thread turnover
+    // must not wrap a new producer onto a still-live worker's slot.
+    var producerCount = configuredShardCount * 2 + 1;
+    var assignedIndexes = new int[producerCount];
+    var assignmentReal = new List<int>();
+    var assignmentShard = AccessTools.Method(shardingType, "Shard")!.MakeGenericMethod(typeof(int));
+    var assignmentDrain = AccessTools.Method(shardingType, "DrainInto")!.MakeGenericMethod(typeof(int));
+    var producerLists = new List<int>[producerCount];
     using (var startAssignments = new ManualResetEventSlim(false))
     {
-        var assignmentThreads = Enumerable.Range(0, configuredShardCount)
+        var assignmentThreads = Enumerable.Range(0, producerCount)
             .Select(i => new Thread(() =>
             {
                 startAssignments.Wait();
                 assignedIndexes[i] = (int)currentShardIndex.Invoke(null, null)!;
+                var mine = (List<int>)assignmentShard.Invoke(null, [assignmentReal])!;
+                producerLists[i] = mine;
+                lock (mine) mine.Add(i);
             }) { IsBackground = true, Name = $"sink-shard assignment {i}" })
             .ToArray();
         foreach (var thread in assignmentThreads)
@@ -2005,12 +2057,18 @@ foreach (var allocOverload in AccessTools
             thread.Join();
         }
     }
-    if (assignedIndexes.Distinct().Count() != configuredShardCount)
+    if (assignedIndexes.Distinct().Count() != producerCount)
     {
         throw new InvalidOperationException(
             "Stable sink-job producers collided despite having enough shard slots: "
             + string.Join(", ", assignedIndexes));
     }
+    if (producerLists.Distinct(ReferenceEqualityComparer.Instance).Count() != producerCount)
+        throw new InvalidOperationException("Extra sink-job producers still share a shard list.");
+    assignmentDrain.Invoke(null, [assignmentReal]);
+    assignmentReal.Sort();
+    if (!assignmentReal.SequenceEqual(Enumerable.Range(0, producerCount)))
+        throw new InvalidOperationException("Shard growth lost or duplicated registered producer entries.");
 
     foreach (var flag in new[] { "ShardApplied", "DrainApplied" })
     {

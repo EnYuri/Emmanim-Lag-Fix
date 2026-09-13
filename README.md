@@ -23,7 +23,13 @@ inert without it - see [Mods QoL support](#mods-qol-support).
 - Avoids repeated planetary tag-enumerator allocations in resource hauling,
   preserving danger-zone decisions. Transfer expiry creates callback state
   only when scheduling a change or removal. See [2.2.4 validation](CHANGELOG.md).
-- Reduces crew assignment, resource-search and expensive-check rates.
+- Uses vanilla crew assignment rates without Huge Crews. With Huge Crews and
+  the code loader, uses one quarter of its assignment rates with vanilla floors
+  (currently 250/s normal and 62.5/s low priority). Resource search stays 120/s.
+- Keeps finer parallel batches for scene updates and vanilla sizing for other
+  workloads; reduces crew oxygen-check and resource-search overhead. See
+  [validation and limitations](CHANGELOG.md). Game FPS gains are not established.
+- Reduces expensive manual-transfer and salvage check rates.
 - Consolidates loose vanilla resource nuggets into larger stacks.
 - Removes exterior-crew thruster effects.
 - Caches the upper-right selected-ship resource aggregation for one second.

@@ -1,110 +1,113 @@
+using System.Collections;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using Cosmoteer.Ships.Crew.Pathing;
 using Cosmoteer.Ships.Resources;
 using Cosmoteer.Resources;
 using Halfling.Geometry;
+using Halfling.Pooling;
 using HarmonyLib;
 
 namespace EmmanimLagFix.Code;
 
-/// <summary>
-/// ResourceManager normally keeps enumerating crew-path cells after it has
-/// already visited every tile that can contain the requested resource. Stop
-/// only at that exact point. Every possible source is still yielded in the
-/// same order and all per-sink validity, priority, capacity and reachability
-/// checks remain vanilla.
-/// </summary>
+// Stop after processing the last possible source cell. Count the game's own
+// successful lookups rather than doing a second hash lookup in an iterator.
 [HarmonyPatch]
 internal static class ResourceSearchTraversalPatch
 {
+    internal static bool Applied { get; private set; }
     private static readonly MethodInfo SearchCellsTarget = AccessTools.Method(
-        typeof(PathManager),
-        nameof(PathManager.SearchCellsFrom),
-        new[] { typeof(IntRect), typeof(bool), typeof(int) })
-        ?? throw new MissingMethodException(typeof(PathManager).FullName, nameof(PathManager.SearchCellsFrom));
+        typeof(PathManager), nameof(PathManager.SearchCellsFrom),
+        new[] { typeof(IntRect), typeof(bool), typeof(int) })!;
 
-    private static MethodBase TargetMethod()
+    private static MethodBase TargetMethod() => AccessTools.Method(
+        typeof(ResourceManager), "SearchForSources", new[] { typeof(ResourceManager.SinkInfo) })!;
+
+    private static IEnumerable<CodeInstruction> Transpiler(
+        IEnumerable<CodeInstruction> instructions, ILGenerator generator)
     {
-        var sinkInfoType = AccessTools.Inner(typeof(ResourceManager), "SinkInfo")
-            ?? throw new TypeLoadException("ResourceManager.SinkInfo was not found.");
-        return AccessTools.Method(typeof(ResourceManager), "SearchForSources", new[] { sinkInfoType })
-            ?? throw new MissingMethodException(typeof(ResourceManager).FullName, "SearchForSources(SinkInfo)");
-    }
-
-    private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
-    {
-        var replacement = AccessTools.Method(typeof(ResourceSearchTraversalPatch), nameof(SearchCellsThroughLastSource));
-        var replaced = 0;
-
-        foreach (var instruction in instructions)
+        var il = instructions.ToList();
+        var search = il.FindIndex(x => x.Calls(SearchCellsTarget));
+        var lookupTarget = AccessTools.Method(
+            typeof(Dictionary<IntVector2, TempList<ResourceManager.SourceInfo>>), "TryGetValue");
+        var moveTarget = AccessTools.Method(typeof(IEnumerator), nameof(IEnumerator.MoveNext));
+        var lookup = il.FindIndex(Math.Max(search + 1, 0), x => x.Calls(lookupTarget));
+        var move = il.FindIndex(Math.Max(search + 1, 0), x => x.Calls(moveTarget));
+        // Check the dictionary local and the loop's ordinary conditional branch.
+        // On a changed game shape, return the original search without partial edits.
+        if (search < 0 || il.Count(x => x.Calls(SearchCellsTarget)) != 1
+            || lookup <= search + 3 || move <= lookup || move + 1 >= il.Count
+            || il[lookup - 3].opcode != OpCodes.Ldloc_S
+            || il[lookup - 3].operand is not LocalVariableInfo dictionary
+            || dictionary.LocalType != typeof(Dictionary<IntVector2, TempList<ResourceManager.SourceInfo>>)
+            || il[move + 1].opcode != OpCodes.Brtrue
+            || il.Skip(search + 1).Take(move - search).Count(x => x.Calls(lookupTarget)) != 1)
         {
-            if ((instruction.opcode == OpCodes.Call || instruction.opcode == OpCodes.Callvirt)
-                && Equals(instruction.operand, SearchCellsTarget))
-            {
-                // The original four arguments are already on the evaluation
-                // stack. Append this ResourceManager and the current SinkInfo.
-                var managerLoad = new CodeInstruction(OpCodes.Ldarg_0);
-                managerLoad.labels.AddRange(instruction.labels);
-                managerLoad.blocks.AddRange(instruction.blocks);
-                yield return managerLoad;
-                yield return new CodeInstruction(OpCodes.Ldarg_1);
-                yield return new CodeInstruction(OpCodes.Call, replacement);
-                replaced++;
-            }
+            Applied = false;
+            return il;
+        }
+        var remaining = generator.DeclareLocal(typeof(int));
+        var output = new List<CodeInstruction>(il.Count + 8);
+        for (var i = 0; i < il.Count; i++)
+        {
+            var instruction = il[i];
+            List<CodeInstruction>? replacement = null;
+            if (i == search)
+                replacement = new()
+                {
+                    new(OpCodes.Ldloc, dictionary), new(OpCodes.Ldarg_1),
+                    new(OpCodes.Ldloca, remaining),
+                    new(OpCodes.Call, AccessTools.Method(typeof(ResourceSearchTraversalPatch), nameof(StartSearch)))
+                };
+            else if (i == lookup)
+                replacement = new()
+                {
+                    new(OpCodes.Ldloca, remaining),
+                    new(OpCodes.Call, AccessTools.Method(typeof(ResourceSearchTraversalPatch), nameof(LookupAndCount))
+                        .MakeGenericMethod(typeof(TempList<ResourceManager.SourceInfo>)))
+                };
+            else if (i == move)
+                replacement = new()
+                {
+                    new(OpCodes.Ldloc, remaining),
+                    new(OpCodes.Call, AccessTools.Method(typeof(ResourceSearchTraversalPatch), nameof(MoveNext)))
+                };
+            if (replacement == null) output.Add(instruction);
             else
             {
-                yield return instruction;
+                replacement[0].labels.AddRange(instruction.labels);
+                replacement[0].blocks.AddRange(instruction.blocks);
+                output.AddRange(replacement);
             }
         }
-
-        if (replaced != 1)
-        {
-            throw new InvalidOperationException(
-                $"Expected exactly one PathManager.SearchCellsFrom call in " +
-                $"ResourceManager.SearchForSources(SinkInfo), found {replaced}. " +
-                "The game code shape has changed; skipping the traversal patch.");
-        }
+        Applied = true;
+        return output;
     }
 
-    private static IEnumerable<(IntVector2 Cell, float Dist)> SearchCellsThroughLastSource(
-        PathManager paths,
-        IntRect searchOrigin,
-        bool useTraffic,
-        int maxSearchIterations,
-        ResourceManager manager,
-        ResourceManager.SinkInfo sink)
+    private static IEnumerable<(IntVector2 Cell, float Dist)> StartSearch(
+        PathManager paths, IntRect origin, bool useTraffic, int maxIterations,
+        Dictionary<IntVector2, TempList<ResourceManager.SourceInfo>> sourceCells,
+        ResourceManager.SinkInfo sink, ref int remaining)
     {
-        var vanilla = paths.SearchCellsFrom(searchOrigin, useTraffic, maxSearchIterations);
-
-        // A Stackable search can narrow to a concrete resource while it is
-        // being enumerated, so retain vanilla traversal for that special case.
-        if (sink.SourceType == ResourceRules.Stackable
-            || !manager._tileSources.TryGetValue(sink.SourceType, out var sourceCells)
-            || sourceCells.Count == 0)
-        {
-            return vanilla;
-        }
-
-        return EnumerateThroughLastSourceCell(vanilla, sourceCells);
+        var vanilla = paths.SearchCellsFrom(origin, useTraffic, maxIterations);
+        // Stackable searches may replace the dictionary while narrowing their
+        // resource type. Empty dictionaries retain the previous vanilla behavior.
+        remaining = sink.SourceType == ResourceRules.Stackable || sourceCells.Count == 0
+            ? -1 : sourceCells.Count;
+        return vanilla;
     }
 
-    private static IEnumerable<(IntVector2 Cell, float Dist)> EnumerateThroughLastSourceCell(
-        IEnumerable<(IntVector2 Cell, float Dist)> vanilla,
-        IReadOnlyDictionary<IntVector2, Halfling.Pooling.TempList<ResourceManager.SourceInfo>> sourceCells)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool LookupAndCount<T>(Dictionary<IntVector2, T> cells,
+        IntVector2 cell, out T value, ref int remaining)
     {
-        // FindAllShortestPaths yields each cell once. The resource dictionaries
-        // are read-only throughout ResourceManager's parallel search phase.
-        var remainingSourceCells = sourceCells.Count;
-        foreach (var cellAndDistance in vanilla)
-        {
-            yield return cellAndDistance;
-
-            if (sourceCells.ContainsKey(cellAndDistance.Cell)
-                && --remainingSourceCells == 0)
-            {
-                yield break;
-            }
-        }
+        var found = cells.TryGetValue(cell, out value!);
+        if (found && remaining > 0) --remaining;
+        return found;
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool MoveNext(IEnumerator iterator, int remaining)
+        => remaining != 0 && iterator.MoveNext();
 }
