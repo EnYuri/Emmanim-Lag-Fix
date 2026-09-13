@@ -410,6 +410,19 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             + $"cap={(StatusModulationListCapacityPatch.AppliedToTiles ? 1 : 0)}/{(StatusModulationListCapacityPatch.AppliedToParts ? 1 : 0)} {HeatModulationContextSkipPatch.TakeCounters()}";
         Halfling.Logging.Logger.Log($"[EmmanimLagFix.StatusResourceDiagnostics] {focused}");
         PeerDiagnosticsRelayPatch.MaybeSend(manager, focused);
+
+        // Third short payload, added in 2.2.6. The main line has room for one
+        // bucket each, and one bucket only ever names a parallel one - those are
+        // the ten large enough to come first. The serial remainder was 43% of
+        // this client's world tick in the 2026-09-14 session and completely
+        // unnamed, which is the measurement that decides whether parallel work is
+        // worth pursuing at all or whether Amdahl's serial half is the wall. It
+        // gets its own payload rather than a longer main line, because the relay
+        // truncates at 195 characters and the wide lists are built to a budget.
+        var wide = $"kind=buckets t={manager.NetworkInputTick} {breakdown.Wide} "
+            + $"cores={FastParallelIdleParkPatch.ProcessorCount}/{FastParallelIdleParkPatch.WorkerCount}";
+        Halfling.Logging.Logger.Log($"[EmmanimLagFix.BucketDiagnostics] {wide}");
+        PeerDiagnosticsRelayPatch.MaybeSend(manager, wide);
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;

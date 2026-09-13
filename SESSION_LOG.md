@@ -1260,3 +1260,78 @@ multi-tick regression, measured and reverted in 2.2.2.
 Both pass the smoke test on 0.30.4c and are **unmeasured live** — the session ended before a
 follow-up capture. Next session: compare `fpinl=` inlined-vs-vanilla counts, `fppark=` wake rate
 per second, `idelay=`, and whether remote `delay=%` falls from the 69-92% band.
+
+## 2026-09-14 (continued) — 2.2.6: a logical-processor-sized pool, and 12 buckets
+
+Same session's evidence as the 2.2.5 entry above; no new capture. Two changes, both
+aimed at the measurement gap and the idle-core finding rather than at a known hotspot.
+
+### The pool was sized at physical cores minus one
+
+`Halfling.Performance.FastParallel`'s static constructor, with its own comment:
+
+```csharp
+// The default is the number of physical cores (not logical/hyper-threading cores) minus one.
+if (systemInfo != null && systemInfo.PhysicalCores > 0) ThreadCount = systemInfo.PhysicalCores - 1;
+else                                                    ThreadCount = Environment.ProcessorCount - 1;
+```
+
+The client's relayed `fp=0%@20` is the proof of its shape: `DefaultSpinBudget` returns 20
+only below eight workers, so 8 logical processors meant 4 physical -> 3 workers + caller =
+**4 of 8 hardware threads**, with the rest unreachable. Host was 16 logical / 12 physical
+-> 11 workers.
+
+That default was right when written. Until 2.1.3 an idle worker ran `SpinOnce(-1)` forever
+(39.0 s of 65.9 s of process CPU in one 20-second trace), and a spinning SMT sibling steals
+its partner's execution ports — filling the siblings would have been actively harmful.
+Workers park now, so the premise is gone.
+
+2.2.6 sets `ProcessorCount - 1`: host 11 -> 15, client 3 -> 7.
+
+Desync argument, from this session's own data: the two peers already ran 11 workers against
+3 while `game=0143B25C sim=01C3BF5A` matched on both and `hashes=0/0/0` reported no
+mismatch for 84 minutes. Simulation results cannot depend on worker count.
+
+**Implemented as `FastParallelPoolSize.Apply()`, not a Harmony patch.** The park patch
+derives `SpinBudget`/`WorkerCount` from `FastParallel.ThreadCount` in a static constructor,
+and 2.2.5's `FastParallelNestedDispatchPatch` derives `SmallRangeLimit = workers * 8` the
+same way. Static constructor order is undefined, so a prefix on `FastParallel.Start` would
+have landed after both reads and left them describing a pool that no longer existed. The
+method is idempotent, called from `EntryPoint` before `PatchAll` and from both static
+constructors before they read the count. The smoke test asserts `Settled` is already true
+and that the park patch's captured `WorkerCount` equals the installed count, so a future
+reordering fails the build instead of silently mis-deriving.
+
+Side effect worth having: the inline limit is `workers * 8`, so the client's rises 24 -> 56
+without a separate override — which was the specific weakness noted when 2.2.5 shipped.
+
+Note the standalone smoke host has `App.Platform == null`, so FastParallel already falls
+back to `ProcessorCount - 1` there and the *write* path is not exercised; what is asserted
+is the contract (installed == requested). The in-game confirmation is the
+"FastParallel pool resized from X to Y workers" log line and `cores=`.
+
+### Five buckets was the wrong number
+
+`TopBuckets = 5` named only parallel buckets, because the ten parallel ones are exactly the
+ten big enough to reach a top-5 list. The serial 47 were invisible — 36% of the host's world
+tick and 43% of the client's. Now 12 locally, plus a third relay payload:
+
+```
+[EmmanimLagFix.BucketDiagnostics] kind=buckets t=<tick> fb=[...] cores=<logical>/<workers>
+```
+
+`Format` gained a character budget so the list is *built* to 130 characters instead of the
+relay cutting it mid-field at 195. The whole budget goes to the fixed side; the update side
+is per-frame visual work and the main line already relays its costliest bucket. Writing the
+smoke test for this caught a real overflow — the first shape was 206 characters, which is
+why `ub=` and `fx=` are not in this payload.
+
+### What the next session decides
+
+If the serial remainder is ~27 ms/tick on the client, Amdahl pins it at ~37 ticks/s even
+with perfect parallel scaling, and the pool resize plus batch tuning are worth finishing.
+If it is materially more, the serial buckets have to come first and the order of the
+remaining plan inverts. Read the new `fb=[…]` before doing anything else.
+
+Also check: `fpinl=` inlined-vs-vanilla counts, `fppark=` wakes per second (was ~5,400/s),
+`idelay=`, `cores=` on both peers, and whether remote `delay=%` leaves the 69-92% band.

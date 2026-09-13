@@ -9,6 +9,10 @@ public static class EntryPoint
     public static void AssemblyLoadInitializer()
     {
         KoreanImeInputPatch.ForceImm32Backend();
+        // Before PatchAll, because the patch classes that derive a spin budget
+        // and an inline limit from the worker count read it in their static
+        // constructors. Idempotent, so whichever runs first still agrees.
+        FastParallelPoolSize.Apply();
         var harmony = new Harmony(HarmonyId);
         harmony.PatchAll(typeof(EntryPoint).Assembly);
         Halfling.Logging.Logger.Log(

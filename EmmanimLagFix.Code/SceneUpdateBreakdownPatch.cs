@@ -40,8 +40,37 @@ namespace EmmanimLagFix.Code;
 /// </summary>
 internal static class SceneUpdateBreakdown
 {
-    /// <summary>Buckets listed in the host line. The peer line gets one each.</summary>
-    private const int TopBuckets = 5;
+    /// <summary>
+    /// Buckets listed in the local line. The peer's main line still gets one
+    /// each; its wide list travels as its own relay payload.
+    ///
+    /// This was 5 until 2.2.6, which was too few to be actionable. Only ten of
+    /// Cosmoteer's fifty-seven fixed-update buckets are parallel, and those ten
+    /// are exactly the ones large enough to make a top-5 list - so the list named
+    /// the buckets that already scale and hid the serial remainder entirely. A
+    /// 2026-09-14 session had that remainder at 36% of the host's world tick and
+    /// 43% of the client's, spread across the other forty-seven. Twelve entries
+    /// is enough to see where a serial cost actually sits, and costs nothing when
+    /// the buckets are cheap: <see cref="Format"/> stops at the first entry under
+    /// 0.05 ms.
+    /// </summary>
+    private const int TopBuckets = 12;
+
+    /// <summary>
+    /// Character budget for the peer's wide bucket payload. A relayed line is
+    /// capped at 195 characters and is truncated before sending rather than being
+    /// cut mid-field, so the list is built to fit instead of being trimmed
+    /// afterwards. Names are clipped to six characters there, as in the main
+    /// line's one-bucket field.
+    ///
+    /// The whole budget goes to the fixed-update side. The question this payload
+    /// exists to answer is which <i>serial fixed</i> bucket owns the unnamed share
+    /// of a world tick; the update side is per-frame visual work, and the main
+    /// line already relays its single costliest bucket.
+    /// </summary>
+    private const int PeerFixedBudget = 130;
+
+    private const int PeerNameLimit = 6;
 
     private static long _fixedTicks;
     private static long _fixedCalls;
@@ -96,11 +125,18 @@ internal static class SceneUpdateBreakdown
         public readonly string Compact;
         public readonly string Focused;
 
-        public Report(string full, string compact, string focused)
+        /// <summary>
+        /// The wide bucket lists, for a peer relay payload of their own. Built to
+        /// fit the relay's character cap rather than trimmed to it.
+        /// </summary>
+        public readonly string Wide;
+
+        public Report(string full, string compact, string focused, string wide)
         {
             Full = full;
             Compact = compact;
             Focused = focused;
+            Wide = wide;
         }
     }
 
@@ -133,7 +169,8 @@ internal static class SceneUpdateBreakdown
         var frames = FramePhaseDiagnosticsPatch.LastFrames;
         if (!FramePhaseDiagnosticsPatch.Enabled || frames <= 0)
         {
-            return new Report("fixed=-/- fb=[] ub=[]", "fx=-", "frames=0 st=-/- res=-/-");
+            return new Report(
+                "fixed=-/- fb=[] ub=[]", "fx=-", "frames=0 st=-/- res=-/-", "fb=[]");
         }
 
         var perFrameMs = 1000d / Stopwatch.Frequency / frames;
@@ -145,7 +182,8 @@ internal static class SceneUpdateBreakdown
             $"fx={fixedTicks * perFrameMs:F1} "
                 + $"fb={Format(fixedBuckets, FixedNames(), perFrameMs, 1, 6)} "
                 + $"ub={Format(updateBuckets, UpdateNames(), perFrameMs, 1, 6)}",
-            FormatFocused(fixedBuckets, bucketCalls, FixedNames(), frames));
+            FormatFocused(fixedBuckets, bucketCalls, FixedNames(), frames),
+            $"fb=[{Format(fixedBuckets, FixedNames(), perFrameMs, TopBuckets, PeerNameLimit, PeerFixedBudget)}]");
     }
 
     // Actual bucket passes, not DoFixedUpdates calls (one such call may run
@@ -166,12 +204,19 @@ internal static class SceneUpdateBreakdown
         return $"frames={frames} st={Bucket("Statuses")} res={Bucket("Resources")}";
     }
 
+    /// <summary>
+    /// Costliest buckets first, named and in milliseconds per frame.
+    /// <paramref name="charBudget"/> stops the list at the last whole entry that
+    /// fits, so a relayed payload is built to its cap instead of being cut
+    /// mid-field; zero or less means no budget.
+    /// </summary>
     private static string Format(
         KeyValuePair<int, long>[] buckets,
         IReadOnlyDictionary<int, string> names,
         double perFrameMs,
         int take,
-        int nameLimit)
+        int nameLimit,
+        int charBudget = 0)
     {
         if (buckets.Length == 0)
         {
@@ -180,6 +225,7 @@ internal static class SceneUpdateBreakdown
 
         Array.Sort(buckets, static (a, b) => b.Value.CompareTo(a.Value));
         var rows = new List<string>(take);
+        var used = 0;
         for (var i = 0; i < buckets.Length && i < take; i++)
         {
             var ms = buckets[i].Value * perFrameMs;
@@ -196,7 +242,20 @@ internal static class SceneUpdateBreakdown
                 name = name[..nameLimit];
             }
 
-            rows.Add($"{name}:{ms:F1}");
+            var row = $"{name}:{ms:F1}";
+            if (charBudget > 0)
+            {
+                // The separator only exists once there is something to separate
+                // from, so the first row is charged its own length alone.
+                var cost = rows.Count == 0 ? row.Length : row.Length + 1;
+                if (used + cost > charBudget)
+                {
+                    break;
+                }
+                used += cost;
+            }
+
+            rows.Add(row);
         }
 
         return rows.Count == 0 ? "-" : string.Join(",", rows);

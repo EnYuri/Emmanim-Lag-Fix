@@ -191,9 +191,12 @@ internal static class FastParallelIdleParkPatch
     {
         // Reading the property runs FastParallel's own static constructor, which
         // only reads system info; Start() has not been called yet either way.
+        // Apply() first so the budget is derived from the pool this session will
+        // actually run, not from the size it was about to be changed from.
         var workers = 0;
         try
         {
+            FastParallelPoolSize.Apply();
             workers = FastParallel.ThreadCount;
         }
         catch (Exception)

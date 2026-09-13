@@ -88,6 +88,7 @@ internal static class FastParallelNestedDispatchPatch
         int workers;
         try
         {
+            FastParallelPoolSize.Apply();
             workers = FastParallel.ThreadCount;
         }
         catch (Exception)

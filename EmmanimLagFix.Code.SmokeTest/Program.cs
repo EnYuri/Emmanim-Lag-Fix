@@ -1845,6 +1845,68 @@ foreach (var allocOverload in AccessTools
         + " cap=1/1 ctx=on sk=9999999999 vf=9999999999";
     if (focusedPayload.Length > 195)
         throw new InvalidOperationException("Focused diagnostics exceed the chat budget.");
+
+    // The wide bucket list is the 2.2.6 addition, and the only list built to a
+    // character budget: a relayed line is truncated before sending rather than cut
+    // mid-field, so Format has to stop at the last whole entry that fits. Twelve
+    // equally expensive buckets with names longer than the clip is the worst case.
+    var formatMethod = AccessTools.Method(breakdownType, "Format")
+        ?? throw new MissingMethodException(breakdownType.FullName, "Format");
+    var manyBuckets = Enumerable.Range(1, 12)
+        .Select(i => new KeyValuePair<int, long>(i, Stopwatch.Frequency * (13 - i)))
+        .ToArray();
+    var longNames = Enumerable.Range(1, 12)
+        .ToDictionary(i => i, i => "BucketNameNumber" + i);
+    foreach (var budget in new[] { 130, 74, 12, 7 })
+    {
+        var list = (string)formatMethod.Invoke(null, new object[]
+        {
+            manyBuckets.ToArray(), longNames, 1d / Stopwatch.Frequency, 12, 6, budget
+        })!;
+        if (list.Length > budget)
+        {
+            throw new InvalidOperationException(
+                $"A bucket list built to a {budget}-character budget came out {list.Length} long: {list}");
+        }
+        foreach (var row in list.Split(','))
+        {
+            // Every surviving row must still be a whole "name:0.0" pair; a cut one
+            // is what the budget exists to prevent.
+            var colon = row.IndexOf(':');
+            if (row == "-")
+            {
+                continue;
+            }
+            if (colon <= 0 || !double.TryParse(
+                    row[(colon + 1)..],
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out _))
+            {
+                throw new InvalidOperationException(
+                    $"A bucket list was cut mid-field at budget {budget}: {list}");
+            }
+        }
+    }
+
+    // Unbudgeted, the local line must actually list more than the old five.
+    var wideList = (string)formatMethod.Invoke(null, new object[]
+    {
+        manyBuckets.ToArray(), longNames, 1d / Stopwatch.Frequency, 12, 0, 0
+    })!;
+    if (wideList.Split(',').Length != 12)
+    {
+        throw new InvalidOperationException(
+            $"Expected all twelve buckets in the local line, got: {wideList}");
+    }
+
+    var widePayload = "#ELFDIAG#kind=buckets t=2147483647 "
+        + "fb=[" + new string('x', 130) + "] cores=999/999";
+    if (widePayload.Length > 195)
+    {
+        throw new InvalidOperationException(
+            $"Wide bucket diagnostics exceed the chat budget at {widePayload.Length} characters.");
+    }
     var tryHandle = AccessTools.Method(relayType, "TryHandleIncoming")
         ?? throw new MissingMethodException(relayType.FullName, "TryHandleIncoming");
     var receivedBefore = (int)AccessTools.Property(relayType, "Received")!.GetValue(null)!;
@@ -2387,6 +2449,55 @@ foreach (var allocOverload in AccessTools
         throw new InvalidOperationException(
             "A full-int32 range was reported inlinable, so the length test overflowed.");
     }
+
+    // Pool size. Vanilla sizes the pool at physical cores minus one, which leaves
+    // half the hardware threads of an SMT machine unreachable; that was the right
+    // call while idle workers spun forever, and stopped being right in 2.1.3 when
+    // they started parking. The resize is not a Harmony patch, because the spin
+    // budget and the inline limit above are derived from the worker count in
+    // static constructors whose order is undefined - so assert that it has already
+    // settled by the time anything read the count, and that both derived values
+    // agree with the pool actually installed.
+    var poolType = typeof(EntryPoint).Assembly
+        .GetType("EmmanimLagFix.Code.FastParallelPoolSize", throwOnError: true)!;
+    var settled = AccessTools.PropertyGetter(poolType, "Settled")
+        ?? throw new MissingMemberException(poolType.FullName, "Settled");
+    if (settled.Invoke(null, null) is not true)
+    {
+        throw new InvalidOperationException(
+            "The FastParallel pool size had not settled even though the spin budget and "
+            + "inline limit were already derived from a worker count.");
+    }
+
+    var defaultWorkerCount = AccessTools.DeclaredMethod(poolType, "DefaultWorkerCount")
+        ?? throw new MissingMethodException(poolType.FullName, "DefaultWorkerCount");
+    foreach (var (processors, expected) in new[] { (1, 0), (2, 1), (8, 7), (16, 15) })
+    {
+        var actual = (int)defaultWorkerCount.Invoke(null, new object[] { processors })!;
+        if (actual != expected)
+        {
+            throw new InvalidOperationException(
+                $"Expected {processors} logical processors to request {expected} workers, got {actual}.");
+        }
+    }
+
+    var requested = (int)AccessTools.Field(poolType, "RequestedWorkerCount").GetValue(null)!;
+    var installed = (int)AccessTools.PropertyGetter(fastParallelType, "ThreadCount").Invoke(null, null)!;
+    if (requested > 0 && installed != requested)
+    {
+        throw new InvalidOperationException(
+            $"Requested a {requested}-worker pool but FastParallel reports {installed}: "
+            + (AccessTools.Field(poolType, "FailureReason").GetValue(null) as string
+               ?? "no reason recorded")
+            + ".");
+    }
+    var parkWorkerCount = (int)AccessTools.Field(parkPatchType, "WorkerCount").GetValue(null)!;
+    if (parkWorkerCount != installed)
+    {
+        throw new InvalidOperationException(
+            $"The park patch derived its budget from {parkWorkerCount} workers but the pool runs "
+            + $"{installed}; the resize landed after the budget was computed.");
+    }
 }
 
 var shipRendererType = gameAssembly.GetType("Cosmoteer.Ships.Rendering.ShipRenderer", throwOnError: true)!;
@@ -2894,4 +3005,4 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, inlined small nested FastParallel dispatches, urgent input-tick-delay HostUpdates, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, inlined small nested FastParallel dispatches, a logical-processor-sized worker pool, urgent input-tick-delay HostUpdates, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");

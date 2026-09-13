@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.2.6
+
+- Size the `FastParallel` pool by **logical processors** instead of physical
+  cores. Halfling's static constructor takes `PhysicalCores - 1`, so a
+  4-core/8-thread machine runs three workers plus the caller — four of eight
+  hardware threads, the other half structurally unreachable. The 2026-09-14
+  session's client was exactly that: its relayed spin budget of `@20` only occurs
+  below eight workers, and it used 1.5 of 8 logical processors while holding the
+  lockstep gate on 92% of host frames. That default was *correct* while idle
+  workers spun forever on `SpinOnce(-1)` — an SMT sibling spinning steals its
+  partner's execution ports, and one 20-second trace put that spin at 39.0 s of
+  65.9 s of process CPU — but 2.1.3 made idle workers park, so an unused sibling
+  now buys nothing and a parked one costs nothing. The premise changed; the
+  default did not. Cannot desync: worker count already differs between peers
+  (eleven against three in that session) with matching whole-game and simulation
+  hashes throughout, so results cannot depend on it, and order-sensitive work
+  already goes through `SimRoot.EnqueueDeterministic`. This is a plain idempotent
+  initializer rather than a Harmony patch, because the spin budget and the
+  nested-inline limit are both derived from the worker count in static
+  constructors whose order is undefined; every reader calls it first.
+  `fastparallel-threads.txt` overrides the count and `0` restores vanilla sizing.
+  One side effect worth having: the 2.2.5 inline limit is `workers * 8`, so the
+  client's rises from 24 to 56 on its own.
+- Widen the per-bucket breakdown from 5 buckets to 12, and relay a wide
+  fixed-update list to peers as its own `kind=buckets` payload. Five was too few
+  to act on: only ten of Cosmoteer's fifty-seven fixed-update buckets are
+  parallel, and those ten are exactly the ones big enough to make a top-5 list —
+  so the list named the buckets that already scale and hid the serial remainder
+  entirely, which was 36% of the host's world tick and 43% of the client's. This
+  is the measurement that decides whether parallel work is worth pursuing further
+  or whether Amdahl's serial half is the wall. The peer list is *built* to a
+  130-character budget rather than truncated to it, since the relay caps a line at
+  195 and cutting mid-field would corrupt a row; the whole budget goes to the
+  fixed side, because the update side is per-frame visual work and the main line
+  already relays its costliest bucket. Widening costs nothing when buckets are
+  cheap — the formatter still stops at the first entry under 0.05 ms.
+
+Validated on Cosmoteer 0.30.4c by the smoke test, which caught one real budget
+overflow (206 characters) while being written. Both changes are unmeasured in a
+live multiplayer session; the in-game confirmation is a "FastParallel pool
+resized from X to Y workers" log line and `cores=` in the diagnostics. Every
+multiplayer participant must install 2.2.6 and restart the game.
+
 ## 2.2.5
 
 - Run a small **nested** `FastParallel.For` on the calling thread instead of
