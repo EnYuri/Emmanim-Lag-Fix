@@ -116,6 +116,15 @@ internal static class FastParallelIdleParkPatch
     private static int s_sleepers;
 
     /// <summary>
+    /// Workers currently parked, as a conservative "the pool has spare capacity"
+    /// signal for the nested-dispatch decision. A parked worker is definitely
+    /// idle; a worker still inside its spin budget reads as busy, so this
+    /// under-reports and never over-reports availability. Zero when this patch
+    /// did not apply, which leaves the caller on its length-only rule.
+    /// </summary>
+    internal static int ParkedWorkers => Volatile.Read(ref s_sleepers);
+
+    /// <summary>
     /// The <c>SpinWait.Count</c> at which a worker stops spinning and parks.
     ///
     /// Measured on this machine: climbing from 0 to 20 costs 254 us, and each

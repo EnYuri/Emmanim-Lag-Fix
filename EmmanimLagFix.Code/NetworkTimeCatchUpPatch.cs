@@ -213,6 +213,17 @@ internal static class NetworkTimeCatchUpPatch
 
         var now = Stopwatch.GetTimestamp();
         var previous = Interlocked.Exchange(ref _lastTimestamp, now);
+
+        // Vanilla returns a non-positive delta only from its developer-mode
+        // paths: tick-step mode returns zero for every frame that is not the one
+        // advancing step. Crediting real time there would run the world freely
+        // and defeat the debug tool. The clock above is still advanced, so the
+        // frame after such a pause is not credited for the paused time either.
+        if ((float)__result <= 0f)
+        {
+            return;
+        }
+
         if (previous == 0L)
         {
             return;

@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.2.15 (2026-09-14)
+
+- Run scene update bucket 7 on the worker pool, using SimRoot's own
+  ParallelUpdate handler. Vanilla marks only buckets 8, 10, 12 and 15 parallel;
+  bucket 7 was the largest item on the update side of the sim at 4.6-6.7 ms per
+  rendered frame, entirely on the main thread.
+- Correct a misreading of that bucket. UpdateBuckets.Oscillators is 7, so both
+  vanilla's GetBucketName and this mod's breakdown label it "Oscillators", but
+  Oscillator registers there only with Interpolate set and no part in vanilla,
+  the workshop set or the local mods sets it. The sole registrant is
+  PartSmoothedValue.SmoothedValueManager, one per ship, walking that ship's
+  non-deterministic smoothed values - in practice the radiator and
+  heat-exchanger families, the only components that set Deterministic = false.
+- Cannot desync: bucket 7 is by construction the non-deterministic half of
+  PartSmoothedValue and the deterministic half stays in fixed bucket -26. The
+  unit of work is one ship, the same independence the four existing parallel
+  buckets rely on, and PartNetworkValue is a pass-through that publishes nothing
+  from this path. smoothed-value-serial.txt restores the serial walk.
+- Add opt-in counters to the existing visual throttle: aggregate milliseconds
+  per frame, the refresh/skip split and values walked per refresh, reported as
+  smv. The throttle is inert below its own 20 Hz target, which is the state a
+  large fleet is measured in, so the split says whether it is still a lever.
+- Build and full smoke suite pass, including the handler signature match against
+  the custom bucket delegate and SimRoot.StartInit as the single patch site.
+
+## 2.2.14 (2026-09-14)
+
+- Fix a scheduling regression introduced with nested-dispatch inlining in 2.2.5.
+  A nested FastParallel range longer than one is now inlined only while no
+  worker is parked; a saturated pool keeps inlining exactly as before. Length
+  alone could not tell a cheap range from an expensive one.
+- Measured in single player on a 400-ship save. ResourceManager dispatches its
+  source search over at most four sinks per ship per tick, each costing about
+  1.5 ms on a megaship, from an outer pass with only about six active resource
+  managers. Inlined, those four ran serially on one worker. The search phase
+  held 88-92% of the whole Resources bucket.
+- Result on the same save: the phase's wall time fell from 5.6-6.9 ms per world
+  tick to 1.9-2.3 ms while its aggregate worker time was unchanged, which is
+  what identifies the change as scheduling rather than work. Fixed update
+  12.5-22.0 ms per tick down to 7.5-12.6, and frame rate 14-30 up to 31-65.
+- Add the per-sink search to the opt-in resource phase split. The diagnostics
+  line now carries sk, the time inside individual searches as a subset of srch,
+  and a per-ship-tick search count, so the rate limiter and the search body can
+  be told apart. fpinl also reports how often the idle gate changed a decision.
+- Build and full smoke suite pass, including the search overload bindings, the
+  idle-gate dependency and the existing nested-inline boundary cases.
+
 ## 2.2.13 (2026-09-14)
 
 - Limit finer automatic top-level batching to SimRoot's update/fixed-update

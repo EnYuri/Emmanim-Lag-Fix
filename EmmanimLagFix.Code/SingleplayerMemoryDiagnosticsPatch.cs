@@ -135,6 +135,8 @@ internal static class SingleplayerMemoryDiagnosticsPatch
             // parks/wakes/timeouts of the FastParallel idle park. A timeout share
             // near 100% means the wake handshake is not firing.
             $"phaseMs={phases} {simPhases} {breakdown.Full} " +
+            $"{ResourcePhaseSplitPatch.Snapshot()} " +
+            $"{PartSmoothedValueVisualThrottlePatch.Snapshot()} " +
             $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"fpinl={FastParallelNestedDispatchPatch.Counters()} " +

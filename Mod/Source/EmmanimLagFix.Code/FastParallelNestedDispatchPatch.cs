@@ -48,6 +48,24 @@ namespace EmmanimLagFix.Code;
 /// really does have thousands of sinks still dispatches and still spreads, which
 /// is the one nested case where the pool genuinely helps.
 ///
+/// Length is a necessary condition and not a sufficient one, which 2.2.13 got
+/// wrong and a 2026-09-14 single-player measurement caught. <c>ResourceManager</c>
+/// dispatches its source search over at most
+/// <c>floor(ResourceSearchesPerSecond / PhysicsUpdatesPerSecond)</c> sinks - four
+/// at stock rates - and on a fleet of a few very large ships each of those four
+/// costs about 1.5 ms, while only six resource managers are active per tick. That
+/// is a short range of very expensive items dispatched from a narrow outer pass:
+/// the pool was idle and the four searches ran back to back on one worker. The
+/// phase held 88-92% of the whole <c>Resources</c> bucket, and freeing it cut its
+/// wall time from 5.6-6.9 ms per world tick to 1.9-2.3 ms with the aggregate
+/// worker time unchanged, which is what identifies the change as scheduling
+/// rather than work.
+///
+/// So a range longer than one is inlined only while no worker is parked. That
+/// reads the pool rather than the range, and it errs toward the old behaviour: a
+/// worker still inside its spin budget counts as busy, so a saturated pool - the
+/// 607-ship shape this patch was written for - keeps inlining exactly as before.
+///
 /// This cannot change behaviour beyond what vanilla already permits. The body is
 /// invoked over the identical half-open range, batch partitioning and thread
 /// assignment are already arbitrary in vanilla, and <c>For</c> guarantees only
@@ -68,6 +86,15 @@ namespace EmmanimLagFix.Code;
 [HarmonyPatch]
 internal static class FastParallelNestedDispatchPatch
 {
+    /// <summary>
+    /// Inlinable ranges handed to the pool because a worker was parked, and the
+    /// times that decision was reached at all. The pair says how often the idle
+    /// gate actually changed the outcome; both zero means every dispatch was
+    /// either non-nested, out of range, or a range of one.
+    /// </summary>
+    internal static long DispatchedForIdleCount;
+    internal static long IdleCheckCount;
+
     /// <summary>Nested ranges inlined, and calls handed to vanilla.</summary>
     internal static long InlinedCount;
 
@@ -250,9 +277,44 @@ internal static class FastParallelNestedDispatchPatch
         // has to be read before the pool. EnableProfiling would otherwise lose a
         // ProfilerTask entry, and a zero live count means this is the outer
         // dispatch - the one that must actually reach the pool.
-        return FastParallel.IsRunning
-            && !FastParallel.EnableProfiling
-            && FastParallel.s_liveTasks.Count > 0;
+        if (!FastParallel.IsRunning
+            || FastParallel.EnableProfiling
+            || FastParallel.s_liveTasks.Count == 0)
+        {
+            return false;
+        }
+
+        // A range of one is what vanilla runs on the calling thread anyway, so
+        // inlining it only skips the bookkeeping and can never cost parallelism.
+        if (toExclusive - fromInclusive <= 1)
+        {
+            return true;
+        }
+
+        // Length alone cannot tell a cheap range from an expensive one, and the
+        // measurement that motivated this gate is the counter-example: the four
+        // sinks of ResourceManager.SearchForSources are a range of 4 costing
+        // about 1.5 ms each on a megaship. Inlined they ran serially, and the
+        // phase's wall time was 5.6-6.9 ms per world tick; dispatched, the same
+        // aggregate work finished in 1.9-2.3 ms.
+        //
+        // What separates the two cases is not the range but whether a worker is
+        // free to take it. When the outer dispatch is wide - 607 ships, the shape
+        // 2.2.5 was written for - the pool is saturated, no worker is parked, and
+        // inlining is right. When it is narrow - six active resource managers -
+        // workers sit parked while one of them runs four searches back to back.
+        //
+        // The signal is conservative in the safe direction: a worker inside its
+        // spin budget counts as busy, so this keeps inlining unless the pool is
+        // demonstrably idle.
+        Interlocked.Increment(ref IdleCheckCount);
+        if (FastParallelIdleParkPatch.ParkedWorkers > 0)
+        {
+            Interlocked.Increment(ref DispatchedForIdleCount);
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -282,5 +344,7 @@ internal static class FastParallelNestedDispatchPatch
         ? "off"
         : Volatile.Read(ref InlinedCount).ToString(CultureInfo.InvariantCulture)
         + "/" + Volatile.Read(ref VanillaCount).ToString(CultureInfo.InvariantCulture)
-        + "@" + SmallRangeLimit.ToString(CultureInfo.InvariantCulture);
+        + "@" + SmallRangeLimit.ToString(CultureInfo.InvariantCulture)
+        + "i" + Volatile.Read(ref DispatchedForIdleCount).ToString(CultureInfo.InvariantCulture)
+        + "/" + Volatile.Read(ref IdleCheckCount).ToString(CultureInfo.InvariantCulture);
 }

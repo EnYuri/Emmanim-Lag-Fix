@@ -67,21 +67,27 @@ internal static class ResourceSinkJobShardingPatch
     /// </summary>
     private sealed class ShardSlots
     {
-        internal object?[] Values = new object?[ShardMask + 1];
+        internal object?[] Values = new object?[InitialShardSlots];
     }
 
     private static readonly ConditionalWeakTable<object, ShardSlots> Slots = new();
     // Bound retained empty shard lists even if background producers turn over.
     private const int MaximumShardSlots = 128;
 
-    /// <summary>Power of two, so a thread id maps with a mask rather than a modulo.</summary>
-    private static readonly int ShardMask = ShardCountForWorkers(
-        FastParallelIdleParkPatch.WorkerCount) - 1;
+    /// <summary>
+    /// Slots allocated up front, one per expected producer. Nothing masks an
+    /// index against it any more - <see cref="Shard{T}"/> grows the array
+    /// instead, because wrapping put two live producers on one list. It stays a
+    /// power of two only so growth doubles onto an exact size.
+    /// </summary>
+    private static readonly int InitialShardSlots = ShardCountForWorkers(
+        FastParallelIdleParkPatch.WorkerCount);
 
     // FastParallel owns a stable worker set. Assign those threads and the
     // calling thread consecutive slots on first use; hashing ManagedThreadId
     // with a mask allowed two live producers to collide. Registration must also
-    // never wrap: background-thread turnover can exceed the initial slot count.
+    // never wrap: background-thread turnover can exceed the initial slot count,
+    // which is why the counter below is not reduced modulo the slot count.
     private static int s_nextShardIndex;
 
     [ThreadStatic]
@@ -108,7 +114,7 @@ internal static class ResourceSinkJobShardingPatch
         return n;
     }
 
-    internal static int ConfiguredShardCount => ShardMask + 1;
+    internal static int ConfiguredShardCount => InitialShardSlots;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int CurrentShardIndex()

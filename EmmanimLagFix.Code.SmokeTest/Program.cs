@@ -1863,6 +1863,125 @@ foreach (var allocOverload in AccessTools
             "Multiplayer diagnostics retained samples across a manager replacement/resync.");
     }
 
+    // The resource phase split is inert without a diagnostics flag, so Harmony's
+    // class-level Prepare stops before TargetMethods and a renamed game method
+    // would go unnoticed until someone turned the flag on. Resolve them here so a
+    // rename fails the build instead.
+    {
+        var splitType = typeof(EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.ResourcePhaseSplitPatch", throwOnError: true)!;
+        var targets = AccessTools.DeclaredMethod(splitType, "TargetMethods")
+            ?? throw new MissingMethodException(splitType.FullName, "TargetMethods");
+        var resolved = ((IEnumerable<MethodBase>)targets.Invoke(null, null)!).ToArray();
+        var expected = new[]
+        {
+            "FixedUpdate", "SearchForSources", "SearchForSources", "UpdateSinkJobs",
+            "ExpireManualTransferJobs",
+        };
+        if (resolved.Length != expected.Length
+            || !expected.SequenceEqual(resolved.Select(m => m.Name)))
+        {
+            throw new InvalidOperationException(
+                "Resource phase split resolved ["
+                + string.Join(", ", resolved.Select(m => m.Name))
+                + "] instead of [" + string.Join(", ", expected) + "].");
+        }
+
+        // Both overload pairs exist on ResourceManager; picking the wrong member of
+        // either would time the per-sink call rather than the whole phase.
+        // Both SearchForSources and UpdateSinkJobs are overloaded, and the two
+        // SearchForSources entries are deliberately one of each: the FixedUpdater
+        // overload is the whole rate-limited phase, the SinkInfo one is a single
+        // search inside it. Binding either twice would double-count.
+        var expectedParameters = new[] { "FixedUpdater", "FixedUpdater", "SinkInfo", "Time", "Time" };
+        for (var i = 0; i < resolved.Length; i++)
+        {
+            var parameters = resolved[i].GetParameters();
+            var arity = resolved[i].Name == "FixedUpdate" ? 2 : 1;
+            if (parameters.Length != arity
+                || parameters[0].ParameterType.Name != expectedParameters[i])
+            {
+                throw new InvalidOperationException(
+                    $"Resource phase split bound the wrong {resolved[i].Name} overload.");
+            }
+        }
+
+        var idle = AccessTools.DeclaredMethod(splitType, "Snapshot")!.Invoke(null, null);
+        if (idle is not string text || !text.StartsWith("rphase", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Resource phase snapshot shape changed: {idle}");
+        }
+    }
+
+    // Update bucket 7 runs on the pool through vanilla's own SimRoot.ParallelUpdate.
+    // Everything about it is resolved by reflection - an internal type, a private
+    // method and an inherited setter - so a rename would leave the bucket silently
+    // serial again rather than failing the build.
+    {
+        var parallelBucketType = typeof(EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.SmoothedValueBucketParallelPatch", throwOnError: true)!;
+        string Reason() =>
+            AccessTools.PropertyGetter(parallelBucketType, "FailureReason")!
+                .Invoke(null, null) as string ?? "no reason recorded";
+
+        var bucketSimRootType = AccessTools.PropertyGetter(parallelBucketType, "SimRootType")!
+            .Invoke(null, null) as Type
+            ?? throw new InvalidOperationException(
+                "SmoothedValueBucketParallelPatch could not resolve SimRoot: " + Reason());
+
+        var parallelUpdate = AccessTools.PropertyGetter(parallelBucketType, "ParallelUpdate")!
+            .Invoke(null, null) as MethodInfo
+            ?? throw new InvalidOperationException(
+                "SimRoot.ParallelUpdate was not found: " + Reason());
+        var setter = AccessTools.PropertyGetter(parallelBucketType, "Setter")!
+            .Invoke(null, null) as MethodInfo
+            ?? throw new InvalidOperationException(
+                "SceneRoot.SetCustomUpdateBucketHandler was not found: " + Reason());
+
+        // The postfix builds the handler from the setter's own second parameter,
+        // so the two shapes have to agree or the CreateDelegate throws at runtime
+        // on a scene that is already half-constructed.
+        var handlerType = setter.GetParameters() is { Length: 2 } setterParameters
+            ? setterParameters[1].ParameterType
+            : throw new InvalidOperationException(
+                "SetCustomUpdateBucketHandler no longer takes (bucket, handler).");
+        var invoke = handlerType.GetMethod("Invoke")
+            ?? throw new InvalidOperationException(
+                $"{handlerType.Name} is not a delegate type.");
+        if (!invoke.GetParameters().Select(parameter => parameter.ParameterType)
+                .SequenceEqual(parallelUpdate.GetParameters().Select(p => p.ParameterType)))
+        {
+            throw new InvalidOperationException(
+                "SimRoot.ParallelUpdate no longer matches the custom bucket handler signature, "
+                + "so update bucket 7 cannot be bound to it.");
+        }
+
+        var targets = AccessTools.DeclaredMethod(parallelBucketType, "TargetMethods")!;
+        var bucketTargets = ((IEnumerable<MethodBase>)targets.Invoke(null, null)!).ToArray();
+        if (bucketTargets.Length != 1 || bucketTargets[0].Name != "StartInit")
+        {
+            throw new InvalidOperationException(
+                "Expected SimRoot.StartInit as the single place to append the bucket "
+                + "registration; got ["
+                + string.Join(", ", bucketTargets.Select(m => m.Name)) + "].");
+        }
+
+        // Bucket 7 must still be one vanilla does not already run in parallel, or
+        // this patch is redundant and its overwrite hides a vanilla change.
+        var buckets = AccessTools.TypeByName("Cosmoteer.UpdateBuckets")
+            ?? throw new TypeLoadException("Cosmoteer.UpdateBuckets was not found.");
+        if (buckets.GetFields(BindingFlags.Static | BindingFlags.Public)
+                .Where(field => field.IsLiteral)
+                .All(field => (int)field.GetRawConstantValue()! != 7))
+        {
+            throw new InvalidOperationException("Update bucket 7 no longer exists.");
+        }
+
+        Console.WriteLine(
+            "PASS: smoothed-value update bucket 7 binds vanilla's SimRoot.ParallelUpdate "
+            + $"({bucketSimRootType.FullName}).");
+    }
+
     var relayType = typeof(EntryPoint).Assembly.GetType(
         "EmmanimLagFix.Code.PeerDiagnosticsRelayPatch", throwOnError: true)!;
     var breakdownType = typeof(EntryPoint).Assembly.GetType(
@@ -2506,6 +2625,22 @@ foreach (var allocOverload in AccessTools
     {
         throw new InvalidOperationException(
             "A full-int32 range was reported inlinable, so the length test overflowed.");
+    }
+
+    // The idle gate. A range longer than one is inlined only while no worker is
+    // parked, so the whole repair rests on one property on another patch class:
+    // renamed or made private, ShouldRunInline stops compiling rather than
+    // silently reverting, but a *type* rename would leave a stale reflection
+    // path elsewhere, so assert the member exists and reads as an int here too.
+    var idleGateType = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.FastParallelIdleParkPatch", throwOnError: true)!;
+    var parkedWorkers = AccessTools.PropertyGetter(idleGateType, "ParkedWorkers")
+        ?? throw new MissingMemberException(idleGateType.FullName, "ParkedWorkers");
+    if (parkedWorkers.Invoke(null, null) is not int parked || parked != 0)
+    {
+        throw new InvalidOperationException(
+            "FastParallelIdleParkPatch.ParkedWorkers did not read as zero outside a running "
+            + "pool, so the nested-dispatch idle gate cannot be trusted to mean what it says.");
     }
 
     // The prefix now also refines the batch size of a top-level dispatch, and it
