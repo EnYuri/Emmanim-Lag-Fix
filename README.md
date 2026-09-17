@@ -104,33 +104,6 @@ updates, and local multiplayer timeout/initialization behavior. It does not
 modify resource quantities, trade execution, crew jobs, packet formats, or
 deterministic simulation state.
 
-## Active memory investigation
-
-A 2026-08-27 same-process trace comparison confirmed long-lived Gen 2 and GC-handle
-growth, plus a separate vanilla `BlueprintPartStatProvider` delegate-allocation
-storm on large ships. The exact measurements, trace paths, analysis helper and
-recommended Harmony patch are preserved in MEMORY_DIAGNOSTICS.md, a local
-working-reference file kept out of this repository. Read it before changing
-caches or adding memory-related patches.
-
-## Resource logistics and path-search investigation
-
-Large multi-tile storage parts multiply otherwise identical source, sink and
-path-contiguity work. The controlled ship-removal tests, diagnostic traces,
-rejected 2.0.11 shared cache, released lock-free `PerShipCount` implementation and
-safety constraints for any future path optimization are preserved in
-RESOURCE_LOGISTICS_DIAGNOSTICS.md, a local working-reference file kept out of
-this repository. Read it before caching resource locations, routes, candidates
-or sink-job results.
-
-## Multiplayer synchronization investigation
-
-The complete `GameInit` transfer, client-side duplicate buffering, game-creation
-memory peak, frame-coupled ACK path, implemented timeout/buffer mitigations and
-the constraints for a future dedicated ACK pump are documented in
-MULTIPLAYER_SYNC_DIAGNOSTICS.md, a local working-reference file kept out of
-this repository.
-
 ## Diagnostics logging
 
 The mod ships two switches enabled, `multiplayer-memory-diagnostics.flag` and
