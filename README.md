@@ -1,9 +1,23 @@
 # Emmanim Lag Fix
 
-A Cosmoteer performance mod for very large, heavily modded ships and fleets.
+A Cosmoteer performance mod for very large, heavily modded ships and fleets —
+the kind that bog down singleplayer framerate and, in multiplayer, eventually
+drop a player outright. Cosmoteer's multiplayer is deterministic lockstep: every
+client simulates the game locally and only inputs cross the wire, so the
+slowest machine sets the pace for everyone, and one that falls too far behind
+gets disconnected with a `WaitingForAck` timeout rather than just lagging. This
+mod targets the CPU-saturation chain behind that timeout, plus a broader set of
+hot paths that don't specifically cause disconnects but cost frame time on big
+saves. See [Current optimizations](#current-optimizations) for the full list.
 
-The project combines ordinary `.rules` tuning with a narrowly-scoped .NET 10
-code layer. The code loader is deliberately restricted to the exact mod ID
+It combines ordinary `.rules` tuning, safe to read and reason about like any
+other mod, with a narrowly-scoped .NET 10 code layer for work that `.rules`
+alone can't express - UI caching, lock-free data structures, and the
+`WaitingForAck` timeout extension itself. The installer sets up both together
+by default; `Install.bat -NoLoader` skips the code layer and keeps just the
+`.rules` tuning (see [Installation](#installation)).
+
+The code loader is deliberately restricted to the exact mod ID
 `nayuri.emmanim_lag_fix`; it ignores DLLs from every other mod and accepts only
 the bundled Harmony library and the two code modules shipped in this package,
 `EmmanimLagFix.Code.dll` and `ModsQol.Code.dll`. The allow-list is a fixed set
@@ -11,8 +25,10 @@ compiled into the loader, not a folder scan, so adding a DLL to `Code/` by hand
 does not make it load.
 
 `ModsQol.Code.dll` is a separate module with its own Harmony id, added in 2.1.0.
-It exists only to lift an engine limit for the companion mod **Mods QoL**, and is
-inert without it - see [Mods QoL support](#mods-qol-support).
+It exists only to lift an engine limit for the companion mod **Mods QoL**, a
+private mod not published anywhere public, and is inert without it - see
+[Mods QoL support](#mods-qol-support). Nothing in this repository or its
+releases requires Mods QoL; the module is dormant if you don't have it.
 
 > [!WARNING]
 > Every multiplayer participant must install the same mod version because the
@@ -145,7 +161,13 @@ Pack.ps1                        Builds the GitHub release archive
 
 Releases are distributed as a single archive from the
 [Releases](https://github.com/EnYuri/Emmanim-Lag-Fix/releases) page. Extract it
-anywhere and run `Install.bat`; there is no Steam Workshop item to subscribe to.
+anywhere and run `Install.bat`.
+
+There *is* a Steam Workshop listing, `Emmanim Lag Fix (GitHub download
+required)`, but it's a stub: subscribing to it changes nothing in your game.
+Workshop can't host or review the optional native code layer this mod ships,
+so the listing exists only so the mod is discoverable from Workshop search; its
+description points here. Get the real mod from Releases above.
 
 The installer places the mod in the Cosmoteer user `Mods` folder and the code
 loader in `Cosmoteer\Bin`, resolving both the same way the game does. Both code
@@ -187,6 +209,11 @@ in no other mod's rules and every patch returns on its first branch. Mods QoL is
 equally usable without this module: an unresolved component ID is not an error,
 so its wire network simply keeps the rate-limited delivery path it shipped in
 1.64.1. Neither mod reads the other's version, and neither requires the other.
+
+> [!NOTE]
+> Mods QoL is a private mod, not published on Steam Workshop or anywhere else.
+> This section documents behavior for the one installation that runs both mods
+> together; if you don't have Mods QoL, this module simply does nothing.
 
 > [!WARNING]
 > The sentinel changes how much power a wire delivers, which is simulation state.
@@ -246,9 +273,17 @@ The Windows x64 proxy DLL requires Visual C++ and xmake:
 
 ## Upstream and licensing
 
-The loader is derived from
+The code loader bundled here is a modified fork of
 [`radistmorse/CosmoteerModLoader`](https://github.com/radistmorse/CosmoteerModLoader)
-at commit `2aee1c7d0175c7c3508435f3eccb5411b103581e` and remains under
-LGPL-2.1. Harmony is distributed under the MIT license. Original Emmanim code
-is MIT-licensed. See `LICENSE`, `LICENSE.txt`, the notices in `Mod/Code` and
-`Mod/Loader`, and [EMMANIM_FORK.md](EMMANIM_FORK.md).
+(Steam Workshop: [Yet Another Mod Loader](https://steamcommunity.com/sharedfiles/filedetails/?id=3577650065)),
+pinned to commit `2aee1c7d0175c7c3508435f3eccb5411b103581e` and kept under its
+original LGPL-2.1 license. The fork exists to apply the fixed mod-ID and DLL
+allow-list restrictions described at the top of this README - those aren't
+upstream behavior, they're what this project changed.
+[EMMANIM_FORK.md](EMMANIM_FORK.md) has the full list of deliberate deviations
+from upstream.
+
+Harmony is distributed under the MIT license, and the original Emmanim `.rules`
+tuning this mod builds on is likewise MIT-licensed. Full license text and
+per-DLL notices live in `LICENSE`, `LICENSE.txt`, and `Mod/Code` and
+`Mod/Loader`.
