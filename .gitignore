@@ -449,3 +449,11 @@ Mod/korean-ime-diagnostics.flag
 # required, and without this negation the generic *.pdb rule above would leave a
 # clean checkout unable to pack.
 !Mod/Code/*.pdb
+
+# Session logs and diagnostics writeups are working-reference notes, not
+# release material - kept locally, never published to GitHub.
+/SESSION_LOG.md
+/MEMORY_DIAGNOSTICS.md
+/MULTIPLAYER_SYNC_DIAGNOSTICS.md
+/RESOURCE_LOGISTICS_DIAGNOSTICS.md
+/CLIENT_STUTTER_DIAGNOSTICS.md
