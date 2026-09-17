@@ -191,26 +191,25 @@ version is read from `Mod/mod.rules`, so the archive name cannot disagree with
 what the game reports. The archive it writes is for local verification; the one
 that ships is built by CI from the committed payload.
 
-Publishing is therefore just the tag:
+Publishing is just the tag:
 
 ```powershell
 git tag -a v<version> -m "Emmanim Lag Fix <version>"
 git push origin v<version>
 ```
 
-Do not also run `gh release create`. The workflow's last step does exactly that,
-and a release made by hand fails the job with *a release with the same tag name
-already exists*. Note too that this repository has an `upstream` remote, so a
-bare `gh` command targets the fork source rather than this repository - always
-pass `--repo EnYuri/Emmanim-Lag-Fix`.
-
 Pushing a matching `v*` tag runs `.github/workflows/release.yml`. The Windows
 runner validates the tag against `Mod/mod.rules`, checks the committed installer
-and binary payload, runs `Pack.ps1`, verifies the archive contents, and publishes
-the ZIP as a GitHub Release asset. It deliberately packages the committed DLLs
-instead of rebuilding the code module because Cosmoteer's proprietary reference
-assemblies are not available on GitHub-hosted runners. Build and smoke-test the
-DLL locally before committing and tagging.
+and binary payload, runs `Pack.ps1`, verifies the archive contents, and itself
+publishes the ZIP as a GitHub Release asset - a manually created release with
+the same tag name would conflict with that last step. The workflow deliberately
+packages the committed DLLs instead of rebuilding the code module, because
+Cosmoteer's proprietary reference assemblies aren't available on GitHub-hosted
+runners, so the DLL needs to be built and smoke-tested locally before
+committing and tagging.
+
+This repository also has an `upstream` remote pointing at the fork source, so
+a `gh` command without `--repo EnYuri/Emmanim-Lag-Fix` targets the wrong repo.
 
 ## Building
 
