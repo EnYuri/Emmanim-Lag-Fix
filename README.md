@@ -24,11 +24,10 @@ the bundled Harmony library and the two code modules shipped in this package,
 compiled into the loader, not a folder scan, so adding a DLL to `Code/` by hand
 does not make it load.
 
-`ModsQol.Code.dll` is a separate module with its own Harmony id, added in 2.1.0.
-It exists only to lift an engine limit for the companion mod **Mods QoL**, a
-private mod not published anywhere public, and is inert without it - see
-[Mods QoL support](#mods-qol-support). Nothing in this repository or its
-releases requires Mods QoL; the module is dormant if you don't have it.
+`ModsQol.Code.dll` is an experimental test module, added in 2.1.0, for a
+private companion mod that is not published anywhere. Nobody else has that
+mod, so the module is always dormant and does nothing for other users - see
+[Mods QoL support](#mods-qol-support).
 
 > [!WARNING]
 > Every multiplayer participant must install the same mod version because the
@@ -110,8 +109,9 @@ deterministic simulation state.
 A 2026-08-27 same-process trace comparison confirmed long-lived Gen 2 and GC-handle
 growth, plus a separate vanilla `BlueprintPartStatProvider` delegate-allocation
 storm on large ships. The exact measurements, trace paths, analysis helper and
-recommended Harmony patch are preserved in [MEMORY_DIAGNOSTICS.md](MEMORY_DIAGNOSTICS.md).
-Read that file before changing caches or adding memory-related patches.
+recommended Harmony patch are preserved in MEMORY_DIAGNOSTICS.md, a local
+working-reference file kept out of this repository. Read it before changing
+caches or adding memory-related patches.
 
 ## Resource logistics and path-search investigation
 
@@ -119,15 +119,17 @@ Large multi-tile storage parts multiply otherwise identical source, sink and
 path-contiguity work. The controlled ship-removal tests, diagnostic traces,
 rejected 2.0.11 shared cache, released lock-free `PerShipCount` implementation and
 safety constraints for any future path optimization are preserved in
-[RESOURCE_LOGISTICS_DIAGNOSTICS.md](RESOURCE_LOGISTICS_DIAGNOSTICS.md). Read it
-before caching resource locations, routes, candidates or sink-job results.
+RESOURCE_LOGISTICS_DIAGNOSTICS.md, a local working-reference file kept out of
+this repository. Read it before caching resource locations, routes, candidates
+or sink-job results.
 
 ## Multiplayer synchronization investigation
 
 The complete `GameInit` transfer, client-side duplicate buffering, game-creation
 memory peak, frame-coupled ACK path, implemented timeout/buffer mitigations and
 the constraints for a future dedicated ACK pump are documented in
-[MULTIPLAYER_SYNC_DIAGNOSTICS.md](MULTIPLAYER_SYNC_DIAGNOSTICS.md).
+MULTIPLAYER_SYNC_DIAGNOSTICS.md, a local working-reference file kept out of
+this repository.
 
 ## Diagnostics logging
 
@@ -188,27 +190,10 @@ run `Mod/Install.bat -LoaderOnly`.
 
 ## Mods QoL support
 
-`ModsQol.Code.dll` (2.1.0) is a second, independent module: its own Harmony id,
-its own smoke test, and a set of patched methods disjoint from every Emmanim
-patch. It exists because a data-only mod cannot express one thing.
-
-A Cosmoteer part proxies a neighbouring part's storage by **naming** a component.
-`RelativePartCriteria` matches part identity only, and `ProxyableComponents`
-stops at the first entry whose criteria match rather than trying each name in
-turn, so there is no way to write "whatever component that part uses to store
-power". A mod that delivers power over a wire network therefore has to enumerate
-every recipient part by hand, and that list can never keep up with the mods a
-player actually has installed.
-
-This module recognizes a sentinel component ID of the form
-`znayuri_any_<resource>`, resumes the scan from the entry vanilla stopped on, and
-binds the part's largest real storage of that resource.
-
-It is inert without **Mods QoL** 1.65.0 or later, because that sentinel ID exists
-in no other mod's rules and every patch returns on its first branch. Mods QoL is
-equally usable without this module: an unresolved component ID is not an error,
-so its wire network simply keeps the rate-limited delivery path it shipped in
-1.64.1. Neither mod reads the other's version, and neither requires the other.
+`ModsQol.Code.dll` (2.1.0) is a test module for a private companion mod called
+**Mods QoL**, which is not published anywhere public. It has no effect unless
+that exact mod is also installed, which for anyone outside this installation
+it never is - so for practical purposes this module doesn't do anything.
 
 > [!NOTE]
 > Mods QoL is a private mod, not published on Steam Workshop or anywhere else.
