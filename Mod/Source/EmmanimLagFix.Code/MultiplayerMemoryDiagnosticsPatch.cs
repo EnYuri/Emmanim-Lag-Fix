@@ -72,6 +72,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
     private static int _lastGen0 = GC.CollectionCount(0);
     private static int _lastGen1 = GC.CollectionCount(1);
     private static int _lastGen2 = GC.CollectionCount(2);
+    private static long _lastPauseTicks = GC.GetTotalPauseDuration().Ticks;
 
     private static void Postfix(BaseMPManager __instance)
     {
@@ -114,6 +115,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         _lastGen0 = GC.CollectionCount(0);
         _lastGen1 = GC.CollectionCount(1);
         _lastGen2 = GC.CollectionCount(2);
+        _lastPauseTicks = GC.GetTotalPauseDuration().Ticks;
 
         // These counters live outside this class but feed the same report.
         // Discard the old manager's partial phase window before the new game
@@ -121,6 +123,9 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         _ = FramePhaseDiagnosticsPatch.Snapshot(ReportSeconds);
         _ = SimPhaseDiagnosticsPatch.Snapshot();
         _ = SceneUpdateBreakdown.Take();
+        _ = StatusPhaseDiagnostics.Take();
+        _ = BucketInnerDiagnostics.Take();
+        _ = FastParallelWaitDiagnosticsPatch.Take();
         _ = HeatModulationContextSkipPatch.TakeCounters();
         _sampledManager = new WeakReference<BaseMPManager>(manager);
     }
@@ -329,6 +334,9 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         var gen0Delta = gen0 - Interlocked.Exchange(ref _lastGen0, gen0);
         var gen1Delta = gen1 - Interlocked.Exchange(ref _lastGen1, gen1);
         var gen2Delta = gen2 - Interlocked.Exchange(ref _lastGen2, gen2);
+        var pauseTicks = GC.GetTotalPauseDuration().Ticks;
+        var pauseDeltaMs = (pauseTicks - Interlocked.Exchange(ref _lastPauseTicks, pauseTicks))
+            / (double)TimeSpan.TicksPerMillisecond;
 
         // Both lines are built from the same window, so the samples are read
         // twice and cleared once, after.
@@ -359,7 +367,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"privateMiB={ToMiB(process.PrivateMemorySize64):F0} workingMiB={ToMiB(process.WorkingSet64):F0} " +
             $"managedMiB={ToMiB(GC.GetTotalMemory(false)):F0} heapMiB={ToMiB(gcInfo.HeapSizeBytes):F0} " +
             $"fragmentedMiB={ToMiB(gcInfo.FragmentedBytes):F0} handles={process.HandleCount} " +
-            $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} frameMs={frameTimes} cpuCores={cpuLoad} " +
+            $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} gcp={pauseDeltaMs:F0} frameMs={frameTimes} cpuCores={cpuLoad} " +
             // parks/wakes/timeouts of the FastParallel idle park. A timeout share
             // near 100% means the wake handshake is not firing.
             // input/update/draw milliseconds per frame, then frames per second.
@@ -371,6 +379,9 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"fpinl={FastParallelNestedDispatchPatch.Counters()} " +
             $"fpbs={FastParallelBatchSize.Counters()} " +
+            $"lpt={ParallelBucketLptPatch.Counters()} " +
+            $"dser={DeserializationInvokeCompilePatch.Counters()} " +
+            $"tq={ThreadedTaskQueueDynamicInvokePatch.Counters()} " +
             $"idelay={MultiplayerHostUpdateThrottlePatch.UrgentSends} " +
             $"players={manager._playerInfos.Count} " +
             $"inputQueued={queuedInputTicks} inputMax={maximumPlayerQueue} outgoingInputs={manager._outgoingInputs.Count} " +
@@ -402,13 +413,18 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             manager,
             $"t={manager.NetworkInputTick} ft={frameTimes} cpu={cpuLoad} "
             + $"pv={ToMiB(process.PrivateMemorySize64):F0} hp={ToMiB(gcInfo.HeapSizeBytes):F0} "
-            + $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} q={queuedInputTicks}/{maximumPlayerQueue} "
+            + $"gc={gen0Delta}/{gen1Delta}/{gen2Delta} gcp={pauseDeltaMs:F0} q={queuedInputTicks}/{maximumPlayerQueue} "
             + $"cq={connectionReceiveQueue} ph={phases} {simPhases} {breakdown.Compact} pk={pickups} tc={NetworkTimeCatchUpPatch.MaxTicksPerFrame}/{raised} "
             + $"fp={FastParallelIdleParkPatch.CompactCounters()}");
         // Separate short payload: do not let the chat limit truncate either
         // the existing report or these rank-independent validation metrics.
         var focused = $"kind=status-resource t={manager.NetworkInputTick} {breakdown.Focused} "
-            + $"cap={(StatusModulationListCapacityPatch.AppliedToTiles ? 1 : 0)}/{(StatusModulationListCapacityPatch.AppliedToParts ? 1 : 0)} {HeatModulationContextSkipPatch.TakeCounters()}";
+            + $"cap={(StatusModulationListCapacityPatch.AppliedToTiles ? 1 : 0)}/{(StatusModulationListCapacityPatch.AppliedToParts ? 1 : 0)} {HeatModulationContextSkipPatch.TakeCounters()} "
+            // The bounded inner-bucket list goes before the type list, so a
+            // rare over-long stt tail is still what the relay's 195-char cap
+            // eats rather than the cap/ctx validation fields.
+            + $"{BucketInnerDiagnostics.Take()} " + FastParallelWaitDiagnosticsPatch.Take()
+            + " " + StatusPhaseDiagnostics.Take();
         Halfling.Logging.Logger.Log($"[EmmanimLagFix.StatusResourceDiagnostics] {focused}");
         PeerDiagnosticsRelayPatch.MaybeSend(manager, focused);
 

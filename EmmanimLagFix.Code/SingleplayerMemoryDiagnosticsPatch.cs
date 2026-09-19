@@ -27,6 +27,7 @@ internal static class SingleplayerMemoryDiagnosticsPatch
     private static int _lastGen0 = GC.CollectionCount(0);
     private static int _lastGen1 = GC.CollectionCount(1);
     private static int _lastGen2 = GC.CollectionCount(2);
+    private static long _lastPauseTicks = GC.GetTotalPauseDuration().Ticks;
 
     private static void Postfix(GameRoot __instance)
     {
@@ -112,6 +113,12 @@ internal static class SingleplayerMemoryDiagnosticsPatch
         var gen0Delta = gen0 - Interlocked.Exchange(ref _lastGen0, gen0);
         var gen1Delta = gen1 - Interlocked.Exchange(ref _lastGen1, gen1);
         var gen2Delta = gen2 - Interlocked.Exchange(ref _lastGen2, gen2);
+        // Stop-the-world pause milliseconds in the window: the candidate
+        // source for the recurring 40-100 ms stalls in lg/fpw that neither
+        // worker priority nor bucket ordering could remove.
+        var pauseTicks = GC.GetTotalPauseDuration().Ticks;
+        var pauseDeltaMs = (pauseTicks - Interlocked.Exchange(ref _lastPauseTicks, pauseTicks))
+            / (double)TimeSpan.TicksPerMillisecond;
 
         // These probes share the frame counter. Snapshot it first, then drain
         // both simulation probes on every SP report, just as the MP reporter
@@ -127,7 +134,7 @@ internal static class SingleplayerMemoryDiagnosticsPatch
             $"privateMiB={ToMiB(process.PrivateMemorySize64):F0} workingMiB={ToMiB(process.WorkingSet64):F0} " +
             $"managedMiB={ToMiB(GC.GetTotalMemory(false)):F0} heapMiB={ToMiB(gcInfo.HeapSizeBytes):F0} " +
             $"fragmentedMiB={ToMiB(gcInfo.FragmentedBytes):F0} handles={process.HandleCount} " +
-            $"allocatedMiBs={ToMiB(allocatedDelta) / elapsedSeconds:F1} gc={gen0Delta}/{gen1Delta}/{gen2Delta} " +
+            $"allocatedMiBs={ToMiB(allocatedDelta) / elapsedSeconds:F1} gc={gen0Delta}/{gen1Delta}/{gen2Delta} gcp={pauseDeltaMs:F0} " +
             $"ships={sim.Ships.Count} parts={liveParts}/{blueprintParts} " +
             $"stasis={sim.Stasis.Count}/{preloadedStasis} decals={decalPickers}/{decalItems} " +
             $"serializedShips={serializedShips}/{ToMiB(serializedShipBytes):F1}MiB " +
@@ -135,12 +142,18 @@ internal static class SingleplayerMemoryDiagnosticsPatch
             // parks/wakes/timeouts of the FastParallel idle park. A timeout share
             // near 100% means the wake handshake is not firing.
             $"phaseMs={phases} {simPhases} {breakdown.Full} " +
+            $"{StatusPhaseDiagnostics.Take()} {BucketInnerDiagnostics.Take()} " +
+            $"{FastParallelWaitDiagnosticsPatch.Take()} " +
+            $"{HeatModulationContextSkipPatch.TakeCounters()} " +
             $"{ResourcePhaseSplitPatch.Snapshot()} " +
             $"{PartSmoothedValueVisualThrottlePatch.Snapshot()} " +
             $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
             $"fpinl={FastParallelNestedDispatchPatch.Counters()} " +
-            $"fpbs={FastParallelBatchSize.Counters()}");
+            $"fpbs={FastParallelBatchSize.Counters()} " +
+            $"lpt={ParallelBucketLptPatch.Counters()} " +
+            $"dser={DeserializationInvokeCompilePatch.Counters()} " +
+            $"tq={ThreadedTaskQueueDynamicInvokePatch.Counters()}");
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;

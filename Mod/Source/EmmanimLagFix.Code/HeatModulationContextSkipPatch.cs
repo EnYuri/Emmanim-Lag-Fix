@@ -1,49 +1,121 @@
 using System.Reflection;
 using System.Reflection.Emit;
 using Cosmoteer.Ships;
+using Cosmoteer.Ships.Parts;
 using Cosmoteer.Ships.Statuses;
+using Cosmoteer.Ships.Statuses.Subhandlers;
 using Halfling;
 using Halfling.Geometry;
+using Halfling.Pooling;
+using Halfling.Timing;
 using HarmonyLib;
 
 namespace EmmanimLagFix.Code;
 
 /// <summary>
-/// Always-on, exact vanilla heat-rule specialization. Rewrites only the status
-/// context population call inside tile modulation, never effects or diffusion.
-/// Vanilla dictionary allocation/clear and all value/event code remain intact.
+/// Always-on, exact vanilla heat-rule specialization of tile modulation.
+///
+/// When the status type matches the exact vanilla heat shape and the store is
+/// the tile handler's <c>StatusStore&lt;IntVector2&gt;</c>, the transpiler
+/// redirects the whole
+/// <c>_ModulateStatusValues</c> call to <see cref="SpecializedLoop"/>: a
+/// bit-exact rewrite that removes provably-dead per-status work (dictionary
+/// clear, buff/context lookups, modulation struct and dispatch, changed-status
+/// list lookup) while preserving iteration order, event order and the
+/// resistance read. Any shape deviation falls back into the vanilla body,
+/// where the same guard still skips the individual <c>PopulateStatuses</c> and
+/// <c>GetBuffs</c> calls via <see cref="PopulateCore"/>/<see cref="BuffsCore"/>.
+///
+/// <c>ValueModulationData.Buffs</c> is provably unread for this shape - the
+/// single <c>Constant</c> modulator's <c>GetModifierValue</c> returns its
+/// literal, <c>Add</c> uses only <c>Value</c>, <c>ValueResistance</c> and
+/// <c>DeltaTime</c>, and <c>StatusFilter</c> being null is part of the guard.
+/// <c>ValueResistance</c> is read, so the resistance lookup is never skipped.
 /// </summary>
 [HarmonyPatch]
 internal static class HeatModulationContextSkipPatch
 {
     internal static bool Applied { get; private set; }
+    internal static bool LoopInstalled { get; private set; }
     private static long _skipped;
     private static long _fallback;
+    private static long _buffsSkipped;
+    private static long _buffsFallback;
+    private static long _loopStatuses;
+
+    private static readonly Func<StatusHandler<IntVector2>, IStatusStore<IntVector2>> _store =
+        AccessTools.MethodDelegate<Func<StatusHandler<IntVector2>, IStatusStore<IntVector2>>>(
+            AccessTools.PropertyGetter(typeof(StatusHandler<IntVector2>), "Store")!);
+
+    private delegate void StatusModifiedDelegate(StatusHandler<IntVector2> self,
+        Status<IntVector2> status, float oldValue, StatusList<IntVector2> list, bool silent);
+
+    private static readonly StatusModifiedDelegate _onModified = AccessTools.MethodDelegate<StatusModifiedDelegate>(
+        AccessTools.Method(typeof(StatusHandler<IntVector2>), "OnStatusValueModified",
+            new[] { typeof(Status<IntVector2>), typeof(float), typeof(StatusList<IntVector2>), typeof(bool) })!);
 
     private static MethodBase TargetMethod() => StatusModulationListCapacityPatch.FindTarget(typeof(IntVector2));
 
-    private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+    private static IEnumerable<CodeInstruction> Transpiler(
+        IEnumerable<CodeInstruction> instructions, ILGenerator generator, MethodBase original)
     {
-        var target = AccessTools.Method(typeof(IStatusEffectDataProvider<IntVector2>),
+        var populateTarget = AccessTools.Method(typeof(IStatusEffectDataProvider<IntVector2>),
             "PopulateStatuses", new[] { typeof(Status<IntVector2>), typeof(Ship),
                 typeof(Dictionary<StatusType, IStatusLocationInfo>) })!;
-        var helper = AccessTools.Method(typeof(HeatModulationContextSkipPatch), nameof(Populate))!;
-        var count = 0;
+        var buffsTarget = AccessTools.Method(typeof(IStatusEffectDataProvider<IntVector2>),
+            "GetBuffs", new[] { typeof(Status<IntVector2>), typeof(Ship) })!;
+        var populateHelper = AccessTools.Method(typeof(HeatModulationContextSkipPatch), nameof(Populate))!;
+        var buffsHelper = AccessTools.Method(typeof(HeatModulationContextSkipPatch), nameof(Buffs))!;
+        var rewritten = new List<CodeInstruction>();
+        var populates = 0;
+        var buffs = 0;
         foreach (var instruction in instructions)
         {
-            if (instruction.Calls(target))
+            MethodBase? helper = instruction.Calls(populateTarget) ? populateHelper
+                : instruction.Calls(buffsTarget) ? buffsHelper
+                : null;
+            if (helper != null)
             {
-                count++;
+                if (helper == populateHelper) populates++;
+                else buffs++;
                 var load = new CodeInstruction(OpCodes.Ldarg_0);
                 load.labels.AddRange(instruction.labels);
                 load.blocks.AddRange(instruction.blocks);
-                yield return load;
-                yield return new CodeInstruction(OpCodes.Call, helper);
+                rewritten.Add(load);
+                rewritten.Add(new CodeInstruction(OpCodes.Call, helper));
             }
-            else yield return instruction;
+            else rewritten.Add(instruction);
         }
-        if (count != 1) throw new InvalidOperationException(
-            $"Expected one tile modulation PopulateStatuses call, found {count}.");
+        if (populates != 1 || buffs != 1) throw new InvalidOperationException(
+            $"Expected one PopulateStatuses and one GetBuffs call in tile modulation, "
+            + $"found {populates} and {buffs}.");
+
+        // Whole-loop specialization: the local function receives its captured
+        // variables as a byref display struct; resolve the FixedUpdater field so
+        // the specialized path reads the exact same interval vanilla would.
+        var parameters = original.GetParameters();
+        if (parameters.Length != 1 || !parameters[0].ParameterType.IsByRef)
+            throw new InvalidOperationException(
+                $"{original} no longer takes a single byref display-struct parameter.");
+        var updaterField = AccessTools.Field(parameters[0].ParameterType.GetElementType()!, "fixedUpdater")
+            ?? throw new InvalidOperationException(
+                $"{parameters[0].ParameterType.GetElementType()} no longer carries a fixedUpdater field.");
+        var guard = AccessTools.Method(typeof(HeatModulationContextSkipPatch), nameof(LoopGuard))!;
+        var loop = AccessTools.Method(typeof(HeatModulationContextSkipPatch), nameof(SpecializedLoop))!;
+
+        var specialized = generator.DefineLabel();
+        yield return new CodeInstruction(OpCodes.Ldarg_0);
+        yield return new CodeInstruction(OpCodes.Call, guard);
+        yield return new CodeInstruction(OpCodes.Brtrue, specialized);
+        foreach (var instruction in rewritten) yield return instruction;
+        var tail = new CodeInstruction(OpCodes.Ldarg_0);
+        tail.labels.Add(specialized);
+        yield return tail;
+        yield return new CodeInstruction(OpCodes.Ldarg_1);
+        yield return new CodeInstruction(OpCodes.Ldfld, updaterField);
+        yield return new CodeInstruction(OpCodes.Call, loop);
+        yield return new CodeInstruction(OpCodes.Ret);
+        LoopInstalled = true;
         Applied = true;
     }
 
@@ -69,6 +141,29 @@ internal static class HeatModulationContextSkipPatch
         StatusHandler<IntVector2> handler)
         => PopulateCore(handler.StatusType, provider, status, ship, dictionary);
 
+    /// <summary>
+    /// Returns null instead of the part's buff dictionary when the modulator
+    /// shape provably never reads it - the dictionary is cleared immediately
+    /// before this call each iteration, so the count argument is a literal.
+    /// </summary>
+    private static IReadOnlyDictionary<Cosmoteer.Ships.Buffs.BuffType, float>? Buffs(
+        IStatusEffectDataProvider<IntVector2> provider,
+        Status<IntVector2> status, Ship ship, StatusHandler<IntVector2> handler)
+        => BuffsCore(handler.StatusType, provider, status, ship);
+
+    internal static IReadOnlyDictionary<Cosmoteer.Ships.Buffs.BuffType, float>? BuffsCore(
+        StatusType type, IStatusEffectDataProvider<IntVector2> provider,
+        Status<IntVector2> status, Ship ship)
+    {
+        var skip = CanSkip(type, provider, 0);
+        if (FramePhaseDiagnosticsPatch.Enabled)
+        {
+            if (skip) Interlocked.Increment(ref _buffsSkipped);
+            else Interlocked.Increment(ref _buffsFallback);
+        }
+        return skip ? null : provider.GetBuffs(status, ship);
+    }
+
     internal static void PopulateCore(StatusType type,
         IStatusEffectDataProvider<IntVector2> provider, Status<IntVector2> status,
         Ship ship, Dictionary<StatusType, IStatusLocationInfo> dictionary)
@@ -82,6 +177,102 @@ internal static class HeatModulationContextSkipPatch
         if (!skip) provider.PopulateStatuses(status, ship, dictionary);
     }
 
+    /// <summary>
+    /// Once-per-handler-per-tick gate for the specialized loop. Beyond the
+    /// exact-shape <see cref="CanSkip"/> checks, the store must be the tile
+    /// handler's <c>StatusStore&lt;IntVector2&gt;</c> because the loop relies on
+    /// its flat enumerator and <c>GetAllStatusLists</c> traversing the same
+    /// lists in the same order - identical by construction for that type (both
+    /// enumerate <c>_statuses.Values</c>), unproven for any other.
+    /// </summary>
+    internal static bool LoopGuard(StatusHandler<IntVector2> handler)
+        => _store(handler).GetType() == typeof(StatusStore<IntVector2>)
+            && CanSkip(handler.StatusType, handler.DataProvider, 0);
+
+    /// <summary>
+    /// Bit-exact rewrite of vanilla <c>_ModulateStatusValues</c> for the guarded
+    /// shape. Provably-dead work removed per status: the temp dictionary
+    /// alloc/clear, the <c>GetBuffs</c> and <c>PopulateStatuses</c> calls (both
+    /// unread by this modulator shape), the <c>ValueModulationData</c> struct
+    /// and modulator dispatch (inlined: ConvertValue is identity for Raw->Raw,
+    /// so Subtract of the constant is literally
+    /// <c>value + (modifier*dt) * (0f - (resistance - 1f))</c>), and the
+    /// <c>GetOrCreateStatusList</c> lookup in the two-argument
+    /// <c>OnStatusValueModified</c> - enumerating status lists directly hands
+    /// the same list the lookup would have returned. Iteration order, the
+    /// changed-status event order and <c>_ShouldRemoveForMinValue</c> semantics
+    /// are unchanged.
+    /// </summary>
+    private static void SpecializedLoop(StatusHandler<IntVector2> handler, FixedUpdater fixedUpdater)
+    {
+        var type = handler.StatusType;
+        var ship = handler.Ship;
+        var provider = handler.DataProvider;
+        var clampRange = type.ValueClampRange;
+        var resistRange = type.ValueModulationResistanceRange;
+        var constant = (ConstantValueModulatorRules)type.ValueModulators!.Modulators[0];
+        var affected = constant.AffectedValueRange;
+        var modifier = 0f - constant.Value;
+        var dt = (float)fixedUpdater.Interval;
+        var changed = TempList<(Status<IntVector2>, float, StatusList<IntVector2>)>.Alloc();
+        try
+        {
+            changed.EnsureCapacity(handler.StatusCount);
+            var processed = 0;
+            foreach (var list in _store(handler).GetAllStatusLists())
+            {
+                foreach (var item in list)
+                {
+                    processed++;
+                    var resistance = resistRange.IsRanged
+                        ? Mathx.Clamp(
+                            provider.GetPartAtLocation(item.Location, ship)
+                                ?.GetStatusResistance(type.ID, null).value ?? 0f,
+                            resistRange)
+                        : resistRange.Min;
+                    var value = ModulateCore(item.Value, resistance, dt, modifier, affected, clampRange);
+                    if (!item.Value.Equals(value))
+                    {
+                        changed.Add((item, item.Value, list));
+                        item.Value = value;
+                    }
+                }
+            }
+            foreach (var (status, oldValue, list) in changed)
+            {
+                _onModified(handler, status, oldValue, list, silent: false);
+            }
+            if (FramePhaseDiagnosticsPatch.Enabled)
+            {
+                Interlocked.Add(ref _loopStatuses, processed);
+            }
+        }
+        finally
+        {
+            changed.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// One status' modulation for the guarded shape: the constant modulator's
+    /// <c>AffectsValue</c> range check, then Subtract's
+    /// <c>Add(data, 0f - ConvertValue(Value))</c> with
+    /// <c>ScaleByDeltaTime</c>. Mirrors the vanilla expression order exactly so
+    /// results are bit-identical; verified against the real modulator chain in
+    /// the smoke test.
+    /// </summary>
+    internal static float ModulateCore(
+        float value, float resistance, float dt, float modifier, Range<float> affected, Range<float> clampRange)
+    {
+        if (value >= affected.Min && value < affected.Max)
+        {
+            value += (modifier * dt) * (0f - (resistance - 1f));
+        }
+        return Mathx.Clamp(value, clampRange);
+    }
+
     internal static string TakeCounters() =>
-        $"ctx={(Applied ? "on" : "off")} sk={Interlocked.Exchange(ref _skipped, 0)} vf={Interlocked.Exchange(ref _fallback, 0)}";
+        $"ctx={(Applied ? "on" : "off")} sk={Interlocked.Exchange(ref _skipped, 0)} vf={Interlocked.Exchange(ref _fallback, 0)}"
+        + $" bs={Interlocked.Exchange(ref _buffsSkipped, 0)}/{Interlocked.Exchange(ref _buffsFallback, 0)}"
+        + $" ls={Interlocked.Exchange(ref _loopStatuses, 0)}";
 }

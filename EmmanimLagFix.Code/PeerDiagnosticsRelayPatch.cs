@@ -59,6 +59,15 @@ internal static class PeerDiagnosticsRelayPatch
     internal static int Received { get; private set; }
 
     /// <summary>
+    /// The host log holds the peer's timings but nothing about the machine
+    /// producing them - the 2026-09-18 session's slow peer was on four physical
+    /// cores and 16 GB, a fact that had to come from the user because the data
+    /// never reaches the host. Sent once per session, ahead of the first
+    /// diagnostics line.
+    /// </summary>
+    private static bool _sysInfoSent;
+
+    /// <summary>
     /// Only the client sends: the host is the one collecting, and its own line
     /// is already in its log.
     /// </summary>
@@ -77,16 +86,29 @@ internal static class PeerDiagnosticsRelayPatch
                 return;
             }
 
-            var text = Marker + compactLine;
-            if (text.Length > MaxTextLength)
+            if (!_sysInfoSent)
             {
-                text = text[..MaxTextLength];
+                _sysInfoSent = true;
+                try
+                {
+                    // GetSystemInfo() is populated and cached by the game's own
+                    // startup, so reading it again costs nothing.
+                    var info = Halfling.App.Platform?.GetSystemInfo();
+                    if (info != null)
+                    {
+                        Send(provider, manager, "kind=sysinfo cpu=" + CleanField(info.CPUName, 48)
+                            + " cores=" + info.LogicalCores + "/" + info.PhysicalCores
+                            + " ramgb=" + ((info.SystemRAM + (1UL << 29)) >> 30)
+                            + " gpu=" + CleanField(info.VideoAdapterName, 48));
+                    }
+                }
+                catch (Exception)
+                {
+                    // Best-effort: the diagnostics line below still goes out.
+                }
             }
 
-            // Team null keeps it on the global channel, which every peer's
-            // ChatBox receives regardless of team assignment.
-            provider.SendChat(new ChatMessage(LocalPlayerName(manager), text));
-            Sent++;
+            Send(provider, manager, compactLine);
         }
         catch (Exception e)
         {
@@ -94,6 +116,35 @@ internal static class PeerDiagnosticsRelayPatch
             // stop trying to explain it every minute.
             Log($"[EmmanimLagFix.PeerDiagnostics] relay send failed: {e.GetType().Name}: {e.Message}");
         }
+    }
+
+    private static void Send(IChatProvider provider, BaseMPManager manager, string payload)
+    {
+        var text = Marker + payload;
+        if (text.Length > MaxTextLength)
+        {
+            text = text[..MaxTextLength];
+        }
+
+        // Team null keeps it on the global channel, which every peer's
+        // ChatBox receives regardless of team assignment.
+        provider.SendChat(new ChatMessage(LocalPlayerName(manager), text));
+        Sent++;
+    }
+
+    /// <summary>
+    /// Chat text cannot carry line breaks, and a WMI field over 48 characters
+    /// would push the payload's tail past <see cref="MaxTextLength"/>.
+    /// </summary>
+    private static string CleanField(string? value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return "?";
+        }
+
+        var cleaned = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return cleaned.Length <= maxLength ? cleaned : cleaned.Substring(0, maxLength);
     }
 
     private static string LocalPlayerName(BaseMPManager manager)

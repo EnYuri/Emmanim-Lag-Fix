@@ -72,6 +72,21 @@ var halflingAssembly = Assembly.Load("HalflingCore");
     }
     catch (TargetInvocationException e) when (e.InnerException is NullReferenceException) { }
     idField.SetValue(heat, Activator.CreateInstance(idField.FieldType, new object[] { "cosmoteer.heat" }));
+
+    // The GetBuffs skip shares the exact same guard: eligible heat must return
+    // null without entering the provider, non-heat must call vanilla.
+    var buffsCore = AccessTools.Method(patch, "BuffsCore")!;
+    if (buffsCore.Invoke(null, new object?[] { heat, provider, null, null }) != null)
+        throw new InvalidOperationException("Eligible heat buffs skip did not return null.");
+    idField.SetValue(heat, Activator.CreateInstance(idField.FieldType, new object[] { "cosmoteer.fire" }));
+    try
+    {
+        buffsCore.Invoke(null, new object?[] { heat, provider, null, null });
+        throw new InvalidOperationException("Non-heat buffs did not call vanilla provider.");
+    }
+    catch (TargetInvocationException e) when (e.InnerException is NullReferenceException) { }
+    idField.SetValue(heat, Activator.CreateInstance(idField.FieldType, new object[] { "cosmoteer.heat" }));
+
     var modulate = AccessTools.Method(multiType, "ModulateValue")!;
     foreach (var value in new[] { -1f, 0f, 0.01f, 1f, 100f, 100000f })
     foreach (var resistance in new[] { 0f, 0.5f, 1f })
@@ -81,6 +96,96 @@ var halflingAssembly = Assembly.Load("HalflingCore");
         var optimized = (float)modulate.Invoke(multi, new[] { Data(empty) })!;
         if (BitConverter.SingleToInt32Bits(vanilla) != BitConverter.SingleToInt32Bits(optimized))
             throw new InvalidOperationException("Heat-context skip changed a modulation result.");
+    }
+
+    // The specialized loop's per-status arithmetic must be bit-identical to
+    // the real modulator chain plus the handler's outer ValueClampRange clamp,
+    // across the input space including out-of-range and non-finite values.
+    var modulateCore = AccessTools.Method(patch, "ModulateCore")!;
+    var clamp = AccessTools.Method(typeof(Halfling.Mathx), "Clamp", new[] { typeof(float), range.GetType() })!;
+    var clampRange = Activator.CreateInstance(range.GetType(), new object[] { 0f, float.PositiveInfinity })!;
+    foreach (var value in new[] { -1f, 0f, 0.01f, 1f, 350f, 4600f, 100000f, float.PositiveInfinity, float.NaN })
+    foreach (var resistance in new[] { 0f, 0.3f, 0.5f, 1f })
+    {
+        var raw = (float)modulate.Invoke(multi, new object?[]
+            { constructor.Invoke(new object?[] { value, resistance, range, time, null, empty }) })!;
+        var expected = (float)clamp.Invoke(null, new[] { raw, clampRange })!;
+        var actual = (float)modulateCore.Invoke(null, new object?[] { value, resistance, 1f / 30f, -1f, range, clampRange })!;
+        if (BitConverter.SingleToInt32Bits(expected) != BitConverter.SingleToInt32Bits(actual))
+            throw new InvalidOperationException(
+                $"Specialized heat modulation diverged: value={value} resistance={resistance} expected={expected} actual={actual}");
+    }
+
+    // End-to-end check of the specialized loop on a real StatusStore: with an
+    // unranged resistance range the part lookup is provably unreachable, so a
+    // ship-less uninitialized handler exercises enumeration, value updates and
+    // the changed-status event path exactly as in-game. A status that does not
+    // change must leave its list clean; a changed one must dirty it via the
+    // same OnStatusValueModified overload vanilla would call.
+    var iv2 = halflingAssembly.GetType("Halfling.Geometry.IntVector2", true)!;
+    var storeType = gameAssembly.GetType("Cosmoteer.Ships.Statuses.Subhandlers.StatusStore`1", true)!
+        .MakeGenericType(iv2);
+    var store = Activator.CreateInstance(storeType, heat)!;
+    var getOrCreate = AccessTools.Method(storeType, "GetOrCreateStatusList")!;
+    var statusType = gameAssembly.GetType("Cosmoteer.Ships.Statuses.Status`1", true)!.MakeGenericType(iv2);
+    var locationField = AccessTools.Field(statusType, "<Location>k__BackingField")!;
+    var statusValueField = AccessTools.Field(statusType, "<Value>k__BackingField")!;
+    var addStatus = AccessTools.Method(getOrCreate.ReturnType, "Add", new[] { statusType, typeof(bool) })!;
+    var inputs = new[] { 1f, 350f, 4600f, 100000f, 0f, float.PositiveInfinity };
+    var lists = new List<object>();
+    var statuses = new List<object>();
+    for (var i = 0; i < inputs.Length; i++)
+    {
+        var status = RuntimeHelpers.GetUninitializedObject(statusType);
+        locationField.SetValue(status, Activator.CreateInstance(iv2, new object[] { i, 0 }));
+        statusValueField.SetValue(status, inputs[i]);
+        var list = getOrCreate.Invoke(store, new object?[] { locationField.GetValue(status) })!;
+        addStatus.Invoke(list, new[] { status, true });
+        lists.Add(list);
+        statuses.Add(status);
+    }
+    // The store's flat enumerator and list enumeration must visit the same
+    // statuses in the same order - the premise the loop's determinism relies on.
+    var flat = ((IEnumerable)store).Cast<object>().ToList();
+    var nested = ((IEnumerable)AccessTools.Method(storeType, "GetAllStatusLists")!.Invoke(store, null)!)
+        .Cast<object>().SelectMany(list => ((IEnumerable)list).Cast<object>()).ToList();
+    if (!flat.SequenceEqual(nested))
+        throw new InvalidOperationException("StatusStore list enumeration changed status order.");
+
+    AccessTools.Field(type, "ValueClampRange")!.SetValue(heat, clampRange);
+    AccessTools.Field(type, "ValueModulationResistanceRange")!
+        .SetValue(heat, Activator.CreateInstance(range.GetType(), new object[] { 0f, 0f }));
+    var handlerType = gameAssembly.GetType("Cosmoteer.Ships.Statuses.TileStatusHandler", true)!;
+    var handlerBase = gameAssembly.GetType("Cosmoteer.Ships.Statuses.StatusHandler`1", true)!
+        .MakeGenericType(iv2);
+    var handler = RuntimeHelpers.GetUninitializedObject(handlerType);
+    AccessTools.Field(handlerBase, "<StatusType>k__BackingField")!.SetValue(handler, heat);
+    AccessTools.Field(handlerBase, "<Store>k__BackingField")!.SetValue(handler, store);
+    AccessTools.Field(handlerBase, "<StatusCount>k__BackingField")!.SetValue(handler, statuses.Count);
+    var updaterType = halflingAssembly.GetType("Halfling.Timing.FixedUpdater", true)!;
+    var updater = RuntimeHelpers.GetUninitializedObject(updaterType);
+    AccessTools.Field(updaterType, "<Interval>k__BackingField")!.SetValue(updater, time);
+
+    // StatusList.Add already marks each list dirty; reset before the loop so a
+    // set flag below can only come from the changed-status event path.
+    var dirtyField = AccessTools.Field(getOrCreate.ReturnType, "_isDirty")!;
+    foreach (var list in lists) dirtyField.SetValue(list, false);
+
+    AccessTools.Method(patch, "SpecializedLoop")!.Invoke(null, new[] { handler, updater });
+
+    for (var i = 0; i < inputs.Length; i++)
+    {
+        var raw = (float)modulate.Invoke(multi, new object?[]
+            { constructor.Invoke(new object?[] { inputs[i], 0f, range, time, null, empty }) })!;
+        var expected = (float)clamp.Invoke(null, new[] { raw, clampRange })!;
+        var actual = (float)statusValueField.GetValue(statuses[i])!;
+        if (BitConverter.SingleToInt32Bits(expected) != BitConverter.SingleToInt32Bits(actual))
+            throw new InvalidOperationException(
+                $"Specialized loop diverged at status {i}: expected={expected} actual={actual}");
+        var expectDirty = !inputs[i].Equals(expected);
+        if ((bool)dirtyField.GetValue(lists[i])! != expectDirty)
+            throw new InvalidOperationException(
+                $"Changed-status event path diverged at status {i}: dirty expected {expectDirty}.");
     }
 }
 // Korean IME integration is implemented by the Windows platform assembly,
@@ -238,6 +343,11 @@ var resyncTimingTargets = new[]
 const string smokeId = "nayuri.emmanim_lag_fix.smoke_test";
 var harmony = new Harmony(smokeId);
 harmony.PatchAll(typeof(EntryPoint).Assembly);
+{
+    var type = typeof(EntryPoint).Assembly.GetType("EmmanimLagFix.Code.HeatModulationContextSkipPatch", true)!;
+    if (!(bool)AccessTools.Property(type, "LoopInstalled")!.GetValue(null)!)
+        throw new InvalidOperationException("Heat modulation loop specialization was not installed.");
+}
 CrewAssignmentRateTests.Run(gameAssembly, smokeId);
 ParallelBatchPolicyTests.Run(gameAssembly);
 ResourceTraversalTests.Run(typeof(EntryPoint).Assembly);
@@ -1913,6 +2023,446 @@ foreach (var allocOverload in AccessTools
         }
     }
 
+    // The status phase split rides the same diagnostics flag, so Prepare keeps
+    // Harmony away here too. Resolve its three target sets by hand: the two
+    // StatusHandler<T> FixedUpdate impls (per-type totals), PerformDiffusion,
+    // and the two _ModulateStatusValues local functions.
+    {
+        var statusTypesPatchType = typeof(EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.StatusTypePhasePatch", throwOnError: true)!;
+        var typeTargets = ((IEnumerable<MethodBase>)AccessTools
+            .DeclaredMethod(statusTypesPatchType, "TargetMethods")!
+            .Invoke(null, null)!).ToArray();
+        if (typeTargets.Length != 2
+            || typeTargets.Any(m => !m.Name.EndsWith(
+                "IFixedUpdateableSceneObject.FixedUpdate", StringComparison.Ordinal))
+            || typeTargets.Select(m => m.DeclaringType!.GetGenericArguments()[0])
+                .Distinct().Count() != 2)
+        {
+            throw new InvalidOperationException(
+                "Status type timing bound ["
+                + string.Join(", ", typeTargets.Select(m => $"{m.DeclaringType?.Name}.{m.Name}"))
+                + "] instead of both StatusHandler<T> FixedUpdate impls.");
+        }
+
+        var diffusionPatchType = typeof(EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.StatusDiffusionPhasePatch", throwOnError: true)!;
+        var diffusionTarget = (MethodBase?)AccessTools
+            .DeclaredMethod(diffusionPatchType, "TargetMethod")!
+            .Invoke(null, null);
+        if (diffusionTarget?.Name != "PerformDiffusion")
+        {
+            throw new InvalidOperationException(
+                $"Status diffusion timing bound {diffusionTarget?.Name ?? "nothing"}.");
+        }
+
+        var modulationPatchType = typeof(EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.StatusModulationPhasePatch", throwOnError: true)!;
+        var modulationTargets = ((IEnumerable<MethodBase>)AccessTools
+            .DeclaredMethod(modulationPatchType, "TargetMethods")!
+            .Invoke(null, null)!).ToArray();
+        if (modulationTargets.Length != 2
+            || modulationTargets.Any(m => !m.Name.Contains("_ModulateStatusValues", StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException(
+                "Status modulation timing bound ["
+                + string.Join(", ", modulationTargets.Select(m => m.Name))
+                + "] instead of both _ModulateStatusValues local functions.");
+        }
+    }
+
+    // The inner-bucket timer is retained for offline target resolution only.
+    // It must never install in production: Harmony's __originalMethod
+    // injection allocates a RuntimeMethodInfoStub on every hot inner call.
+    // Resolve its methods by hand so game renames remain visible, and assert
+    // that Prepare keeps the allocation-heavy instrumentation disabled.
+    {
+        var innerPatchType = typeof(EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.BucketInnerTimingPatch", throwOnError: true)!;
+        if ((bool)AccessTools.DeclaredMethod(innerPatchType, "Prepare")!
+                .Invoke(null, null)!)
+        {
+            throw new InvalidOperationException(
+                "Bucket inner timing must stay disabled; __originalMethod allocates per call.");
+        }
+        var innerTargets = ((IEnumerable<MethodBase>)AccessTools
+            .DeclaredMethod(innerPatchType, "TargetMethods")!
+            .Invoke(null, null)!).ToArray();
+        var expectedNames = new[]
+        {
+            "OnConversionTick", "AsyncGetCrewForNextJob", "UpdateCrewAsync",
+            "UpdateCrewPostMovement", "UpdateCrewQuadsAsync", "AutoFillCrewSources",
+        };
+        var fixedFound = innerTargets.Count(m => expectedNames.Contains(m.Name));
+        var managerFound = innerTargets.Count(m => m.Name == "FixedUpdate");
+        var thrusterFound = innerTargets.Count(m => m.Name == "SetThrusterActivations");
+        if (fixedFound != expectedNames.Length || managerFound != 5 || thrusterFound < 1)
+        {
+            throw new InvalidOperationException(
+                "Bucket inner timing bound ["
+                + string.Join(", ", innerTargets.Select(m => $"{m.DeclaringType?.Name}.{m.Name}"))
+                + $"]; expected all {expectedNames.Length} fixed methods, five ship-manager FixedUpdates, "
+                + "and at least one SetThrusterActivations.");
+        }
+
+        var nameField = AccessTools.Field(innerPatchType, "Names")!;
+        var names = (System.Collections.IDictionary)nameField.GetValue(null)!;
+        // Mirrors the postfix's keying: FixedUpdate resolves through the
+        // declaring type, everything else through the bare method name.
+        var unmapped = innerTargets
+            .Where(m => !names.Contains(
+                m.Name == "FixedUpdate" ? m.DeclaringType!.Name + "." + m.Name : m.Name))
+            .ToArray();
+        if (unmapped.Length != 0)
+        {
+            throw new InvalidOperationException(
+                "Bucket inner timing resolved methods with no report code: "
+                + string.Join(", ", unmapped.Select(m => m.Name)));
+        }
+    }
+
+    // Longest-first ordering binds SimRoot.ParallelFixedUpdate and rewrites
+    // each dispatch slice descending by part count; both the binding and the
+    // ordering itself are verified here.
+    {
+        var lptType = typeof(EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.ParallelBucketLptPatch", throwOnError: true)!;
+        var lptTarget = (MethodBase?)AccessTools
+            .DeclaredMethod(lptType, "TargetMethod")!
+            .Invoke(null, null);
+        if (lptTarget?.Name != "ParallelFixedUpdate")
+        {
+            throw new InvalidOperationException(
+                $"Bucket ordering bound {lptTarget?.Name ?? "nothing"} instead of ParallelFixedUpdate.");
+        }
+
+        var sort = AccessTools.DeclaredMethod(lptType, "SortSlice")!
+            .MakeGenericMethod(typeof(int));
+        var slice = new[] { 1, 9, 4, 7, 2, 8 };
+        sort.Invoke(null, new object[] { slice, 1, 4, (Func<int, int>)(x => x) });
+        if (!slice.SequenceEqual(new[] { 1, 9, 7, 4, 2, 8 }))
+        {
+            throw new InvalidOperationException(
+                "Bucket ordering produced [" + string.Join(",", slice)
+                + "]; expected [1,9,7,4,2,8].");
+        }
+    }
+
+    // The convoy timer binds the compiler-emitted local function inside
+    // FastParallel.For; resolving it by hand proves the name substring still
+    // matches on this game build.
+    {
+        var waitPatchType = typeof(EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.FastParallelWaitDiagnosticsPatch", throwOnError: true)!;
+        var waitTarget = (MethodBase?)AccessTools
+            .DeclaredMethod(waitPatchType, "TargetMethod")!
+            .Invoke(null, null);
+        if (waitTarget?.DeclaringType
+                != halflingAssembly.GetType("Halfling.Performance.FastParallel", throwOnError: true)!
+            || !waitTarget.Name.Contains("WaitUntilFinished", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"FastParallel wait timing bound {waitTarget?.Name ?? "nothing"} "
+                + "instead of For's _WaitUntilFinished local function.");
+        }
+    }
+
+    // The worker-priority override binds FastParallel.RunThread by name; the
+    // binding must resolve even though the patch is inert without its flag.
+    {
+        var fastParallel = halflingAssembly.GetType(
+            "Halfling.Performance.FastParallel", throwOnError: true)!;
+        var runThread = fastParallel
+            .GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+            .FirstOrDefault(method => method.Name == "RunThread");
+        if (runThread == null)
+        {
+            throw new InvalidOperationException(
+                "FastParallel.RunThread not found; the worker-priority override cannot bind.");
+        }
+    }
+
+    // Constructor deserialization methods contain exception filters and cannot
+    // be wrapped by Harmony. Verify that MonoMod.Core native detours bind every
+    // closed target, actually redirect an invocation through our dispatcher,
+    // and that the compiled constructor invoker handles classes, structs and
+    // callee exceptions.
+    {
+        var invokePatchType = typeof(EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.DeserializationInvokeCompilePatch", throwOnError: true)!;
+        var invokeTargets = ((IEnumerable<MethodBase>)AccessTools
+            .DeclaredMethod(invokePatchType, "ScanTargets")!
+            .Invoke(null, null)!).ToList();
+        if (invokeTargets.Any(t => t.ContainsGenericParameters))
+        {
+            throw new InvalidOperationException(
+                "Deserialization invoke compile resolved an open-generic target: "
+                + invokeTargets.First(t => t.ContainsGenericParameters).DeclaringType);
+        }
+        if (invokeTargets.Count < 2)
+        {
+            throw new InvalidOperationException(
+                $"Deserialization detour resolved {invokeTargets.Count} targets; expected at least 2.");
+        }
+        if (!invokeTargets.Any(t => t.GetMethodBody()?.ExceptionHandlingClauses
+                .Any(c => c.Flags == ExceptionHandlingClauseOptions.Filter) == true))
+        {
+            throw new InvalidOperationException(
+                "Deserialization detour fixture no longer contains a filter region; "
+                + "re-evaluate whether the lower-level detour is still necessary.");
+        }
+
+        var compile = AccessTools.DeclaredMethod(invokePatchType, "Compile")!;
+        var classCtor = typeof(Version).GetConstructor(new[] { typeof(int), typeof(int) })!;
+        var structCtor = typeof(KeyValuePair<int, string>).GetConstructors()[0];
+        var compiledClass = (Func<object?[]?, object?>)compile
+            .Invoke(null, new object[] { classCtor })!;
+        var compiledStruct = (Func<object?[]?, object?>)compile
+            .Invoke(null, new object[] { structCtor })!;
+        if (compiledClass(new object?[] { 1, 2 }) is not Version { Major: 1, Minor: 2 }
+            || compiledStruct(new object?[] { 7, "x" }) is not KeyValuePair<int, string> pair
+            || pair.Key != 7 || pair.Value != "x")
+        {
+            throw new InvalidOperationException(
+                "Compiled deserialization invoker produced a wrong object.");
+        }
+
+        // A callee exception must escape the compiled delegate raw - the
+        // prefix's InvokeCompiled reproduces reflection's
+        // TargetInvocationException wrap and the DeserializeAsNullException
+        // outcome on top of that raw throw.
+        var throwingMethod = typeof(Convert).GetMethod(
+            nameof(Convert.FromBase64String), new[] { typeof(string) })!;
+        var compiledThrower = (Func<object?[]?, object?>)compile
+            .Invoke(null, new object[] { throwingMethod })!;
+        try
+        {
+            compiledThrower(new object?[] { null });
+            throw new InvalidOperationException(
+                "Compiled deserialization invoker swallowed a callee exception.");
+        }
+        catch (ArgumentNullException)
+        {
+        }
+
+        AccessTools.DeclaredMethod(invokePatchType, "Apply")!.Invoke(null, null);
+        var applied = (int)AccessTools.Property(invokePatchType, "Applied")!.GetValue(null)!;
+        var resolved = (int)AccessTools.Property(invokePatchType, "Resolved")!.GetValue(null)!;
+        if (applied != invokeTargets.Count || resolved != invokeTargets.Count)
+        {
+            var failure = AccessTools.Field(invokePatchType, "FailureReason")!.GetValue(null);
+            throw new InvalidOperationException(
+                $"Deserialization native detours applied {applied}/{resolved}; "
+                + $"scan found {invokeTargets.Count}. Failure: {failure}");
+        }
+
+        // Invoke a detoured target on an uninitialized method object with the
+        // skip flag. Neither vanilla nor the replacement touches serializer or
+        // source in this branch, making it a safe ABI/redirection probe across
+        // the private closed-generic declaring type.
+        var probeTarget = (MethodInfo)invokeTargets[0];
+        var probeSelf = RuntimeHelpers.GetUninitializedObject(probeTarget.DeclaringType!);
+        var probeParams = probeTarget.GetParameters();
+        var call = new object?[probeParams.Length];
+        for (var i = 0; i < probeParams.Length; i++)
+        {
+            var parameterType = probeParams[i].ParameterType;
+            if (parameterType.IsByRef)
+            {
+                call[i] = null;
+            }
+            else if (parameterType.IsValueType)
+            {
+                call[i] = Activator.CreateInstance(parameterType);
+            }
+        }
+        call[3] = typeof(object);
+        call[4] = Enum.Parse(probeParams[4].ParameterType, "SkipConstructorDeserializer");
+        var entries = AccessTools.Field(invokePatchType, "Entries")!;
+        var before = (long)entries.GetValue(null)!;
+        var result = probeTarget.Invoke(probeSelf, call);
+        var after = (long)entries.GetValue(null)!;
+        if (result is not false || call[^1] != null || after != before + 1)
+        {
+            throw new InvalidOperationException(
+                $"Deserialization native detour ABI probe failed: result={result}, "
+                + $"out={call[^1]}, entries={before}->{after}.");
+        }
+
+        // Exercise the complete hot path without needing serialized input:
+        // instantiate a SpecificConstructorDeserializationMethod around
+        // object..ctor (zero arguments), then let the detoured method compile
+        // and invoke it. The serializer and source are intentionally
+        // uninitialized because the zero-argument path never reads them.
+        var specificTarget = (MethodInfo)invokeTargets.First(t =>
+            t.DeclaringType!.Name == "SpecificConstructorDeserializationMethod");
+        var specificType = specificTarget.DeclaringType!;
+        var specificParams = specificTarget.GetParameters();
+        var serializer = RuntimeHelpers.GetUninitializedObject(specificParams[0].ParameterType);
+        var objectCtor = typeof(object).GetConstructor(Type.EmptyTypes)!;
+        var methodCtor = specificType.GetConstructors(
+                BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(c => c.GetParameters().Length == 2);
+        var methodObject = methodCtor.Invoke(new object[] { serializer, objectCtor });
+        var hotCall = new object?[specificParams.Length];
+        for (var i = 0; i < specificParams.Length; i++)
+        {
+            var parameterType = specificParams[i].ParameterType;
+            if (!parameterType.IsByRef && parameterType.IsValueType)
+            {
+                hotCall[i] = Activator.CreateInstance(parameterType);
+            }
+        }
+        hotCall[0] = serializer;
+        hotCall[3] = typeof(object);
+        var invocations = AccessTools.Field(invokePatchType, "Invocations")!;
+        var compiled = AccessTools.Field(invokePatchType, "Compiled")!;
+        var invocationsBefore = (long)invocations.GetValue(null)!;
+        var compiledBefore = (long)compiled.GetValue(null)!;
+        var hotResult = specificTarget.Invoke(methodObject, hotCall);
+        var invocationsAfter = (long)invocations.GetValue(null)!;
+        var compiledAfter = (long)compiled.GetValue(null)!;
+        if (hotResult is not true
+            || hotCall[^1] == null
+            || hotCall[^1]!.GetType() != typeof(object)
+            || invocationsAfter != invocationsBefore + 1
+            || compiledAfter != compiledBefore + 1)
+        {
+            throw new InvalidOperationException(
+                $"Deserialization compiled-invoke probe failed: result={hotResult}, "
+                + $"out={hotCall[^1]?.GetType()}, calls={invocationsBefore}->{invocationsAfter}, "
+                + $"compiled={compiledBefore}->{compiledAfter}.");
+        }
+
+        // The original reflection path treats a constructor/factory that
+        // throws DeserializeAsNullException as a successful null result and
+        // wraps every other callee exception in TargetInvocationException.
+        object CreateMethodObject(string methodName) => methodCtor.Invoke(
+            new object[]
+            {
+                serializer,
+                typeof(DeserializationDetourFixture).GetMethod(
+                    methodName, BindingFlags.Static | BindingFlags.NonPublic)!,
+            });
+
+        var nullCall = (object?[])hotCall.Clone();
+        nullCall[^1] = new object();
+        var nullResult = specificTarget.Invoke(
+            CreateMethodObject(nameof(DeserializationDetourFixture.DeserializeAsNull)),
+            nullCall);
+        if (nullResult is not true || nullCall[^1] != null)
+        {
+            throw new InvalidOperationException(
+                "Deserialization detour did not preserve DeserializeAsNullException semantics.");
+        }
+
+        var failureCall = (object?[])hotCall.Clone();
+        failureCall[^1] = null;
+        try
+        {
+            specificTarget.Invoke(
+                CreateMethodObject(nameof(DeserializationDetourFixture.Fail)),
+                failureCall);
+            throw new InvalidOperationException(
+                "Deserialization detour swallowed a constructor exception.");
+        }
+        catch (TargetInvocationException ex)
+            when (ex.InnerException is TargetInvocationException
+                { InnerException: InvalidOperationException fixture }
+                && fixture.Message == "detour exception fixture")
+        {
+            // One wrapper comes from Dispatch (matching MethodBase.Invoke)
+            // and one from this smoke test's reflective call to TryDeserialize.
+        }
+    }
+
+    // ThreadedTaskQueue accepts only Action<ThreadedTaskQueue> and
+    // Func<ThreadedTaskQueue,T>; its vanilla WorkerThread nevertheless uses
+    // Delegate.DynamicInvoke for every operation. Verify the transpiler and
+    // the cached direct-call bridge, including void/value returns, exception
+    // wrapping and steady-state allocation behavior.
+    {
+        var queuePatchType = typeof(EntryPoint).Assembly.GetType(
+            "EmmanimLagFix.Code.ThreadedTaskQueueDynamicInvokePatch",
+            throwOnError: true)!;
+        if ((bool)AccessTools.Field(queuePatchType, "Applied")!.GetValue(null)! != true)
+        {
+            throw new InvalidOperationException(
+                "ThreadedTaskQueue DynamicInvoke replacement did not apply.");
+        }
+
+        var invokeMethod = AccessTools.DeclaredMethod(queuePatchType, "Invoke")!;
+        var invoke = (Func<Delegate, object?[]?, object?>)invokeMethod.CreateDelegate(
+            typeof(Func<Delegate, object?[]?, object?>));
+        var queueType = halflingAssembly.GetType(
+            "Halfling.Performance.ThreadedTaskQueue", throwOnError: true)!;
+        var queue = RuntimeHelpers.GetUninitializedObject(queueType);
+        var queueArgs = new[] { queue };
+
+        var funcType = typeof(Func<,>).MakeGenericType(queueType, typeof(int));
+        var funcMethod = typeof(ThreadedTaskQueueFixture).GetMethod(
+            nameof(ThreadedTaskQueueFixture.Return42),
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var func = funcMethod.CreateDelegate(funcType);
+        if (invoke(func, queueArgs) is not 42)
+        {
+            throw new InvalidOperationException(
+                "ThreadedTaskQueue direct invoker returned the wrong value.");
+        }
+
+        var actionType = typeof(Action<>).MakeGenericType(queueType);
+        var actionMethod = typeof(ThreadedTaskQueueFixture).GetMethod(
+            nameof(ThreadedTaskQueueFixture.MarkCalled),
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var action = actionMethod.CreateDelegate(actionType);
+        ThreadedTaskQueueFixture.Called = false;
+        if (invoke(action, queueArgs) != null || !ThreadedTaskQueueFixture.Called)
+        {
+            throw new InvalidOperationException(
+                "ThreadedTaskQueue direct action invoker did not run.");
+        }
+
+        var failMethod = typeof(ThreadedTaskQueueFixture).GetMethod(
+            nameof(ThreadedTaskQueueFixture.Fail),
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var fail = failMethod.CreateDelegate(funcType);
+        try
+        {
+            invoke(fail, queueArgs);
+            throw new InvalidOperationException(
+                "ThreadedTaskQueue direct invoker swallowed a callback exception.");
+        }
+        catch (TargetInvocationException ex)
+            when (ex.InnerException is InvalidOperationException fixture
+                && fixture.Message == "queue callback fixture")
+        {
+        }
+
+        // Warmed direct invocations use the cached generated delegate and do
+        // not allocate. This excludes the caller-owned one-element args array,
+        // which the follow-up transpiler can remove separately if worthwhile.
+        var objectFuncType = typeof(Func<,>).MakeGenericType(queueType, typeof(object));
+        var objectFunc = typeof(ThreadedTaskQueueFixture).GetMethod(
+                nameof(ThreadedTaskQueueFixture.ReturnObject),
+                BindingFlags.Static | BindingFlags.NonPublic)!
+            .CreateDelegate(objectFuncType);
+        for (var i = 0; i < 100; i++)
+        {
+            _ = invoke(objectFunc, queueArgs);
+        }
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 10_000; i++)
+        {
+            _ = invoke(objectFunc, queueArgs);
+        }
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+        if (allocated != 0)
+        {
+            throw new InvalidOperationException(
+                $"ThreadedTaskQueue direct invoker allocated {allocated} bytes / 10000 warmed calls.");
+        }
+    }
+
     // Update bucket 7 runs on the pool through vanilla's own SimRoot.ParallelUpdate.
     // Everything about it is resolved by reflection - an internal type, a private
     // method and an inherited setter - so a rename would leave the bucket silently
@@ -2003,7 +2553,7 @@ foreach (var allocOverload in AccessTools
     if (unknown != "frames=100 st=0.000/0 res=-/-")
         throw new InvalidOperationException($"Missing bucket was confused with zero work: {unknown}");
     var focusedPayload = "#ELFDIAG#kind=status-resource t=2147483647 frames=999999 st=9999.999/99999999 res=9999.999/99999999"
-        + " cap=1/1 ctx=on sk=9999999999 vf=9999999999";
+        + " cap=1/1 ctx=on sk=9999999999 vf=9999999999 bs=9999999999/9999999999";
     if (focusedPayload.Length > 195)
         throw new InvalidOperationException("Focused diagnostics exceed the chat budget.");
 
@@ -3286,3 +3836,29 @@ harmony.UnpatchAll(smokeId);
 }
 
 Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, inlined small nested FastParallel dispatches, finer top-level batch sizing, a logical-processor-sized worker pool, urgent input-tick-delay HostUpdates, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+
+internal static class DeserializationDetourFixture
+{
+    internal static object DeserializeAsNull() =>
+        throw new Halfling.Serialization.DeserializeAsNullException();
+
+    internal static object Fail() =>
+        throw new InvalidOperationException("detour exception fixture");
+}
+
+internal static class ThreadedTaskQueueFixture
+{
+    internal static bool Called;
+    private static readonly object Result = new();
+
+    internal static int Return42(Halfling.Performance.ThreadedTaskQueue _) => 42;
+
+    internal static object ReturnObject(Halfling.Performance.ThreadedTaskQueue _) =>
+        Result;
+
+    internal static void MarkCalled(Halfling.Performance.ThreadedTaskQueue _) =>
+        Called = true;
+
+    internal static int Fail(Halfling.Performance.ThreadedTaskQueue _) =>
+        throw new InvalidOperationException("queue callback fixture");
+}

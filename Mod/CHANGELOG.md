@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.2.16 (2026-09-20)
+
+- Specialize the exact vanilla tile-heat modulation shape into a bit-equivalent
+  loop that removes dead context/buff lookups, temporary modulation structures
+  and repeated status-list searches. Any rule, provider or store-shape change
+  falls back to vanilla. Smoke fixtures verify the guarded rewrite against the
+  original arithmetic and event behavior.
+- Replace attributed deserialization constructor/factory reflection with cached
+  compiled delegates. Harmony cannot patch these `catch ... when` methods, so
+  the code uses the MonoMod.Core managed-detour engine already bundled inside
+  Harmony. All six closed targets install in game; the first measured save load
+  routed 137,440 calls through 135 compiled delegates. The same constructors,
+  arguments, exception wrapping and `DeserializeAsNullException -> null`
+  behavior are retained, with a reflection fallback and an opt-out file.
+- Replace `ThreadedTaskQueue.WorkerThread`'s `Delegate.DynamicInvoke` with a
+  cached strongly-typed direct invoker for its supported Action/Func callbacks.
+  Callback ordering, return values, completion sources and
+  `TargetInvocationException` semantics are unchanged; unsupported shapes fall
+  back to vanilla.
+- Disable the per-inner-call bucket timer in production. Its Harmony
+  `MethodBase __originalMethod` injection materialized a
+  `RuntimeMethodInfoStub` on every hot `ResourceConverter.OnConversionTick`.
+  Removing that diagnostics-only prefix/postfix changed no simulation work and
+  reduced the sampled stub source by 96.4% (969.85 to 35.37 MiB-equivalent;
+  9,543 to 348 samples). Comparable active-play allocation fell from the prior
+  56--86 MiB/s baseline to roughly 20--26 MiB/s; GC pause time also fell.
+- Add GC-pause duration, parallel-wait, long-item, status-phase and peer system
+  diagnostics used to isolate the stall. Allocation-heavy inner timing remains
+  hard-disabled and smoke-tested against accidental activation. Add deterministic
+  longest-first scene-bucket dispatch with pooled scratch arrays and immediate
+  restoration of the original slice; runtime overrides retain vanilla escape
+  hatches.
+- Build and full installed-game smoke suite pass on Cosmoteer 0.30.4c. Live
+  single-player logs show normal tick progression, changing ship/stasis state,
+  no patch/load exceptions and no assert, corruption or desync signatures.
+  Every multiplayer participant must install the same version and restart.
+
 ## 2.2.15 (2026-09-14)
 
 - Run scene update bucket 7 on the worker pool, using SimRoot's own

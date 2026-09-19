@@ -15,8 +15,25 @@ public static class EntryPoint
         FastParallelPoolSize.Apply();
         var harmony = new Harmony(HarmonyId);
         harmony.PatchAll(typeof(EntryPoint).Assembly);
+        // Below Harmony, not through it: these targets' filter regions make
+        // them unpatchable by any Harmony patch shape, so they get native
+        // detours. Self-contained - swallows its own failures.
+        DeserializationInvokeCompilePatch.Apply();
         Halfling.Logging.Logger.Log(
-            "[EmmanimLagFix] Crew oxygen validity guard and nonwrapping resource sink-job shards initialized (local 2.2.13); first-pass thruster transform: "
+            "[EmmanimLagFix] deserialization constructor detours: "
+            + DeserializationInvokeCompilePatch.Applied
+            + "/"
+            + DeserializationInvokeCompilePatch.Resolved
+            + (DeserializationInvokeCompilePatch.FailureReason == null
+                ? " applied."
+                : " (" + DeserializationInvokeCompilePatch.FailureReason + ")."));
+        Halfling.Logging.Logger.Log(
+            "[EmmanimLagFix] ThreadedTaskQueue direct delegate invocation: "
+            + (ThreadedTaskQueueDynamicInvokePatch.Applied
+                ? "on."
+                : "UNAVAILABLE."));
+        Halfling.Logging.Logger.Log(
+            "[EmmanimLagFix] Crew oxygen validity guard and nonwrapping resource sink-job shards initialized (2.2.16); first-pass thruster transform: "
             + (ThrusterFirstPassTransformPatch.Applied ? "on" : "vanilla fallback")
             + "; resource traversal lookup reuse: "
             + (ResourceSearchTraversalPatch.Applied ? "on" : "vanilla fallback")
