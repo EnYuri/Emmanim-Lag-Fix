@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Cosmoteer.Ships.Crew.Pathing;
 using Halfling.Geometry;
 using HarmonyLib;
@@ -30,6 +31,27 @@ internal static class PathContiguitySearchSetsPatch
     /// Set only when the target resolved with the expected shape.
     /// </summary>
     internal static bool Applied { get; private set; }
+
+    /// <summary>
+    /// Whether <see cref="ContiguousPathSet"/> still answers equality by
+    /// reference, which is what lets the visited table below probe on object
+    /// identity. Vanilla declares neither member; a build that gave the type
+    /// value semantics would make the table accept a different first occurrence
+    /// than <c>TempHashSet</c> did, so the patch stands down instead.
+    /// </summary>
+    internal static bool UsesReferenceEquality =>
+        typeof(ContiguousPathSet).GetMethod(
+            nameof(Equals), BindingFlags.Instance | BindingFlags.Public,
+            null, new[] { typeof(object) }, null)?.DeclaringType == typeof(object)
+        && typeof(ContiguousPathSet).GetMethod(
+            nameof(GetHashCode), BindingFlags.Instance | BindingFlags.Public,
+            null, Type.EmptyTypes, null)?.DeclaringType == typeof(object)
+        && !typeof(IEquatable<ContiguousPathSet>).IsAssignableFrom(typeof(ContiguousPathSet));
+
+    // Stand down rather than throw: an identity-probed table is only equivalent
+    // while the type has no value semantics, and leaving vanilla in place is the
+    // correct answer, not a failure.
+    private static bool Prepare() => UsesReferenceEquality;
 
     private static MethodBase TargetMethod()
     {
@@ -119,22 +141,55 @@ internal static class PathContiguitySearchSetsPatch
     }
 
     /// <summary>
-    /// A visited set plus its queue, pooled per thread. Emptying removes the
-    /// values that were actually added instead of zeroing the whole bucket
-    /// array. Do not switch back to <see cref="HashSet{T}.Clear"/> based on a
-    /// guessed density threshold: a 2026-09-10 low-core client trace measured
-    /// 686 ms in that bulk-zero branch over 30 seconds, versus 3.9 ms in the
-    /// proportional removal branch.
+    /// A visited set plus its queue, pooled per thread. Emptying costs one
+    /// integer increment: the table stamps each slot with the generation that
+    /// wrote it, so every slot from an earlier search reads as free without
+    /// being touched. Do not switch back to <see cref="HashSet{T}.Clear"/> based
+    /// on a guessed density threshold: a 2026-09-10 low-core client trace
+    /// measured 686 ms in that bulk-zero branch over 30 seconds.
+    ///
+    /// Until 2.2.18 this was a <see cref="HashSet{T}"/> plus a list of the values
+    /// added, removed one by one on release. That is proportional to the
+    /// traversal rather than to the table, which was the whole point of the
+    /// original repair, but it still pays two hash probes per visited set and
+    /// both go through the shared <c>__Canon</c> instantiation and
+    /// <c>ObjectEqualityComparer</c>'s virtual calls. On the 2026-09-20 host
+    /// trace <c>HashSet.AddIfNotPresent</c> was <b>9.2% of the entire resource
+    /// source search</b> - 1.18 s, of which 97.5% came from this method - with
+    /// another 1.2% in <c>Release</c>. Open addressing over object identity
+    /// leaves one probe per set, no comparer dispatch and no removal pass.
+    ///
+    /// <c>ContiguousPathSet</c> declares neither <c>Equals</c> nor
+    /// <c>GetHashCode</c>, so the vanilla <c>TempHashSet</c>, the 2.0.x
+    /// <c>HashSet</c> and this table all answer on reference identity.
+    /// <see cref="UsesReferenceEquality"/> asserts that at startup and the patch
+    /// stays on vanilla if a future build gives the type value semantics. The
+    /// table is only ever probed with <see cref="Add"/> and never enumerated, so
+    /// nothing observable can depend on its layout and the walk stays
+    /// bit-identical.
     /// </summary>
     private sealed class SearchScratch
     {
         private const int MaximumPooled = 8;
+        private const int InitialCapacity = 256;
 
         [ThreadStatic]
         private static Stack<SearchScratch>? _pool;
 
-        private readonly HashSet<ContiguousPathSet> _visited = new();
-        private readonly List<ContiguousPathSet> _added = new();
+        /// <summary>Slot keys; meaningful only where the stamp is current.</summary>
+        private ContiguousPathSet?[] _keys = new ContiguousPathSet?[InitialCapacity];
+
+        /// <summary>The generation that wrote each slot.</summary>
+        private uint[] _stamps = new uint[InitialCapacity];
+
+        /// <summary>Slots written in the current generation.</summary>
+        private int _count;
+
+        /// <summary>
+        /// Never zero, so a freshly allocated <see cref="_stamps"/> - which is
+        /// all zeroes - reads as entirely stale.
+        /// </summary>
+        private uint _generation = 1;
 
         public readonly Queue<(ContiguousPathSet Set, int Iters)> Queue = new();
 
@@ -146,29 +201,93 @@ internal static class PathContiguitySearchSetsPatch
 
         public bool Add(ContiguousPathSet set)
         {
-            if (!_visited.Add(set))
+            var keys = _keys;
+            var stamps = _stamps;
+            var generation = _generation;
+            var mask = keys.Length - 1;
+
+            // Fibonacci mixing: the runtime's identity hash is well distributed
+            // in its high bits and weaker in the low ones a mask selects.
+            var index = (int)((uint)RuntimeHelpers.GetHashCode(set) * 2654435769u >> 8) & mask;
+            while (true)
             {
-                return false;
+                if (stamps[index] != generation)
+                {
+                    stamps[index] = generation;
+                    keys[index] = set;
+
+                    // Linear probing degrades sharply past half full. Grow after
+                    // the write so this entry survives the rehash.
+                    if (++_count * 2 >= keys.Length)
+                    {
+                        Grow();
+                    }
+
+                    return true;
+                }
+
+                if (ReferenceEquals(keys[index], set))
+                {
+                    return false;
+                }
+
+                index = (index + 1) & mask;
+            }
+        }
+
+        /// <summary>
+        /// Doubles the table and reinserts the current generation's entries. The
+        /// mask changes, so probe chains have to be rebuilt; stale slots are
+        /// dropped by construction.
+        /// </summary>
+        private void Grow()
+        {
+            var oldKeys = _keys;
+            var oldStamps = _stamps;
+            var generation = _generation;
+
+            var keys = new ContiguousPathSet?[oldKeys.Length * 2];
+            var stamps = new uint[keys.Length];
+            var mask = keys.Length - 1;
+
+            for (var i = 0; i < oldKeys.Length; i++)
+            {
+                if (oldStamps[i] != generation || oldKeys[i] is not { } set)
+                {
+                    continue;
+                }
+
+                var index = (int)((uint)RuntimeHelpers.GetHashCode(set) * 2654435769u >> 8) & mask;
+                while (stamps[index] == generation)
+                {
+                    index = (index + 1) & mask;
+                }
+
+                stamps[index] = generation;
+                keys[index] = set;
             }
 
-            _added.Add(set);
-            return true;
+            _keys = keys;
+            _stamps = stamps;
         }
 
         public void Release()
         {
-            if (_added.Count > 0)
+            // Retiring the generation empties the table. The keys are left in
+            // place; a slot whose stamp is stale is never read, and holding those
+            // references until the slot is reused costs one traversal's worth of
+            // ContiguousPathSet on a per-thread scratch that outlives them
+            // anyway.
+            if (_count > 0)
             {
-                // Every successful Add is recorded exactly once. Removing those
-                // values leaves the set just as empty as Clear, while work scales
-                // with this traversal instead of the largest traversal ever seen
-                // by the reusable scratch object.
-                for (var i = 0; i < _added.Count; i++)
+                _count = 0;
+                if (++_generation == 0)
                 {
-                    _visited.Remove(_added[i]);
+                    // Wrapped: every stamp now has to be made stale explicitly,
+                    // once per 4.3 billion searches on this thread.
+                    Array.Clear(_stamps, 0, _stamps.Length);
+                    _generation = 1;
                 }
-
-                _added.Clear();
             }
 
             Queue.Clear();

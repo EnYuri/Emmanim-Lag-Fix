@@ -377,6 +377,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             $"{breakdown.Full} focus=[{breakdown.Focused}] " +
             $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} pickups={pickups} tickcap={NetworkTimeCatchUpPatch.MaxTicksPerFrame}/{raised} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
+            $"fpwait={FastParallelWaitParkPatch.Counters()} " +
             $"fpinl={FastParallelNestedDispatchPatch.Counters()} " +
             $"fpbs={FastParallelBatchSize.Counters()} " +
             $"lpt={ParallelBucketLptPatch.Counters()} " +

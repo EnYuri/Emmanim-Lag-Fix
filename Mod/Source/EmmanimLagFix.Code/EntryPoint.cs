@@ -33,7 +33,7 @@ public static class EntryPoint
                 ? "on."
                 : "UNAVAILABLE."));
         Halfling.Logging.Logger.Log(
-            "[EmmanimLagFix] Crew oxygen validity guard and nonwrapping resource sink-job shards initialized (2.2.17); first-pass thruster transform: "
+            "[EmmanimLagFix] Crew oxygen validity guard and nonwrapping resource sink-job shards initialized (2.2.18); first-pass thruster transform: "
             + (ThrusterFirstPassTransformPatch.Applied ? "on" : "vanilla fallback")
             + "; resource traversal lookup reuse: "
             + (ResourceSearchTraversalPatch.Applied ? "on" : "vanilla fallback")

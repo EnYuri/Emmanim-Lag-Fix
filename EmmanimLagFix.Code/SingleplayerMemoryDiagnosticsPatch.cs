@@ -149,6 +149,7 @@ internal static class SingleplayerMemoryDiagnosticsPatch
             $"{PartSmoothedValueVisualThrottlePatch.Snapshot()} " +
             $"sinkShards={ResourceSinkJobShardingPatch.ConfiguredShardCount} " +
             $"fppark={FastParallelIdleParkPatch.Counters()} " +
+            $"fpwait={FastParallelWaitParkPatch.Counters()} " +
             $"fpinl={FastParallelNestedDispatchPatch.Counters()} " +
             $"fpbs={FastParallelBatchSize.Counters()} " +
             $"lpt={ParallelBucketLptPatch.Counters()} " +

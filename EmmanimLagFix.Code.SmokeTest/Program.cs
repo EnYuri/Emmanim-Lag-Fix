@@ -2313,14 +2313,23 @@ if (Harmony.GetPatchInfo(searchSetsTarget)?.Prefixes.Any(patch => patch.owner ==
 }
 
 // Dropping a visited mark would turn the breadth-first walk into an infinite
-// one, so prove proportional cleanup leaves both dense and sparse rounds empty
-// and that a recycled scratch treats previously seen sets as unseen. Reference
-// equality is all the game's sets use, so uninitialized instances are valid keys.
+// one, so prove generation retirement leaves both dense and sparse rounds empty
+// and that a recycled scratch treats every previously seen set as unseen. The
+// table probes on object identity, which is all the game's sets use, so
+// uninitialized instances are valid keys - and the dense round crosses the
+// half-full boundary of the initial 256 slots, which exercises Grow's rehash.
+if (AccessTools.Property(searchSetsPatchType, "UsesReferenceEquality")!.GetValue(null) is not true)
+{
+    throw new InvalidOperationException(
+        "ContiguousPathSet no longer answers equality by reference, so an identity-probed "
+        + "visited table would accept a different first occurrence than vanilla did.");
+}
+
 var scratchType = searchSetsPatchType.GetNestedType("SearchScratch", BindingFlags.NonPublic)!;
 var scratchRent = AccessTools.Method(scratchType, "Rent")!;
 var scratchAdd = AccessTools.Method(scratchType, "Add")!;
 var scratchRelease = AccessTools.Method(scratchType, "Release")!;
-var visitedField = AccessTools.Field(scratchType, "_visited")!;
+var scratchCountField = AccessTools.Field(scratchType, "_count")!;
 
 var sets = Enumerable.Range(0, 1024)
     .Select(_ => RuntimeHelpers.GetUninitializedObject(contiguousSetType))
@@ -2345,8 +2354,7 @@ foreach (var visitCount in new[] { sets.Length, 3 })
     }
 
     scratchRelease.Invoke(scratch, null);
-    var visited = visitedField.GetValue(scratch)!;
-    var remaining = (int)visited.GetType().GetProperty("Count")!.GetValue(visited)!;
+    var remaining = (int)scratchCountField.GetValue(scratch)!;
     if (remaining != 0)
     {
         throw new InvalidOperationException(
@@ -2359,10 +2367,15 @@ foreach (var visitCount in new[] { sets.Length, 3 })
         throw new InvalidOperationException("The released search scratch was not pooled for reuse.");
     }
 
-    if (scratchAdd.Invoke(reused, new object[] { sets[0] }) is not true)
+    // Every set from the retired generation, not just the first: a stamp left
+    // current anywhere would silently prune that branch of the next walk.
+    for (var i = 0; i < visitCount; i++)
     {
-        throw new InvalidOperationException(
-            "A recycled search scratch still considered a previously visited set as visited.");
+        if (scratchAdd.Invoke(reused, new[] { sets[i] }) is not true)
+        {
+            throw new InvalidOperationException(
+                $"A recycled search scratch still considered set {i} of {visitCount} as visited.");
+        }
     }
 
     scratchRelease.Invoke(reused, null);
@@ -3846,6 +3859,196 @@ foreach (var allocOverload in AccessTools
             + "asleep until the backstop timeout.");
     }
 
+    // The other side of the same pool. For ends in a local function whose whole
+    // body is "while (task.PendingBatches > 0) spinWait.SpinOnce(-1)", and on the
+    // 2026-09-20 host trace that was 12.33 s - 6.9% of all process CPU - with
+    // 9.34 s of it in SpinOnceCore and 7.07 s of GC rendezvous underneath. It now
+    // parks past a budget and is released by the completion of the task's last
+    // batch. This does IL surgery on a method whose whole body is that loop, so
+    // prove the rewrite compiles and that the handshake actually fires.
+    {
+        var waitPark = typeof(EntryPoint).Assembly
+            .GetType("EmmanimLagFix.Code.FastParallelWaitParkPatch", throwOnError: true)!;
+
+        var waitTarget = fastParallelType
+            .GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+            .FirstOrDefault(method => method.Name.Contains("WaitUntilFinished"))
+            ?? throw new MissingMethodException(
+                fastParallelType.FullName, "For._WaitUntilFinished (local function)");
+
+        if (Harmony.GetPatchInfo(waitTarget)?.Transpilers.Any(patch => patch.owner == smokeId) != true)
+        {
+            throw new InvalidOperationException(
+                "The bounded-wait transpiler was not installed on For._WaitUntilFinished.");
+        }
+        if (AccessTools.Field(waitPark, "Applied").GetValue(null) is not true)
+        {
+            throw new InvalidOperationException(
+                "For._WaitUntilFinished's SpinOnce(-1) was not rewritten, so every dispatcher "
+                + "would keep spinning: "
+                + (AccessTools.Field(waitPark, "FailureReason").GetValue(null) as string
+                   ?? "no reason recorded")
+                + ".");
+        }
+
+        // The replacement threads a second argument onto an existing ldloca, so a
+        // stack mistake here is invalid IL on the hottest join in the game.
+        RuntimeHelpers.PrepareMethod(waitTarget.MethodHandle);
+
+        var runParallelBatch = AccessTools.DeclaredMethod(fastParallelType, "RunParallelBatch")
+            ?? throw new MissingMethodException(fastParallelType.FullName, "RunParallelBatch");
+        if (Harmony.GetPatchInfo(runParallelBatch)?.Postfixes.Any(patch => patch.owner == smokeId) != true)
+        {
+            throw new InvalidOperationException(
+                "The completion postfix was not installed on FastParallel.RunParallelBatch, so a "
+                + "parked dispatcher would only ever be released by the backstop timeout.");
+        }
+
+        var waitBudget = (int)AccessTools.Field(waitPark, "SpinBudget").GetValue(null)!;
+        var waitParkMs = (int)AccessTools.Field(waitPark, "ParkMilliseconds").GetValue(null)!;
+        if (waitBudget <= 0)
+        {
+            throw new InvalidOperationException(
+                "The dispatcher spin budget is not positive, so a bucket join would park instead "
+                + "of spinning through the sub-millisecond wait it is normally in.");
+        }
+        if (waitParkMs <= 11)
+        {
+            throw new InvalidOperationException(
+                $"A {waitParkMs} ms backstop is at or below this process's ~11 ms timer "
+                + "granularity, which is what put 2.1.3's workers on a wake/probe/re-park "
+                + "treadmill.");
+        }
+
+        var waitCounters = (string)AccessTools.DeclaredMethod(waitPark, "Counters")!
+            .Invoke(null, null)!;
+        if (!waitCounters.EndsWith("@" + waitBudget, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Dispatcher wait diagnostics '{waitCounters}' do not report spin budget {waitBudget}.");
+        }
+
+        // A synthetic task stands in for a dispatch: PendingBatches is the only
+        // field either side of the handshake reads.
+        var parallelTaskType = fastParallelType.GetNestedType("ParallelTask", BindingFlags.NonPublic)
+            ?? throw new TypeLoadException(fastParallelType.FullName + ".ParallelTask");
+        var pendingBatches = AccessTools.Field(parallelTaskType, "PendingBatches")
+            ?? throw new MissingFieldException(parallelTaskType.FullName, "PendingBatches");
+        var syntheticTask = RuntimeHelpers.GetUninitializedObject(parallelTaskType);
+        pendingBatches.SetValue(syntheticTask, 1);
+
+        var waitSpin = AccessTools.DeclaredMethod(waitPark, "WaitSpin")
+            ?? throw new MissingMethodException(waitPark.FullName, "WaitSpin");
+        var complete = AccessTools.DeclaredMethod(waitPark, "Complete")
+            ?? throw new MissingMethodException(waitPark.FullName, "Complete");
+        var waitParkCount = AccessTools.Field(waitPark, "ParkCount");
+        var waitWakeCount = AccessTools.Field(waitPark, "WakeCount");
+        var waitTimeoutCount = AccessTools.Field(waitPark, "TimeoutCount");
+        long WaitParks() => (long)waitParkCount.GetValue(null)!;
+        long WaitWakes() => (long)waitWakeCount.GetValue(null)!;
+        long WaitTimeouts() => (long)waitTimeoutCount.GetValue(null)!;
+
+        void WaitOnce(ref SpinWait spin)
+        {
+            object[] args = { spin, syntheticTask };
+            waitSpin.Invoke(null, args);
+            spin = (SpinWait)args[0];
+        }
+
+        // Below the budget the dispatcher must spin exactly as vanilla does, or
+        // every one of roughly twenty joins a frame pays a kernel round trip.
+        var waitParksBefore = WaitParks();
+        var coldWait = new SpinWait();
+        WaitOnce(ref coldWait);
+        if (coldWait.Count != 1 || WaitParks() != waitParksBefore)
+        {
+            throw new InvalidOperationException(
+                "A dispatcher below the spin budget parked instead of spinning.");
+        }
+
+        // Past it, it parks - and the completion of the last batch must release it
+        // rather than the backstop. Counting timeouts separately is what makes
+        // this a handshake test and not merely a liveness test.
+        var waitTimeoutsBefore = WaitTimeouts();
+        var waitWakesBefore = WaitWakes();
+        Exception? waiterFailure = null;
+        var reachedBudget = new ManualResetEventSlim(false);
+        var waiterThread = new Thread(() =>
+        {
+            try
+            {
+                var spin = new SpinWait();
+                while (spin.Count < waitBudget)
+                {
+                    spin.SpinOnce(-1);
+                }
+                reachedBudget.Set();
+                // Vanilla's own loop is the authority, so mirror it here.
+                while ((int)pendingBatches.GetValue(syntheticTask)! > 0)
+                {
+                    WaitOnce(ref spin);
+                }
+            }
+            catch (Exception ex)
+            {
+                waiterFailure = ex;
+            }
+        })
+        { IsBackground = true, Name = "FastParallel wait park smoke" };
+        waiterThread.Start();
+
+        if (!reachedBudget.Wait(TimeSpan.FromSeconds(5)))
+        {
+            throw new InvalidOperationException(
+                "The dispatcher smoke thread never reached its spin budget.");
+        }
+
+        // Let it actually enter the park before completing the task, so the wake
+        // path is what ends the wait.
+        var waitParkDeadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < waitParkDeadline && waiterFailure == null && WaitParks() == waitParksBefore)
+        {
+            Thread.Sleep(1);
+        }
+        if (WaitParks() == waitParksBefore)
+        {
+            throw new InvalidOperationException(
+                "A dispatcher past the spin budget never parked, so the spin this patch exists "
+                + "to stop would still run.");
+        }
+
+        pendingBatches.SetValue(syntheticTask, 0);
+        complete.Invoke(null, new[] { syntheticTask });
+        var joinedWaiter = waiterThread.Join(TimeSpan.FromSeconds(5));
+
+        if (waiterFailure != null)
+        {
+            throw new InvalidOperationException(
+                "The parked-dispatcher smoke thread threw, so the bounded wait is not safe to run "
+                + "on a real dispatch.", waiterFailure);
+        }
+        if (!joinedWaiter)
+        {
+            throw new InvalidOperationException(
+                "A parked dispatcher did not return after its task completed, so the bounded wait "
+                + "can hang a frame.");
+        }
+        if (WaitWakes() == waitWakesBefore)
+        {
+            throw new InvalidOperationException(
+                "The completion postfix never observed the waiting dispatcher, so every join "
+                + "would wait out the backstop timeout instead.");
+        }
+        if (WaitTimeouts() != waitTimeoutsBefore)
+        {
+            throw new InvalidOperationException(
+                "A dispatcher park ended on the backstop rather than on the task's completion, "
+                + "so the Dekker handshake is not exact.");
+        }
+
+        reachedBudget.Dispose();
+    }
+
     // Nested dispatch. Ten fixed-update buckets already hand every worker a batch
     // of ships, and the bucket members dispatch again - ResourceManager.FixedUpdate
     // alone twice per ship per world tick. A small nested range now runs inline, so
@@ -4575,7 +4778,7 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
-Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, inlined small nested FastParallel dispatches, finer top-level batch sizing, a logical-processor-sized worker pool, urgent input-tick-delay HostUpdates, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");
+Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, bounded FastParallel dispatcher waits, inlined small nested FastParallel dispatches, finer top-level batch sizing, a logical-processor-sized worker pool, urgent input-tick-delay HostUpdates, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");
 
 internal static class DeserializationDetourFixture
 {

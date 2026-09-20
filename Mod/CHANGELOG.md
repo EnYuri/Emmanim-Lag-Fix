@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.2.18 (2026-09-20)
+
+- Bound the spin at the end of `FastParallel.For` and park past the budget. This
+  is the repair 2.1.3 made to idle pool workers, applied to the dispatcher side,
+  which was still on `SpinWait.SpinOnce(-1)`. On the 2026-09-20 two-player host
+  trace that wait was 12.33 s of 179.4 s of process CPU (6.9%), of which 9.34 s
+  was `SpinOnceCore` and 7.07 s was GC rendezvous polling underneath the spin.
+  By the time the wait runs, the calling thread has already executed batch zero
+  and claimed every batch it could, so every outstanding batch is owned by a
+  running thread and the wait cannot contribute work. The budget is set well past
+  the roughly 50 us a typical bucket join waits, so the common case still spins
+  exactly as vanilla does and only the descheduling tail parks. Released by the
+  completion of the task's last batch through the same Dekker handshake the
+  worker park uses, with the task identity carried across it because several
+  dispatches can be in flight at once. Vanilla's own loop is left in place as the
+  authority, so the helper is free to return early for any reason; a lost signal
+  costs one 20 ms backstop and cannot lose work. Reported as
+  `fpwait=<parks>/<wakes>/<timeouts>@<budget>`; `fastparallel-wait.txt` beside
+  the mod folder overrides the budget and backstop, and `0` restores vanilla's
+  unbounded spin with the dispatch path left entirely unpatched.
+- Replace the contiguous-path-set search's visited `HashSet` with a
+  generation-stamped open-addressed identity table. The 2.0.x repair already
+  scaled cleanup to the traversal rather than to the table, but it still paid two
+  hash probes per visited set, both through the shared `__Canon` instantiation
+  and `ObjectEqualityComparer`'s virtual calls. On the same trace
+  `HashSet.AddIfNotPresent` was 9.2% of the entire resource source search - 1.18
+  s, 97.5% of it from this one method - with another 1.2% in the removal pass.
+  Emptying is now one integer increment. `ContiguousPathSet` declares neither
+  `Equals` nor `GetHashCode`, so identity probing accepts exactly the first
+  occurrence vanilla's `TempHashSet` did; that is asserted at startup and the
+  patch stands down on vanilla if a future build gives the type value semantics.
+  The table is only ever probed, never enumerated, so the walk stays
+  bit-identical.
+- Build and full installed-game smoke suite pass on Cosmoteer 0.30.4c. The
+  dispatcher park is covered by a live handshake test that fails if a park ends
+  on the backstop rather than on the task's completion, and the rewritten wait is
+  run through `RuntimeHelpers.PrepareMethod` so malformed IL surfaces in the test
+  rather than on the hottest join in the game. Every multiplayer participant must
+  install the same version and restart.
+- Not measured in game yet. The expected gain is the tail and the GC rendezvous,
+  not a flat 6.9% of CPU: parking converts a busy wait into a blocked one and
+  does not shorten the wait itself.
+
 ## 2.2.17 (2026-09-20)
 
 - Extend the doodad avoidance-tag patch to every `IAvoidableDoodad.MatchesTags`
