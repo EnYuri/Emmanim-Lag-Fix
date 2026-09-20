@@ -10,27 +10,55 @@ using Halfling.Geometry;
 namespace EmmanimLagFix.Code;
 
 /// <summary>
-/// ResourceTransferJob.IsValidFor tests planetary avoidance tags for each
-/// candidate crew member. HashSet.Overlaps enumerates its IEnumerable argument
-/// through an interface, boxing a HashSet enumerator on every test. A live SP
-/// allocation trace attributed 414 MiB in 15 seconds to this path. Keep the
-/// receiver's comparer and the original iteration/early-return order, but use
-/// the concrete set's struct enumerator. No cache or retained game references.
+/// ResourceTransferJob.IsValidFor tests avoidance tags for each candidate crew
+/// member. Every IAvoidableDoodad.MatchesTags implementation calls
+/// HashSet.Overlaps, which enumerates its IEnumerable argument through the
+/// interface and boxes a HashSet enumerator on every test. A live MP
+/// allocation trace attributed ~300 MiB in 60 seconds to this path, mostly
+/// through the SpaceStation/StasisSpaceStation implementations that the
+/// original single-target version of this patch did not cover. Keep the
+/// receiver's comparer and the original membership semantics, but enumerate
+/// the concrete set's struct enumerator. The result is a bool OR-reduce, so
+/// enumeration order cannot affect the outcome. No cache or retained game
+/// references.
 /// </summary>
 [HarmonyPatch]
 internal static class DoodadAvoidanceTagAllocationPatch
 {
-    internal static bool Applied;
+    internal static int AppliedCount;
 
-    private static MethodBase TargetMethod()
+    private static IEnumerable<MethodBase> TargetMethods()
     {
-        var type = typeof(PlanetDoodad).GetNestedType("DamageAvoider", BindingFlags.NonPublic | BindingFlags.Public)
-            ?? throw new TypeLoadException("PlanetDoodad.DamageAvoider was not found.");
-        return type.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
-            .Single(m => m.Name.EndsWith(".MatchesTags", StringComparison.Ordinal));
+        var iface = AccessTools.TypeByName("Cosmoteer.Simulation.Doodads.IAvoidableDoodad")
+            ?? throw new TypeLoadException("IAvoidableDoodad was not found.");
+        Type[] types;
+        try
+        {
+            types = iface.Assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException e)
+        {
+            types = e.Types.Where(t => t != null).Cast<Type>().ToArray();
+        }
+        foreach (var type in types)
+        {
+            if (type.IsInterface || type.IsAbstract || !iface.IsAssignableFrom(type))
+                continue;
+            var matchesTags = type
+                .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                .SingleOrDefault(m => m.DeclaringType == type
+                    && (m.Name == "MatchesTags" || m.Name.EndsWith(".MatchesTags", StringComparison.Ordinal)));
+            if (matchesTags == null)
+            {
+                Halfling.Logging.Logger.Log(
+                    $"[EmmanimLagFix] IAvoidableDoodad.MatchesTags not found on {type.FullName}; leaving vanilla behaviour.");
+                continue;
+            }
+            yield return matchesTags;
+        }
     }
 
-    private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+    private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
     {
         var code = instructions.ToList();
         var sites = code.Where(i => i.opcode == OpCodes.Callvirt
@@ -39,17 +67,18 @@ internal static class DoodadAvoidanceTagAllocationPatch
             && t.GetGenericTypeDefinition() == typeof(HashSet<>)).ToArray();
         if (sites.Length != 1)
         {
-            Halfling.Logging.Logger.Log("[EmmanimLagFix] Planet avoidance tag comparison changed; leaving vanilla behaviour.");
+            Halfling.Logging.Logger.Log(
+                $"[EmmanimLagFix] Avoidance tag comparison changed in {original.DeclaringType?.Name}; leaving vanilla behaviour.");
             return code;
         }
 
-        var original = (MethodInfo)sites[0].operand;
+        var overlapsMethod = (MethodInfo)sites[0].operand;
         var replacement = typeof(DoodadAvoidanceTagAllocationPatch)
             .GetMethod(nameof(Overlaps), BindingFlags.Static | BindingFlags.NonPublic)!
-            .MakeGenericMethod(original.DeclaringType!.GetGenericArguments()[0]);
+            .MakeGenericMethod(overlapsMethod.DeclaringType!.GetGenericArguments()[0]);
         sites[0].opcode = OpCodes.Call;
         sites[0].operand = replacement;
-        Applied = true;
+        Interlocked.Increment(ref AppliedCount);
         return code;
     }
 
@@ -69,8 +98,10 @@ internal static class DoodadAvoidanceTagAllocationPatch
 }
 
 // Route the actual job call sites through the helper as well: the live trace
-// still sees the original generic caller after patching the interface method.
-// This avoids depending on interface devirtualization/inlining behaviour.
+// still sees the original generic caller after patching the interface methods.
+// The planet avoider is unwrapped directly to skip the interface dispatch;
+// other avoiders call their (patched) MatchesTags. This avoids depending on
+// interface devirtualization/inlining behaviour.
 [HarmonyPatch]
 internal static class ResourceTransferAvoidanceAllocationPatch
 {

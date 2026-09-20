@@ -5,6 +5,7 @@ using System.Collections;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 var gameAssembly = Assembly.Load("Cosmoteer");
 var halflingAssembly = Assembly.Load("HalflingCore");
@@ -360,12 +361,17 @@ ThrusterFirstPassTests.Run(gameAssembly, typeof(EntryPoint).Assembly);
 // path must allocate nothing once JIT compilation has warmed up.
 {
     var type = typeof(EntryPoint).Assembly.GetType("EmmanimLagFix.Code.DoodadAvoidanceTagAllocationPatch", true)!;
-    if (!(bool)AccessTools.Field(type, "Applied").GetValue(null)!)
-        throw new InvalidOperationException("Planet avoidance tag allocation patch did not apply.");
-    var target = (MethodBase)AccessTools.Method(type, "TargetMethod").Invoke(null, null)!;
-    if (Harmony.GetPatchInfo(target)?.Transpilers.All(p => p.owner != smokeId) != false)
-        throw new InvalidOperationException("Planet avoidance tag transpiler is missing.");
-    RuntimeHelpers.PrepareMethod(target.MethodHandle);
+    var tagTargets = ((IEnumerable<MethodBase>)AccessTools.Method(type, "TargetMethods").Invoke(null, null)!).ToArray();
+    if (tagTargets.Length < 3)
+        throw new InvalidOperationException($"Expected every IAvoidableDoodad.MatchesTags implementation; found {tagTargets.Length}.");
+    if ((int)AccessTools.Field(type, "AppliedCount").GetValue(null)! != tagTargets.Length)
+        throw new InvalidOperationException("Not every avoidance tag transpiler applied.");
+    foreach (var target in tagTargets)
+    {
+        if (Harmony.GetPatchInfo(target)?.Transpilers.All(p => p.owner != smokeId) != false)
+            throw new InvalidOperationException($"Avoidance tag transpiler is missing on {target.DeclaringType?.Name}.");
+        RuntimeHelpers.PrepareMethod(target.MethodHandle);
+    }
     var overlaps = AccessTools.Method(type, "Overlaps").MakeGenericMethod(typeof(string))
         .CreateDelegate<Func<HashSet<string>, IEnumerable<string>, bool>>();
     var tagSets = new[]
@@ -404,7 +410,93 @@ ThrusterFirstPassTests.Run(gameAssembly, typeof(EntryPoint).Assembly);
     tagsProperty.PropertyType.GetMethod("Add")!.Invoke(tags, new[] { Activator.CreateInstance(idType) });
     tagsProperty.SetValue(planet, tags);
     var avoiderType = planetType.GetNestedType("DamageAvoider", BindingFlags.Public | BindingFlags.NonPublic)!;
-    avoiders.Add(Activator.CreateInstance(avoiderType, new object[] { planet, 5f })!);
+    var planetAvoider = Activator.CreateInstance(avoiderType, new object[] { planet, 5f })!;
+    avoiders.Add(planetAvoider);
+    var setType = tagsProperty.PropertyType;
+    var setAdd = setType.GetMethod("Add")!;
+    var idFromInt = idType.GetMethods(BindingFlags.Static | BindingFlags.Public)
+        .Single(m => m.Name == "op_Explicit" && m.ReturnType == idType);
+    object NewSet(params int[] ids)
+    {
+        var set = Activator.CreateInstance(setType)!;
+        foreach (var id in ids)
+            setAdd.Invoke(set, new[] { idFromInt.Invoke(null, new object[] { id })! });
+        return set;
+    }
+    // SpaceStation and StasisSpaceStation are the other IAvoidableDoodad
+    // implementations; both read a HashSet<T> reachable without a live sim.
+    var stationShipType = gameAssembly.GetType("Cosmoteer.Ships.Ship", true)!;
+    var shipTagsProperty = AccessTools.Property(stationShipType, "Tags")!;
+    var shipField = AccessTools.Field(
+        gameAssembly.GetType("Cosmoteer.Ships.ShipComponent", true)!, "<Ship>k__BackingField")!;
+    var station = RuntimeHelpers.GetUninitializedObject(
+        gameAssembly.GetType("Cosmoteer.Ships.Special.SpaceStation", true)!);
+    var stationShip = RuntimeHelpers.GetUninitializedObject(stationShipType);
+    var stationTags = NewSet(1000003);
+    shipTagsProperty.SetValue(stationShip, stationTags);
+    shipField.SetValue(station, stationShip);
+    avoiders.Add(station);
+    var stasisSpawnerField = AccessTools.Field(
+        gameAssembly.GetType("Cosmoteer.Ships.Special.StasisLandmark", true)!, "<StasisSpawner>k__BackingField")!;
+    var stasisStationType = gameAssembly.GetType("Cosmoteer.Ships.Special.StasisSpaceStation", true)!;
+    var stasisAvoiders = new List<(object avoider, object tags)>();
+    foreach (var spawnerTypeName in new[]
+    {
+        "Cosmoteer.Simulation.Stasis.StasisShipSpawner",
+        "Cosmoteer.Simulation.Stasis.SimStasisManager+SerializedStasisShip"
+    })
+    {
+        var spawnerType = gameAssembly.GetType(spawnerTypeName, true)!;
+        var spawner = RuntimeHelpers.GetUninitializedObject(spawnerType);
+        var spawnerTags = NewSet(1000004);
+        AccessTools.Property(spawnerType, "Tags")!.SetValue(spawner, spawnerTags);
+        var stasisStation = RuntimeHelpers.GetUninitializedObject(stasisStationType);
+        stasisSpawnerField.SetValue(stasisStation, spawner);
+        avoiders.Add(stasisStation);
+        stasisAvoiders.Add((stasisStation, spawnerTags));
+    }
+    // Every MatchesTags implementation must agree with the vanilla
+    // tags != null && set != null && tags.Overlaps(set) shape.
+    var hashSetOverlaps = setType.GetMethod("Overlaps")!;
+    var emptySet = NewSet();
+    var matchCandidates = new object?[] { tags, NewSet(1000003), NewSet(2000001), emptySet, null };
+    void CheckMatchesTags(object avoider, object? theirTags, string name)
+    {
+        var matchesTags = avoider.GetType()
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+            .Single(m => m.Name.EndsWith(".MatchesTags", StringComparison.Ordinal));
+        foreach (var candidate in matchCandidates)
+        {
+            var expected = candidate != null && theirTags != null
+                && (bool)hashSetOverlaps.Invoke(candidate, new[] { theirTags })!;
+            var actual = (bool)matchesTags.Invoke(avoider, new[] { candidate })!;
+            if (actual != expected)
+                throw new InvalidOperationException($"Avoidance tag comparison diverged on {name}.");
+        }
+    }
+    CheckMatchesTags(planetAvoider, tags, "DamageAvoider");
+    CheckMatchesTags(station, stationTags, "SpaceStation");
+    foreach (var (stasisAvoider, spawnerTags) in stasisAvoiders)
+        CheckMatchesTags(stasisAvoider, spawnerTags, stasisAvoider.GetType().Name);
+    // The concrete enumerator path must not allocate for the live value type
+    // (ID<SimObjectSpawner>) either.
+    var overlapsGeneric = AccessTools.Method(type, "Overlaps")!.MakeGenericMethod(idType);
+    var pReceiver = System.Linq.Expressions.Expression.Parameter(typeof(object));
+    var pOther = System.Linq.Expressions.Expression.Parameter(typeof(object));
+    var overlapsObj = System.Linq.Expressions.Expression
+        .Lambda<Func<object, object, bool>>(System.Linq.Expressions.Expression.Call(
+            overlapsGeneric,
+            System.Linq.Expressions.Expression.Convert(pReceiver, setType),
+            System.Linq.Expressions.Expression.Convert(pOther, typeof(IEnumerable<>).MakeGenericType(idType))),
+            pReceiver, pOther).Compile();
+    var leftIds = NewSet(1, 2, 3);
+    var rightIds = NewSet(2, 4);
+    for (var i = 0; i < 10000; i++) _ = overlapsObj(leftIds, rightIds);
+    var beforeIds = GC.GetAllocatedBytesForCurrentThread();
+    for (var i = 0; i < 10000; i++) _ = overlapsObj(leftIds, rightIds);
+    var allocatedIds = GC.GetAllocatedBytesForCurrentThread() - beforeIds;
+    if (allocatedIds != 0)
+        throw new InvalidOperationException($"Value-type avoidance tag overlap still allocates: {allocatedIds} bytes.");
     var shapeType = typeof(Halfling.Geometry.Circle);
     var replacement = AccessTools.Method(routePatch, "ShouldAvoidLocation").MakeGenericMethod(shapeType);
     var original = managerType.GetMethods().Single(m => m.Name == "ShouldAvoidLocation" && m.GetParameters().Length == 3).MakeGenericMethod(shapeType);
@@ -417,6 +509,324 @@ ThrusterFirstPassTests.Run(gameAssembly, typeof(EntryPoint).Assembly);
         var actual = (bool)replacement.Invoke(null, new object?[] { manager, shape, candidateTags, buffer })!;
         if (actual != expected) throw new InvalidOperationException("Transfer avoidance changed geometry/tag behaviour.");
     }
+}
+
+// The tile-line overlay RefreshData replacement must traverse rules and
+// blueprint components in exactly vanilla order and must not allocate once
+// warmed up. Fixtures use uninitialized objects; only the fields the
+// traversal reads are populated.
+{
+    var overlayPatchType = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.TileLineOverlayAllocationPatch", true)!;
+    var overlayRendererType = gameAssembly.GetType(
+        "Cosmoteer.Ships.Blueprints.Graphics.TileLineBlueprintOverlayRenderer", true)!;
+    var overlayRefreshTarget = AccessTools.Method(overlayRendererType, "RefreshData")!;
+    if (Harmony.GetPatchInfo(overlayRefreshTarget)?.Prefixes.Any(p => p.owner == smokeId) != true)
+        throw new InvalidOperationException("Tile-line overlay RefreshData prefix is missing.");
+
+    var partComponentRulesType = gameAssembly.GetType("Cosmoteer.Ships.Parts.PartComponentRules", true)!;
+    var lineRulesType = gameAssembly.GetType("Cosmoteer.Ships.Parts.Logic.PartTileLineScoreValueRules", true)!;
+    var toggledRulesType = gameAssembly.GetType("Cosmoteer.Ships.Parts.Logic.PartToggledComponentsRules", true)!;
+    var plainRulesType = gameAssembly.GetType("Cosmoteer.Ships.Parts.Logic.JunkToggleRules", true)!;
+    var partRulesType = gameAssembly.GetType("Cosmoteer.Ships.Parts.PartRules", true)!;
+    var rulesListType = typeof(List<>).MakeGenericType(partComponentRulesType);
+    var toggledComponentsField = AccessTools.Field(toggledRulesType, "Components")!;
+
+    object NewRulesList(params object?[] items)
+    {
+        var list = (System.Collections.IList)Activator.CreateInstance(rulesListType)!;
+        foreach (var item in items) list.Add(item);
+        return list;
+    }
+    object NewToggled(params object?[] items)
+    {
+        var toggled = RuntimeHelpers.GetUninitializedObject(toggledRulesType);
+        toggledComponentsField.SetValue(toggled, NewRulesList(items));
+        return toggled;
+    }
+    var lineA = RuntimeHelpers.GetUninitializedObject(lineRulesType);
+    var lineB = RuntimeHelpers.GetUninitializedObject(lineRulesType);
+    var lineC = RuntimeHelpers.GetUninitializedObject(lineRulesType);
+    var lineD = RuntimeHelpers.GetUninitializedObject(lineRulesType);
+    var partRules = RuntimeHelpers.GetUninitializedObject(partRulesType);
+    AccessTools.Field(partRulesType, "Components")!.SetValue(partRules, NewRulesList(
+        RuntimeHelpers.GetUninitializedObject(plainRulesType),
+        lineA,
+        NewToggled(lineB, RuntimeHelpers.GetUninitializedObject(plainRulesType), NewToggled(lineC), null),
+        lineD,
+        null));
+
+    var expectedOrder = new List<object>();
+    var vanillaRecursive = (System.Collections.IEnumerable)AccessTools
+        .Method(partRulesType, "GetComponentsRecursive")!.Invoke(partRules, null)!;
+    foreach (var component in vanillaRecursive)
+        if (lineRulesType.IsInstanceOfType(component))
+            expectedOrder.Add(component);
+    if (expectedOrder.Count != 4)
+        throw new InvalidOperationException("Vanilla recursive component traversal changed shape.");
+
+    var lineRulesListType = typeof(List<>).MakeGenericType(lineRulesType);
+    var lineRulesActionType = typeof(Action<,>).MakeGenericType(lineRulesListType, lineRulesType);
+    var lineRulesVisit = lineRulesListType.GetMethod("Add")!.CreateDelegate(lineRulesActionType);
+    var visitMethod = AccessTools.Method(overlayPatchType, "VisitLineRules")!
+        .MakeGenericMethod(lineRulesListType);
+    var actualOrder = (System.Collections.IList)Activator.CreateInstance(lineRulesListType)!;
+    visitMethod.Invoke(null, new object?[] {
+        AccessTools.Field(partRulesType, "Components")!.GetValue(partRules), actualOrder, lineRulesVisit });
+    if (!expectedOrder.SequenceEqual(actualOrder.Cast<object>()))
+        throw new InvalidOperationException("Tile-line overlay rules traversal order diverged from vanilla.");
+
+    var overlayShipType = gameAssembly.GetType("Cosmoteer.Ships.Ship", true)!;
+    var blueprintPartType = gameAssembly.GetType("Cosmoteer.Ships.Blueprints.BlueprintPart", true)!;
+    var lineValueType = gameAssembly.GetType(
+        "Cosmoteer.Ships.Blueprints.Logic.Values.BlueprintPartTileLineScoreValue", true)!;
+    var bpComponentsField = AccessTools.Field(blueprintPartType, "_components")!;
+    var bpComponentsType = bpComponentsField.FieldType;
+    var blockingProperty = AccessTools.Property(lineValueType, "BlockingPart")!;
+    var componentsProperty = AccessTools.Property(blueprintPartType, "Components")!;
+    var bpmType = gameAssembly.GetType("Cosmoteer.Ships.Blueprints.BlueprintPartsManager", true)!;
+    var orderedPartsField = bpmType.BaseType!.GetField("_orderedParts",
+        BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    var blockerPart = RuntimeHelpers.GetUninitializedObject(blueprintPartType);
+    var otherPart = RuntimeHelpers.GetUninitializedObject(blueprintPartType);
+    object NewLineValue(object? blocking)
+    {
+        var value = RuntimeHelpers.GetUninitializedObject(lineValueType);
+        AccessTools.Field(lineValueType, "<BlockingPart>k__BackingField")!.SetValue(value, blocking);
+        return value;
+    }
+    object NewBlueprintPart(params object?[] comps)
+    {
+        var part = RuntimeHelpers.GetUninitializedObject(blueprintPartType);
+        var list = (System.Collections.IList)Activator.CreateInstance(bpComponentsType)!;
+        foreach (var comp in comps) list.Add(comp);
+        bpComponentsField.SetValue(part, list);
+        return part;
+    }
+    var lineV1 = NewLineValue(blockerPart);
+    var lineV2 = NewLineValue(null);
+    var lineV3 = NewLineValue(otherPart);
+    var lineV4 = NewLineValue(blockerPart);
+    var bpA = NewBlueprintPart(lineV1, lineV2, lineV3);
+    var bpB = NewBlueprintPart(lineV4);
+
+    var overlayShip = RuntimeHelpers.GetUninitializedObject(overlayShipType);
+    var bpm = RuntimeHelpers.GetUninitializedObject(bpmType);
+    var orderedParts = (System.Collections.IList)Activator.CreateInstance(
+        typeof(List<>).MakeGenericType(blueprintPartType))!;
+    orderedParts.Add(bpA);
+    orderedParts.Add(bpB);
+    orderedPartsField.SetValue(bpm, orderedParts);
+    AccessTools.Field(overlayShipType, "<BlueprintParts>k__BackingField")!.SetValue(overlayShip, bpm);
+
+    var bpSetType = typeof(HashSet<>).MakeGenericType(blueprintPartType);
+    var primaryParts = Activator.CreateInstance(bpSetType)!;
+    bpSetType.GetMethod("Add")!.Invoke(primaryParts, new[] { blockerPart });
+    var setContains = bpSetType.GetMethod("Contains")!;
+
+    var expectedSecondary = new List<object>();
+    foreach (var bp in orderedParts)
+    {
+        foreach (var comp in (System.Collections.IEnumerable)componentsProperty.GetValue(bp)!)
+        {
+            if (!lineValueType.IsInstanceOfType(comp)) continue;
+            var blocking = blockingProperty.GetValue(comp);
+            if (blocking != null && (bool)setContains.Invoke(primaryParts, new[] { blocking })!)
+                expectedSecondary.Add(comp);
+        }
+    }
+    if (expectedSecondary.Count != 2)
+        throw new InvalidOperationException("Secondary-line fixture shape changed.");
+
+    var lineValueListType = typeof(List<>).MakeGenericType(lineValueType);
+    var lineValueActionType = typeof(Action<,>).MakeGenericType(lineValueListType, lineValueType);
+    var lineValueVisit = lineValueListType.GetMethod("Add")!.CreateDelegate(lineValueActionType);
+    var collectMethod = AccessTools.Method(overlayPatchType, "CollectObstructedSecondaryLines")!
+        .MakeGenericMethod(lineValueListType);
+    var actualSecondary = (System.Collections.IList)Activator.CreateInstance(lineValueListType)!;
+    collectMethod.Invoke(null, new[] { overlayShip, primaryParts, actualSecondary, lineValueVisit });
+    if (!expectedSecondary.SequenceEqual(actualSecondary.Cast<object>()))
+        throw new InvalidOperationException("Tile-line overlay secondary traversal diverged from vanilla.");
+
+    // Both helpers must be allocation-free once warmed up; invoke them through
+    // compiled expressions so reflection invocation overhead does not pollute
+    // the measurement. A no-op visitor keeps the collected list from growing.
+    var noopLineVisit = System.Linq.Expressions.Expression.Lambda(lineRulesActionType,
+        System.Linq.Expressions.Expression.Empty(),
+        System.Linq.Expressions.Expression.Parameter(lineRulesListType),
+        System.Linq.Expressions.Expression.Parameter(lineRulesType)).Compile();
+    var noopValueVisit = System.Linq.Expressions.Expression.Lambda(lineValueActionType,
+        System.Linq.Expressions.Expression.Empty(),
+        System.Linq.Expressions.Expression.Parameter(lineValueListType),
+        System.Linq.Expressions.Expression.Parameter(lineValueType)).Compile();
+    var vp1 = System.Linq.Expressions.Expression.Parameter(typeof(object));
+    var vp2 = System.Linq.Expressions.Expression.Parameter(typeof(object));
+    var vp3 = System.Linq.Expressions.Expression.Parameter(typeof(object));
+    var visitInvoker = System.Linq.Expressions.Expression.Lambda<Func<object, object, object, int>>(
+        System.Linq.Expressions.Expression.Block(
+            System.Linq.Expressions.Expression.Call(visitMethod,
+                System.Linq.Expressions.Expression.Convert(vp1, rulesListType),
+                System.Linq.Expressions.Expression.Convert(vp2, lineRulesListType),
+                System.Linq.Expressions.Expression.Convert(vp3, lineRulesActionType)),
+            System.Linq.Expressions.Expression.Constant(0)),
+        vp1, vp2, vp3).Compile();
+    var cp1 = System.Linq.Expressions.Expression.Parameter(typeof(object));
+    var cp2 = System.Linq.Expressions.Expression.Parameter(typeof(object));
+    var cp3 = System.Linq.Expressions.Expression.Parameter(typeof(object));
+    var cp4 = System.Linq.Expressions.Expression.Parameter(typeof(object));
+    var collectInvoker = System.Linq.Expressions.Expression.Lambda<Func<object, object, object, object, int>>(
+        System.Linq.Expressions.Expression.Block(
+            System.Linq.Expressions.Expression.Call(collectMethod,
+                System.Linq.Expressions.Expression.Convert(cp1, overlayShipType),
+                System.Linq.Expressions.Expression.Convert(cp2, bpSetType),
+                System.Linq.Expressions.Expression.Convert(cp3, lineValueListType),
+                System.Linq.Expressions.Expression.Convert(cp4, lineValueActionType)),
+            System.Linq.Expressions.Expression.Constant(0)),
+        cp1, cp2, cp3, cp4).Compile();
+    var componentsList = AccessTools.Field(partRulesType, "Components")!.GetValue(partRules)!;
+    for (var i = 0; i < 20000; i++)
+    {
+        _ = visitInvoker(componentsList, actualOrder, noopLineVisit);
+        _ = collectInvoker(overlayShip, primaryParts, actualSecondary, noopValueVisit);
+    }
+    var overlayBefore = GC.GetAllocatedBytesForCurrentThread();
+    for (var i = 0; i < 20000; i++)
+    {
+        _ = visitInvoker(componentsList, actualOrder, noopLineVisit);
+        _ = collectInvoker(overlayShip, primaryParts, actualSecondary, noopValueVisit);
+    }
+    var overlayAllocated = GC.GetAllocatedBytesForCurrentThread() - overlayBefore;
+    if (overlayAllocated != 0)
+        throw new InvalidOperationException(
+            $"Tile-line overlay traversal still allocates: {overlayAllocated} bytes.");
+}
+
+// The item-cost text cache must return the exact vanilla-produced string on a
+// hit and must recompute when any fingerprinted input changes. BuildToolbox's
+// static constructor needs a live game, so the extracted cache type and the
+// fingerprint function are exercised directly instead.
+{
+    var costPatchType = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.BuildItemCostTextCachePatch", true)!;
+    var toolboxType = gameAssembly.GetType("Cosmoteer.Game.Gui.Build.BuildToolbox", true)!;
+    var costTextTarget = AccessTools.Method(toolboxType, "GetItemCostText")!;
+    var costPatchInfo = Harmony.GetPatchInfo(costTextTarget);
+    if (costPatchInfo?.Prefixes.Any(p => p.owner == smokeId) != true
+        || costPatchInfo.Postfixes.Any(p => p.owner == smokeId) != true)
+        throw new InvalidOperationException("Item-cost text cache prefix/postfix is missing.");
+
+    // Cache mechanics: miss -> store -> hit -> fingerprint change -> miss.
+    var cacheType = costPatchType.GetNestedType("CostTextCache", BindingFlags.NonPublic)!;
+    var costCache = Activator.CreateInstance(cacheType)!;
+    var keyType = costPatchType.GetNestedType("CostTextKey", BindingFlags.NonPublic)!;
+    var resourceArray = new object();
+    var costKeyCtor = keyType.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+        .Single(c => c.GetParameters().Length == 2);
+    var costKey = costKeyCtor.Invoke(new[] { 42, resourceArray });
+    var tryGet = AccessTools.Method(cacheType, "TryGet")!;
+    var store = AccessTools.Method(cacheType, "Store")!;
+    var tryArgs = new object?[] { costKey, 7L, null, null };
+    if ((bool)tryGet.Invoke(costCache, tryArgs)!)
+        throw new InvalidOperationException("Item-cost cache hit on an empty cache.");
+    store.Invoke(costCache, new object?[] { costKey, 7L, "cached-text", true });
+    tryArgs = new object?[] { costKey, 7L, null, null };
+    if (!(bool)tryGet.Invoke(costCache, tryArgs)!
+        || !Equals(tryArgs[2], "cached-text") || !(bool)tryArgs[3]!)
+        throw new InvalidOperationException("Item-cost cache failed to return the stored result.");
+    tryArgs = new object?[] { costKey, 8L, null, null };
+    if ((bool)tryGet.Invoke(costCache, tryArgs)!)
+        throw new InvalidOperationException("Item-cost cache hit despite a fingerprint change.");
+    var otherKey = costKeyCtor.Invoke(new object?[] { 42, new object() });
+    tryArgs = new object?[] { otherKey, 7L, null, null };
+    if ((bool)tryGet.Invoke(costCache, tryArgs)!)
+        throw new InvalidOperationException("Item-cost cache hit for a different resource array.");
+    var otherCostKey = costKeyCtor.Invoke(new object?[] { 43, resourceArray });
+    tryArgs = new object?[] { otherCostKey, 7L, null, null };
+    if ((bool)tryGet.Invoke(costCache, tryArgs)!)
+        throw new InvalidOperationException("Item-cost cache hit for a different credit cost.");
+
+    // Fingerprint coverage: identical inputs must produce identical hashes and
+    // every input the vanilla method reads must affect the fingerprint.
+    var fingerprintMethod = costPatchType
+        .GetMethods(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
+        .Single(m => m.Name == "ComputeFingerprint" && m.GetParameters().Length == 10);
+    var resourceRulesType = gameAssembly.GetType("Cosmoteer.Resources.ResourceRules", true)!;
+    var costResourceIdType = gameAssembly.GetType("Cosmoteer.Data.ID`1", true)!
+        .MakeGenericType(resourceRulesType);
+    var costedQuantitiesType = gameAssembly.GetType("Cosmoteer.Ships.Resources.CostedQuantities", true)!;
+    var costedDictType = typeof(Dictionary<,>).MakeGenericType(costResourceIdType, costedQuantitiesType);
+    var countDictType = typeof(Dictionary<,>).MakeGenericType(costResourceIdType, typeof(int));
+    var costResourceTupleType = typeof(ValueTuple<,>).MakeGenericType(costResourceIdType, typeof(int));
+    var costIdFromInt = costResourceIdType.GetMethods(BindingFlags.Static | BindingFlags.Public)
+        .Single(m => m.Name == "op_Explicit" && m.ReturnType == costResourceIdType
+            && m.GetParameters()[0].ParameterType == typeof(int));
+    object NewId(int raw) => costIdFromInt.Invoke(null, new object[] { raw })!;
+    object NewResourceArray(params object[] tuples)
+    {
+        var arr = Array.CreateInstance(costResourceTupleType, tuples.Length);
+        for (var i = 0; i < tuples.Length; i++) arr.SetValue(tuples[i], i);
+        return arr;
+    }
+    object NewResourceTuple(object id, int qty) =>
+        Activator.CreateInstance(costResourceTupleType, id, qty)!;
+    var resId1 = NewId(1);
+    var resId2 = NewId(2);
+    var shipObj = new object();
+    var simObj = new object();
+    var avail = (System.Collections.IDictionary)Activator.CreateInstance(countDictType)!;
+    avail[resId1] = 5;
+    var buyable = (System.Collections.IDictionary)Activator.CreateInstance(costedDictType)!;
+    var costedDataField = AccessTools.Field(costedQuantitiesType, "_data")!;
+    var costedAdd = AccessTools.Method(costedQuantitiesType, "Add", new[] { typeof(int), typeof(int) })!;
+    object NewQuantities(int quantity, int price)
+    {
+        var q = RuntimeHelpers.GetUninitializedObject(costedQuantitiesType);
+        costedDataField.SetValue(q, Activator.CreateInstance(costedDataField.FieldType)!);
+        costedAdd.Invoke(q, new object[] { quantity, price });
+        return q;
+    }
+    var quantities = NewQuantities(3, 10);
+    buyable[resId2] = quantities;
+    var refundable = (System.Collections.IDictionary)Activator.CreateInstance(costedDictType)!;
+    refundable[resId1] = quantities;
+
+    var resArray1 = NewResourceArray(NewResourceTuple(resId1, 2), NewResourceTuple(resId2, 4));
+    long Fingerprint(object? resArr = null, int credits = 100, bool editing = false,
+        object? shipRef = null, object? simRef = null, int money = 50, int mode = 2,
+        object? availD = null, object? buyD = null, object? refD = null) =>
+        (long)fingerprintMethod.Invoke(null, new object?[] {
+            credits, resArr ?? resArray1, editing, shipRef ?? shipObj, simRef ?? simObj,
+            money, mode, availD ?? avail, buyD ?? buyable, refD ?? refundable })!;
+    var baseFingerprint = Fingerprint();
+    if (Fingerprint() != baseFingerprint)
+        throw new InvalidOperationException("Item-cost fingerprint is not deterministic.");
+    if (Fingerprint(credits: 101) == baseFingerprint
+        || Fingerprint(editing: true) == baseFingerprint
+        || Fingerprint(money: 51) == baseFingerprint
+        || Fingerprint(mode: 3) == baseFingerprint
+        || Fingerprint(shipRef: new object()) == baseFingerprint
+        || Fingerprint(simRef: new object()) == baseFingerprint
+        || Fingerprint(resArr: Array.CreateInstance(costResourceTupleType, 0)) == baseFingerprint
+        || Fingerprint(resArr: NewResourceArray(NewResourceTuple(resId1, 3), NewResourceTuple(resId2, 4)))
+            == baseFingerprint
+        || Fingerprint(resArr: NewResourceArray(NewResourceTuple(resId2, 2), NewResourceTuple(resId1, 4)))
+            == baseFingerprint)
+        throw new InvalidOperationException("Item-cost fingerprint ignores a vanilla input.");
+    var availMutated = (System.Collections.IDictionary)Activator.CreateInstance(countDictType)!;
+    availMutated[resId1] = 6;
+    if (Fingerprint(availD: availMutated) == baseFingerprint)
+        throw new InvalidOperationException("Item-cost fingerprint ignores available-resource counts.");
+    var availExtra = (System.Collections.IDictionary)Activator.CreateInstance(countDictType)!;
+    availExtra[resId1] = 5;
+    availExtra[resId2] = 1;
+    if (Fingerprint(availD: availExtra) == baseFingerprint)
+        throw new InvalidOperationException("Item-cost fingerprint ignores available-resource keys.");
+    var buyableMutated = (System.Collections.IDictionary)Activator.CreateInstance(costedDictType)!;
+    buyableMutated[resId2] = NewQuantities(4, 10);
+    if (Fingerprint(buyD: buyableMutated) == baseFingerprint
+        || Fingerprint(refD: buyableMutated) == baseFingerprint)
+        throw new InvalidOperationException("Item-cost fingerprint ignores buyable/refundable contents.");
 }
 
 var timeoutPatchType = typeof(EntryPoint).Assembly.GetType(
@@ -1478,6 +1888,336 @@ if (hotAfterRelease != null)
         throw new InvalidOperationException(
             "The queue-shard hot cache still strongly references the disposed simulation.");
     }
+}
+
+// The deterministic action and hit-effect queues are drained through the
+// contention-free replacement only when the shape check matched this build's
+// SimRoot. The prefix pair on EnqueueDeterministic, the drain prefix on
+// ExecuteQueued and the release postfix on Dispose must all be installed.
+var detQueuePatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.DeterministicQueueContentionPatch",
+    throwOnError: true)!;
+if (AccessTools.Field(detQueuePatchType, "Applied").GetValue(null) is not true)
+{
+    throw new InvalidOperationException(
+        "The deterministic queue contention patch fell back to vanilla behaviour, "
+        + "so producers still convoy on the queue locks.");
+}
+var objectIdType = AccessTools.TypeByName("Cosmoteer.Game.ObjectID")
+    ?? throw new InvalidOperationException("Cosmoteer.Game.ObjectID was not found.");
+var hitFxRulesType = AccessTools.TypeByName("Cosmoteer.Simulation.HitEffects.MultiHitEffectRules")
+    ?? throw new InvalidOperationException("MultiHitEffectRules was not found.");
+var hitFxParamsType = AccessTools.TypeByName("Cosmoteer.Simulation.HitEffects.HitEffectParams")
+    ?? throw new InvalidOperationException("HitEffectParams was not found.");
+var enqActionTarget = AccessTools.DeclaredMethod(simRootType, "EnqueueDeterministic",
+    new[] { objectIdType, typeof(object), typeof(Action<object>) })
+    ?? throw new MissingMethodException(simRootType.FullName, "EnqueueDeterministic(action)");
+var enqHitFxTarget = AccessTools.DeclaredMethod(simRootType, "EnqueueDeterministic",
+    new[] { objectIdType, hitFxRulesType, hitFxParamsType })
+    ?? throw new MissingMethodException(simRootType.FullName, "EnqueueDeterministic(hitEffects)");
+bool HasDetQueuePrefix(MethodBase target) =>
+    Harmony.GetPatchInfo(target)?.Prefixes.Any(
+        patch => patch.PatchMethod.DeclaringType?.DeclaringType == detQueuePatchType) == true;
+if (!HasDetQueuePrefix(enqActionTarget) || !HasDetQueuePrefix(enqHitFxTarget)
+    || !HasDetQueuePrefix(executeQueuedTarget))
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim prefixes were not installed on SimRoot's deterministic "
+        + "queue methods, so enqueue traffic still serializes on the vanilla locks.");
+}
+if (Harmony.GetPatchInfo(simDisposeTarget)?.Postfixes.Any(
+        patch => patch.PatchMethod.DeclaringType?.DeclaringType == detQueuePatchType) != true)
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim postfix was not installed on SimRoot.Dispose, so a resync "
+        + "could leave the old simulation in the deterministic queue hot cache.");
+}
+
+// Drained actions must run grouped by ship id and, within one ship, in the
+// order they were posted - exactly the (shipID, actionID) sort vanilla applies.
+var oidAdd = objectIdType.GetMethods(BindingFlags.Static | BindingFlags.Public)
+    .First(method => method.Name == "op_Addition"
+        && method.GetParameters() is [{ ParameterType: var left }, { ParameterType: var right }]
+        && left == objectIdType && right == typeof(uint));
+object MakeObjectId(uint id) =>
+    oidAdd.Invoke(null, new object?[] { Activator.CreateInstance(objectIdType), id })!;
+var detEnqueue = AccessTools.DeclaredMethod(detQueuePatchType, "EnqueueAction")
+    ?? throw new MissingMethodException(detQueuePatchType.FullName, "EnqueueAction");
+var detHitFxEnqueue = AccessTools.DeclaredMethod(detQueuePatchType, "EnqueueHitEffects")
+    ?? throw new MissingMethodException(detQueuePatchType.FullName, "EnqueueHitEffects");
+var detDrain = AccessTools.DeclaredMethod(detQueuePatchType, "Drain")
+    ?? throw new MissingMethodException(detQueuePatchType.FullName, "Drain");
+var detRelease = AccessTools.DeclaredMethod(detQueuePatchType, "Release")
+    ?? throw new MissingMethodException(detQueuePatchType.FullName, "Release");
+var detStateFor = AccessTools.DeclaredMethod(detQueuePatchType, "StateFor")
+    ?? throw new MissingMethodException(detQueuePatchType.FullName, "StateFor");
+
+var detSim = new object();
+var detOrder = new List<uint>();
+void PostAction(uint ship, string tag) =>
+    detEnqueue.Invoke(null, new object?[]
+    {
+        detSim, MakeObjectId(ship), tag,
+        new Action<object?>(_ => detOrder.Add(ship)),
+    });
+PostAction(7, "a");
+PostAction(3, "b");
+PostAction(7, "c");
+detDrain.Invoke(null, new object?[] { detSim });
+if (!detOrder.SequenceEqual(new uint[] { 3, 7, 7 }))
+{
+    throw new InvalidOperationException(
+        $"Deterministic queue drained [{string.Join(", ", detOrder)}], expected [3, 7, 7]: "
+        + "the (shipID, arrival) ordering changed versus vanilla.");
+}
+
+// An action posted by a running callback must still run in the same drain
+// pass, appended after the sorted prefix just like vanilla's live-Count loop.
+var reentrySim = new object();
+var reentryOrder = new List<string>();
+detEnqueue.Invoke(null, new object?[]
+{
+    reentrySim, MakeObjectId(5), null,
+    new Action<object?>(_ =>
+    {
+        reentryOrder.Add("outer");
+        detEnqueue.Invoke(null, new object?[]
+        {
+            reentrySim, MakeObjectId(1), null,
+            new Action<object?>(_ => reentryOrder.Add("inner")),
+        });
+    }),
+});
+detDrain.Invoke(null, new object?[] { reentrySim });
+if (!reentryOrder.SequenceEqual(new[] { "outer", "inner" }))
+{
+    throw new InvalidOperationException(
+        "A callback posted mid-drain was not executed in the same pass, "
+        + "which vanilla's live-Count loop guarantees.");
+}
+
+// Concurrent producers must all land, and each thread's own posts to one ship
+// must stay in that thread's posting order - the only cross-thread ordering
+// vanilla's lock ever established.
+var concSim = new object();
+var perShipThread = new System.Collections.Concurrent.ConcurrentDictionary<
+    (uint Ship, int Worker), System.Collections.Concurrent.ConcurrentQueue<int>>();
+var concRan = 0;
+Parallel.For(0, 8, worker =>
+{
+    for (var i = 0; i < 200; i++)
+    {
+        var ship = (uint)(worker % 3);
+        var ordinal = i;
+        detEnqueue.Invoke(null, new object?[]
+        {
+            concSim, MakeObjectId(ship), null,
+            new Action<object?>(_ =>
+            {
+                Interlocked.Increment(ref concRan);
+                perShipThread.GetOrAdd((ship, worker), static _ => new()).Enqueue(ordinal);
+            }),
+        });
+    }
+});
+detDrain.Invoke(null, new object?[] { concSim });
+if (concRan != 8 * 200)
+{
+    throw new InvalidOperationException(
+        $"Deterministic queue ran {concRan} callbacks, expected {8 * 200}.");
+}
+foreach (var posted in perShipThread.Values)
+{
+    var ordinals = posted.ToArray();
+    if (!ordinals.SequenceEqual(ordinals.OrderBy(ordinal => ordinal)))
+    {
+        throw new InvalidOperationException(
+            "Deterministic queue reordered one thread's own posts to a ship, "
+            + "which vanilla's arrival-order actionID does not do.");
+    }
+}
+
+// The hit-effect enqueue must land on the replacement queue with its params
+// untouched until the drain; DoEffect is not callable here, so the queued
+// entry itself is the assertion. Releasing the sim must drop the state.
+var fxSim = new object();
+var fxParams = RuntimeHelpers.GetUninitializedObject(hitFxParamsType);
+detHitFxEnqueue.Invoke(null, new object?[] { fxSim, MakeObjectId(2), null, fxParams });
+var fxState = detStateFor.Invoke(null, new object?[] { fxSim, false })
+    ?? throw new InvalidOperationException("Hit-effect enqueue created no queue state.");
+var fxQueue = AccessTools.Field(fxState.GetType(), "HitEffects").GetValue(fxState)
+    ?? throw new InvalidOperationException("Queue state has no hit-effect queue.");
+if ((int)fxQueue.GetType().GetProperty("Count")!.GetValue(fxQueue)! != 1)
+{
+    throw new InvalidOperationException(
+        "A hit-effect enqueue did not land on the replacement queue.");
+}
+detRelease.Invoke(null, new object?[] { fxSim });
+if (detStateFor.Invoke(null, new object?[] { fxSim, false }) != null)
+{
+    throw new InvalidOperationException(
+        "Deterministic queue state survived release for a disposed simulation.");
+}
+var hotAfterDetRelease = AccessTools.Field(detQueuePatchType, "_hot").GetValue(null);
+if (hotAfterDetRelease != null
+    && ReferenceEquals(
+        AccessTools.Field(hotAfterDetRelease.GetType(), "Sim").GetValue(hotAfterDetRelease), fxSim))
+{
+    throw new InvalidOperationException(
+        "The deterministic queue hot cache still strongly references the released simulation.");
+}
+
+// The FTL efficiency overlay's gate must compare pending drives without LINQ
+// and its prefix must be installed on DrawFtlEfficiencyOverlay.
+var ftlOverlayPatchType = typeof(EntryPoint).Assembly.GetType(
+    "EmmanimLagFix.Code.FtlEfficiencyOverlayAllocationPatch",
+    throwOnError: true)!;
+var drawFtlTarget = AccessTools.DeclaredMethod(
+    AccessTools.TypeByName("Cosmoteer.Game.Gui.Build.BuildToolbox")!, "DrawFtlEfficiencyOverlay")
+    ?? throw new MissingMethodException("BuildToolbox", "DrawFtlEfficiencyOverlay");
+if (Harmony.GetPatchInfo(drawFtlTarget)?.Prefixes.Any(
+        patch => patch.PatchMethod.DeclaringType == ftlOverlayPatchType) != true)
+{
+    throw new InvalidOperationException(
+        "Expected Emmanim prefix was not installed on BuildToolbox.DrawFtlEfficiencyOverlay.");
+}
+
+// The gate must reproduce vanilla's SequenceEqual semantics exactly: null
+// cached equals only null; a non-null cached list sequence-equals the current
+// list, with null counting as empty.
+var pendingDriveType = AccessTools.TypeByName("Cosmoteer.Game.Gui.Build.PendingFtlDrive")
+    ?? throw new InvalidOperationException("PendingFtlDrive was not found.");
+var ftlRulesType = AccessTools.TypeByName("Cosmoteer.Ships.Parts.Ftl.FtlDriveRules")
+    ?? throw new InvalidOperationException("FtlDriveRules was not found.");
+var pendingListType = typeof(List<>).MakeGenericType(pendingDriveType);
+var ftlVector2Type = AccessTools.TypeByName("Halfling.Geometry.Vector2")!;
+var ftlIntRectType = AccessTools.TypeByName("Halfling.Geometry.IntRect")!;
+var ftlIntVector2Type = AccessTools.TypeByName("Halfling.Geometry.IntVector2")!;
+object MakePendingDrive(object rules, float x, float y, int rx, int ry, int rw, int rh) =>
+    Activator.CreateInstance(pendingDriveType, rules,
+        Activator.CreateInstance(ftlVector2Type, x, y),
+        Activator.CreateInstance(ftlIntRectType, rx, ry, rw, rh))!;
+object MakePendingList(params object[] drives)
+{
+    var list = (IList)Activator.CreateInstance(pendingListType)!;
+    foreach (var drive in drives)
+        list.Add(drive);
+    return list;
+}
+var pendingEqual = AccessTools.DeclaredMethod(ftlOverlayPatchType, "PendingDrivesEqual")
+    ?? throw new MissingMethodException(ftlOverlayPatchType.FullName, "PendingDrivesEqual");
+var ftlRulesA = RuntimeHelpers.GetUninitializedObject(ftlRulesType);
+var driveA = MakePendingDrive(ftlRulesA, 1f, 2f, 0, 0, 2, 2);
+var driveA2 = MakePendingDrive(ftlRulesA, 1f, 2f, 0, 0, 2, 2);
+var driveB = MakePendingDrive(ftlRulesA, 9f, 9f, 4, 4, 2, 2);
+bool GateEqual(object? cached, object? current) =>
+    (bool)pendingEqual.Invoke(null, new[] { cached, current })!;
+if (!GateEqual(null, null)) throw new InvalidOperationException("FTL gate: null != null.");
+if (GateEqual(null, MakePendingList(driveA))) throw new InvalidOperationException("FTL gate: null == list.");
+if (!GateEqual(MakePendingList(), null)) throw new InvalidOperationException("FTL gate: empty cached != null current.");
+if (!GateEqual(MakePendingList(driveA), MakePendingList(driveA2)))
+    throw new InvalidOperationException("FTL gate: identical drives reported different.");
+if (GateEqual(MakePendingList(driveA), MakePendingList(driveA2, driveB)))
+    throw new InvalidOperationException("FTL gate: length difference ignored.");
+if (GateEqual(MakePendingList(driveA), MakePendingList(driveB)))
+    throw new InvalidOperationException("FTL gate: content difference ignored.");
+
+// Bitwise-compare the re-implemented efficiency math against vanilla's
+// BlueprintPartsManager.CalculateJumpEfficiency on a fabricated ship: one
+// plain part plus one FTL drive part, no pending drives.
+var ftlManagerType = AccessTools.TypeByName("Cosmoteer.Ships.Blueprints.BlueprintPartsManager")!;
+var ftlBpPartType = AccessTools.TypeByName("Cosmoteer.Ships.Blueprints.BlueprintPart")!;
+var ftlPartRulesType = AccessTools.TypeByName("Cosmoteer.Ships.Parts.PartRules")!;
+var ftlComponentRulesType = AccessTools.TypeByName("Cosmoteer.Ships.Parts.PartComponentRules")!;
+var ftlRangeFloatType = AccessTools.TypeByName("Halfling.Range`1")!.MakeGenericType(typeof(float));
+object MakeRules(float density, int w, int h, params object[] components)
+{
+    var rules = RuntimeHelpers.GetUninitializedObject(ftlPartRulesType);
+    AccessTools.Field(ftlPartRulesType, "Size").SetValue(rules, Activator.CreateInstance(ftlIntVector2Type, w, h));
+    AccessTools.Field(ftlPartRulesType, "Density").SetValue(rules, density);
+    var componentsList = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(ftlComponentRulesType))!;
+    foreach (var component in components)
+        componentsList.Add(component);
+    AccessTools.Field(ftlPartRulesType, "Components").SetValue(rules, componentsList);
+    return rules;
+}
+object MakePart(object rules, int x, int y)
+{
+    var part = RuntimeHelpers.GetUninitializedObject(ftlBpPartType);
+    AccessTools.Field(ftlBpPartType, "<Rules>k__BackingField").SetValue(part, rules);
+    AccessTools.Field(ftlBpPartType, "<Location>k__BackingField")
+        .SetValue(part, Activator.CreateInstance(ftlIntVector2Type, x, y));
+    AccessTools.Field(ftlBpPartType, "_rotFlip").SetValue(part, 0);
+    return part;
+}
+var ftlDrive = RuntimeHelpers.GetUninitializedObject(ftlRulesType);
+AccessTools.Field(ftlRulesType, "JumpEfficiency").SetValue(ftlDrive, 0.75f);
+var driveRange = Activator.CreateInstance(ftlRangeFloatType)!;
+AccessTools.Field(ftlRangeFloatType, "Min").SetValue(driveRange, 1f);
+AccessTools.Field(ftlRangeFloatType, "Max").SetValue(driveRange, 8f);
+AccessTools.Field(ftlRulesType, "JumpEfficiencyDistanceRange").SetValue(ftlDrive, driveRange);
+
+var ftlManager = RuntimeHelpers.GetUninitializedObject(ftlManagerType);
+var ftlOrderedParts = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(ftlBpPartType))!;
+var plainPart = MakePart(MakeRules(1.5f, 2, 2), 0, 0);
+var drivePartObj = MakePart(MakeRules(2f, 2, 2, ftlDrive), 2, 0);
+ftlOrderedParts.Add(plainPart);
+ftlOrderedParts.Add(drivePartObj);
+AccessTools.Field(ftlManagerType, "_orderedParts").SetValue(ftlManager, ftlOrderedParts);
+var byCategory = (IDictionary)Activator.CreateInstance(AccessTools
+    .Field(ftlManagerType, "_partsByCategory").FieldType)!;
+var ftlSetType = typeof(HashSet<>).MakeGenericType(ftlBpPartType);
+var ftlSet = Activator.CreateInstance(ftlSetType)!;
+ftlSetType.GetMethod("Add")!.Invoke(ftlSet, new[] { drivePartObj });
+byCategory.Add(AccessTools.Field(AccessTools.TypeByName("Cosmoteer.PartCategories")!, "Ftl")
+    .GetValue(null)!, ftlSet);
+AccessTools.Field(ftlManagerType, "_partsByCategory").SetValue(ftlManager, byCategory);
+
+var vanillaCalc = AccessTools.DeclaredMethod(ftlManagerType, "CalculateJumpEfficiency")
+    ?? throw new MissingMethodException(ftlManagerType.FullName, "CalculateJumpEfficiency");
+var patchedCalc = AccessTools.DeclaredMethod(ftlOverlayPatchType, "CalculateJumpEfficiency")
+    ?? throw new MissingMethodException(ftlOverlayPatchType.FullName, "CalculateJumpEfficiency");
+var vanillaEff = (float)vanillaCalc.Invoke(ftlManager, new object?[] { null, null })!;
+
+// The replacement writes overlay pixels directly; hand it a pinned buffer
+// standing in for the upload texture and compare both the efficiency and the
+// written cells against the vanilla callback path.
+var bounds = Activator.CreateInstance(ftlIntRectType, 0, 0, 4, 2)!;
+var pixelSize = Marshal.SizeOf(AccessTools.TypeByName("Halfling.Graphics.IntColor")!);
+var pixels = new byte[4 * 2 * pixelSize];
+var pixelHandle = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+try
+{
+    var buildGuiRulesType = AccessTools.TypeByName("Cosmoteer.Game.Gui.Build.BuildGuiRules")!;
+    var guiRules = RuntimeHelpers.GetUninitializedObject(buildGuiRulesType);
+    var hueRange = Activator.CreateInstance(ftlRangeFloatType)!;
+    AccessTools.Field(ftlRangeFloatType, "Min").SetValue(hueRange, 100f);
+    AccessTools.Field(ftlRangeFloatType, "Max").SetValue(hueRange, 200f);
+    AccessTools.Field(buildGuiRulesType, "FtlOverlayHueRange").SetValue(guiRules, hueRange);
+    AccessTools.Field(buildGuiRulesType, "FtlOverlayAlpha").SetValue(guiRules, 0.5f);
+    var patchedEff = (float)patchedCalc.Invoke(null, new object?[]
+    {
+        ftlManager, null, pixelHandle.AddrOfPinnedObject(), 4 * pixelSize, bounds, guiRules,
+    })!;
+    if (BitConverter.SingleToUInt32Bits(vanillaEff) != BitConverter.SingleToUInt32Bits(patchedEff))
+    {
+        throw new InvalidOperationException(
+            $"FTL efficiency diverged: vanilla={vanillaEff} patched={patchedEff}.");
+    }
+    // The drive part's own cells must stay untouched (TransparentWhite == 0
+    // bytes aside, vanilla skipped the callback there); the plain part's two
+    // cells must have been written with non-zero bytes.
+    var transparentBytes = new byte[pixelSize];
+    bool CellIsTransparent(int x, int y) =>
+        pixels.Skip((y * 4 + x) * pixelSize).Take(pixelSize).SequenceEqual(transparentBytes);
+    if (CellIsTransparent(0, 0) || CellIsTransparent(1, 0))
+        throw new InvalidOperationException("FTL overlay skipped the plain part's cells.");
+    if (!CellIsTransparent(2, 0) || !CellIsTransparent(3, 0))
+        throw new InvalidOperationException("FTL overlay wrote into the drive part's own cells.");
+}
+finally
+{
+    pixelHandle.Free();
 }
 
 // The codex evaluates every unshown page's IronPython show-condition against a

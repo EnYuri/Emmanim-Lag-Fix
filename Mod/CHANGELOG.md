@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.2.17 (2026-09-20)
+
+- Extend the doodad avoidance-tag patch to every `IAvoidableDoodad.MatchesTags`
+  implementation instead of only `PlanetDoodad.DamageAvoider`. `SpaceStation`
+  and `StasisSpaceStation` were dominating the allocation in stasis-heavy
+  sessions. The result is a boolean OR-reduce over set membership, so
+  enumeration order cannot affect it; any implementation whose shape does not
+  match is left on vanilla and logged.
+- Rebuild the build-mode tile-line overlay's data refresh over the concrete
+  component lists instead of LINQ `OfType` and a per-refresh `ToHashSet`.
+  Recursive visitation order, secondary-line order and the blocking-part filter
+  are preserved. Build UI only; the simulation is never touched.
+- Cache `BuildToolbox.GetItemCostText` behind a fingerprint covering every input
+  the vanilla method reads: editing mode, spendable money, bound ship,
+  construction mode and the contents of the available, buyable and refundable
+  resource dictionaries. A hit returns the identical string, which also lets the
+  text renderer skip its XML rebuild. Any change misses and runs vanilla.
+- Replace the monitor convoy on the simulation's two deterministic callback
+  queues with a per-sim concurrent queue stamped by a monotonic sequence. The
+  drain still runs at the same point in the tick, still sorts by
+  `(objectID, arrival)` and still re-runs entries posted mid-drain, so execution
+  order is unchanged; entries arriving after the final dequeue are now kept for
+  the next drain rather than cleared unseen. Any internals mismatch leaves
+  vanilla untouched.
+- Re-implement the FTL efficiency overlay without its per-frame LINQ gate,
+  per-drive heap tuples, per-part boxed cell enumerator and per-cell closure.
+  Accumulation order is preserved term for term and the resulting efficiency is
+  bit-identical to vanilla.
+- Fix the item-cost fingerprint boxing a dictionary enumerator on each of its
+  three dictionary walks, which ran once per toolbox button per frame.
+- Clear the deterministic drain's reusable scratch lists in a `finally`. A
+  throwing callback previously left them populated and the next drain would
+  re-execute entries it had already run -- a desync on the deterministic path.
+  Vanilla has the same flaw; it is no longer reproduced.
+- Build and full installed-game smoke suite pass on Cosmoteer 0.30.4c. Every
+  multiplayer participant must install the same version and restart.
+
 ## 2.2.16 (2026-09-20)
 
 - Specialize the exact vanilla tile-heat modulation shape into a bit-equivalent

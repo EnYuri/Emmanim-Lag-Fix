@@ -87,6 +87,8 @@ internal static class ManualTransferExpiryTests
             var index = AccessTools.Field(managerType, "_nextManualJobExpensiveCheckIndex");
             var simType = game.GetType("Cosmoteer.Simulation.SimRoot", true)!;
             var queueField = AccessTools.Field(simType, "_queuedDeterministic");
+            var hitFxQueueField = AccessTools.Field(simType, "_queuedHitEffects");
+            var executeQueued = AccessTools.Method(simType, "ExecuteQueued");
             var shipType = game.GetType("Cosmoteer.Ships.Ship", true)!;
             foreach (var size in new[] { 0, 1, 7, 32 })
             foreach (var initial in new[] { 0f, 0.7f, 3.25f })
@@ -102,6 +104,11 @@ internal static class ManualTransferExpiryTests
                     AccessTools.Field(shipType, "_root").SetValue(Ship, Sim);
                     var queue = (IList)Activator.CreateInstance(queueField.FieldType)!;
                     queueField.SetValue(Sim, queue);
+                    // The deterministic-queue patch redirects enqueues onto its own
+                    // concurrent queues, so the drain has to go through ExecuteQueued
+                    // rather than reading the vanilla list. ExecuteQueued still walks
+                    // both vanilla lists, so they must exist and stay empty.
+                    hitFxQueueField.SetValue(Sim, Activator.CreateInstance(hitFxQueueField.FieldType));
                     var jobs = (IList)Activator.CreateInstance(jobsField.FieldType)!;
                     jobsField.SetValue(Manager, jobs);
                     accumulated.SetValue(Manager, initial);
@@ -115,11 +122,7 @@ internal static class ManualTransferExpiryTests
                     }
                     if (pass == 0) Original(Manager, (Time)0.1f); else replacement(Manager, (Time)0.1f);
                     if (Removed.Count != 0) throw new Exception("Removal executed before queue drain.");
-                    foreach (var entry in queue)
-                    {
-                        var action = (Action<object?>)AccessTools.Field(entry!.GetType(), "Action").GetValue(entry)!;
-                        action(AccessTools.Field(entry.GetType(), "Data").GetValue(entry));
-                    }
+                    executeQueued.Invoke(Sim, new object?[] { true, false });
                     var snapshot = string.Join(",", Calls) + "/" + string.Join(",", Removed.Select(j => JobIds[j]))
                         + "/" + accumulated.GetValue(Manager) + "/" + index.GetValue(Manager) + "/" + queue.Count;
                     if (pass == 0) expected = snapshot;
@@ -147,13 +150,11 @@ internal static class ManualTransferExpiryTests
             RecordCalls = true;
             // Distinct queued changes keep their job/value, and stay deferred.
             var update = AccessTools.Method(patchType, "QueueRequested");
-            var queued = (IList)queueField.GetValue(Sim)!; queued.Clear();
             var first = JobIds.Keys.First(); var last = JobIds.Keys.Last();
             update.Invoke(null, new object[] { Manager, first, MakeRequested(4, 3) });
             update.Invoke(null, new object[] { Manager, last, MakeRequested(8, 7) });
             if (Confirmed(first) == 3) throw new Exception("Update was immediate.");
-            foreach (var entry in queued)
-                ((Action<object?>)AccessTools.Field(entry!.GetType(), "Action").GetValue(entry)!)(AccessTools.Field(entry.GetType(), "Data").GetValue(entry));
+            executeQueued.Invoke(Sim, new object?[] { true, false });
             if (Confirmed(first) != 3 || Confirmed(last) != 7)
                 throw new Exception("Queued requests lost per-job values.");
         }
