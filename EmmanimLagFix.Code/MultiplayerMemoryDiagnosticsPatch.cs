@@ -123,10 +123,7 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         _ = FramePhaseDiagnosticsPatch.Snapshot(ReportSeconds);
         _ = SimPhaseDiagnosticsPatch.Snapshot();
         _ = SceneUpdateBreakdown.Take();
-        _ = StatusPhaseDiagnostics.Take();
-        _ = BucketInnerDiagnostics.Take();
         _ = FastParallelWaitDiagnosticsPatch.Take();
-        _ = HeatModulationContextSkipPatch.TakeCounters();
         _sampledManager = new WeakReference<BaseMPManager>(manager);
     }
 
@@ -420,12 +417,8 @@ internal static class MultiplayerMemoryDiagnosticsPatch
         // Separate short payload: do not let the chat limit truncate either
         // the existing report or these rank-independent validation metrics.
         var focused = $"kind=status-resource t={manager.NetworkInputTick} {breakdown.Focused} "
-            + $"cap={(StatusModulationListCapacityPatch.AppliedToTiles ? 1 : 0)}/{(StatusModulationListCapacityPatch.AppliedToParts ? 1 : 0)} {HeatModulationContextSkipPatch.TakeCounters()} "
-            // The bounded inner-bucket list goes before the type list, so a
-            // rare over-long stt tail is still what the relay's 195-char cap
-            // eats rather than the cap/ctx validation fields.
-            + $"{BucketInnerDiagnostics.Take()} " + FastParallelWaitDiagnosticsPatch.Take()
-            + " " + StatusPhaseDiagnostics.Take();
+            + $"cap={(StatusModulationListCapacityPatch.AppliedToTiles ? 1 : 0)}/{(StatusModulationListCapacityPatch.AppliedToParts ? 1 : 0)} "
+            + FastParallelWaitDiagnosticsPatch.Take();
         Halfling.Logging.Logger.Log($"[EmmanimLagFix.StatusResourceDiagnostics] {focused}");
         PeerDiagnosticsRelayPatch.MaybeSend(manager, focused);
 
@@ -441,17 +434,6 @@ internal static class MultiplayerMemoryDiagnosticsPatch
             + $"cores={FastParallelIdleParkPatch.ProcessorCount}/{FastParallelIdleParkPatch.WorkerCount}";
         Halfling.Logging.Logger.Log($"[EmmanimLagFix.BucketDiagnostics] {wide}");
         PeerDiagnosticsRelayPatch.MaybeSend(manager, wide);
-
-        // Fourth short payload. The Resources bucket is the largest single item
-        // in a world tick and was 6.6x worse on the slow peer than on the host,
-        // so the split between its rate-limited search phase and its unlimited
-        // per-sink phase has to come from that peer, not from this one. It gets
-        // its own payload for the same reason as the wide bucket list: the relay
-        // truncates at 195 characters and the status-resource line is already
-        // near that.
-        var phases2 = $"kind=rphase t={manager.NetworkInputTick} {ResourcePhaseSplitPatch.Snapshot()}";
-        Halfling.Logging.Logger.Log($"[EmmanimLagFix.ResourcePhaseDiagnostics] {phases2}");
-        PeerDiagnosticsRelayPatch.MaybeSend(manager, phases2);
     }
 
     private static double ToMiB(long bytes) => bytes / 1048576d;

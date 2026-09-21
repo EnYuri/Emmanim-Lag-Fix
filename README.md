@@ -106,17 +106,18 @@ deterministic simulation state.
 
 ## Diagnostics logging
 
-The mod ships two switches enabled, `multiplayer-memory-diagnostics.flag` and
-`singleplayer-memory-diagnostics.flag` in the mod folder. While a switch is
-present, one line a minute is written to the Cosmoteer log
+The mod can write one diagnostics line a minute to the Cosmoteer log
 (`Saved Games\Cosmoteer\<id>\Logs\log <date>.txt`) recording memory, GC
 counts, simulation size and, in multiplayer, each player's lockstep input queue
 and whether that player is the one holding the readiness gate. The sampling is
 read-only: it never touches a queue, a resource or the simulation.
 
-Both peers need the multiplayer switch. The host's line names which player is
+The switches are opt-in: create an empty `singleplayer-memory-diagnostics.flag`
+or `multiplayer-memory-diagnostics.flag` in the mod folder, beside
+`mod.rules`, and restart the game. Delete the file to turn the line off. Both
+peers need the multiplayer switch - the host's line names which player is
 delaying the game, but only the same minute in that player's own log says
-whether the cause is on their side. Delete a flag file to turn its line off.
+whether the cause is on their side.
 
 ## Repository layout
 

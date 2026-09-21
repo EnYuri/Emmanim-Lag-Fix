@@ -437,11 +437,10 @@ artifacts/
 # Emmanim: native doorstop output and packed release archives
 /build/
 
-# The Korean IME capture stays local: it alone produced 99.3% of the log lines
-# in one session. The two memory switches ship enabled - they write one line a
-# minute, and a multiplayer stall can only be attributed by comparing the same
-# minute on both peers, which needs the remote side reporting too.
-Mod/korean-ime-diagnostics.flag
+# Diagnostics flags are a local opt-in and never ship. The Korean IME capture
+# especially must stay local: it alone produced 99.3% of the log lines in one
+# session.
+Mod/*.flag
 
 # Mod/ is the distributable folder, so its binaries are committed rather than
 # rebuilt on demand - a fresh clone can run Pack.ps1 with no build output. The

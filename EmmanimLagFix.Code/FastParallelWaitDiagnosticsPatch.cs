@@ -98,9 +98,9 @@ internal static class FastParallelWaitDiagnosticsPatch
     }
 
     /// <summary>
-    /// Formats and resets the window's counters. Called next to
-    /// <see cref="BucketInnerDiagnostics.Take"/> so it shares the frame
-    /// count contract.
+    /// Formats and resets the window's counters. Called from the diagnostics
+    /// reporters alongside the other per-window snapshotters so it shares the
+    /// frame count contract.
     /// </summary>
     internal static string Take()
     {

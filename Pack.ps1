@@ -101,8 +101,7 @@ $required = @(
     'Install.bat', 'Install.ps1', 'Uninstall.bat', 'Uninstall.ps1',
     'Loader\winmm.dll', 'Loader\ModLoader.dll', 'Loader\LICENSE.LGPL-2.1.txt',
     'Code\EmmanimLagFix.Code.dll', 'Code\ModsQol.Code.dll', 'Code\0Harmony.dll', 'Code\LICENSE.Harmony.txt',
-    'Code\EmmanimLagFix.Code.pdb', 'Code\ModsQol.Code.pdb',
-    'multiplayer-memory-diagnostics.flag', 'singleplayer-memory-diagnostics.flag'
+    'Code\EmmanimLagFix.Code.pdb', 'Code\ModsQol.Code.pdb'
 )
 foreach ($name in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $mod $name))) { throw "Package file missing: $name" }
@@ -120,11 +119,11 @@ Copy-Item -LiteralPath $mod -Destination $payload -Recurse -Force
 $workshop = Join-Path $payload '.workshop'
 if (Test-Path -LiteralPath $workshop) { Remove-Item -LiteralPath $workshop -Force }
 
-# The memory switches ship enabled; the Korean IME capture does not. It logs
-# every composition event and produced 99.3% of one session's log lines, so a
-# developer's local copy must never reach a release.
-$ime = Join-Path $payload 'korean-ime-diagnostics.flag'
-if (Test-Path -LiteralPath $ime) { Remove-Item -LiteralPath $ime -Force }
+# Diagnostics flags never ship: a developer's Mod/ may hold local switches the
+# pack must not leak. The Korean IME capture alone produced 99.3% of one
+# session's log lines, so drop every flag from the payload unconditionally.
+Get-ChildItem -LiteralPath $payload -Filter '*.flag' -File |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
 
 $zip = Join-Path $OutputDir "Emmanim-Lag-Fix-$version.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }

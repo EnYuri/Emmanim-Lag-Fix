@@ -43,6 +43,12 @@ internal static class SparseHeatDiffusionPatch
         public readonly List<CellOutput> Outputs = new();
         public readonly List<StatusDiffusionArgs.ModifiedStatus> Modified = new();
         public readonly List<StatusDiffusionArgs.CreatedStatus> Created = new();
+        // A candidate's four neighbours are usually candidates themselves, so
+        // an unmemoized GetInput would recompute the same cell up to five times
+        // per pass (part-grid hit, status-list lookup, speed-factor lookup).
+        // Inputs are read-only until ApplyDiffusedValues, so per-cell caching
+        // is value-identical.
+        public readonly Dictionary<IntVector2, InputCell> InputCache = new();
         public bool InUse;
 
         public void Clear()
@@ -52,6 +58,7 @@ internal static class SparseHeatDiffusionPatch
             Outputs.Clear();
             Modified.Clear();
             Created.Clear();
+            InputCache.Clear();
         }
     }
 
@@ -155,16 +162,16 @@ internal static class SparseHeatDiffusionPatch
 
         foreach (var cell in buffers.Candidates)
         {
-            var input = GetInput(diffuser, cell);
+            var input = GetInput(diffuser, cell, buffers.InputCache);
             if (input.Part == null)
             {
                 continue;
             }
 
-            var delta = GetNeighbourDelta(diffuser, in input, cell + new IntVector2(-1, 0));
-            delta += GetNeighbourDelta(diffuser, in input, cell + new IntVector2(1, 0));
-            delta += GetNeighbourDelta(diffuser, in input, cell + new IntVector2(0, -1));
-            delta += GetNeighbourDelta(diffuser, in input, cell + new IntVector2(0, 1));
+            var delta = GetNeighbourDelta(diffuser, in input, cell + new IntVector2(-1, 0), buffers.InputCache);
+            delta += GetNeighbourDelta(diffuser, in input, cell + new IntVector2(1, 0), buffers.InputCache);
+            delta += GetNeighbourDelta(diffuser, in input, cell + new IntVector2(0, -1), buffers.InputCache);
+            delta += GetNeighbourDelta(diffuser, in input, cell + new IntVector2(0, 1), buffers.InputCache);
             delta += GetSelfOccupancyDelta(diffuser, in input, cell);
             buffers.Outputs.Add(new CellOutput(cell, in input, delta));
         }
@@ -182,7 +189,20 @@ internal static class SparseHeatDiffusionPatch
         buffers.CandidateSet.Add(cell + new IntVector2(0, 1));
     }
 
-    private static InputCell GetInput(StatusDiffuser diffuser, IntVector2 cell)
+    private static InputCell GetInput(
+        StatusDiffuser diffuser, IntVector2 cell, Dictionary<IntVector2, InputCell> cache)
+    {
+        if (cache.TryGetValue(cell, out var input))
+        {
+            return input;
+        }
+
+        input = ComputeInput(diffuser, cell);
+        cache[cell] = input;
+        return input;
+    }
+
+    private static InputCell ComputeInput(StatusDiffuser diffuser, IntVector2 cell)
     {
         var diffusion = diffuser.StatusType.Diffusion!;
         var part = diffuser._boundsTracker.Ship.Parts[cell, PartRectType.Normal];
@@ -203,10 +223,11 @@ internal static class SparseHeatDiffusionPatch
     private static float GetNeighbourDelta(
         StatusDiffuser diffuser,
         in InputCell input,
-        IntVector2 neighbourCell)
+        IntVector2 neighbourCell,
+        Dictionary<IntVector2, InputCell> cache)
     {
         var diffusion = diffuser.StatusType.Diffusion!;
-        var neighbour = GetInput(diffuser, neighbourCell);
+        var neighbour = GetInput(diffuser, neighbourCell, cache);
         var rawDelta = (neighbour.Value - input.Value) / 5f;
         float speed;
         float minimumDelta;

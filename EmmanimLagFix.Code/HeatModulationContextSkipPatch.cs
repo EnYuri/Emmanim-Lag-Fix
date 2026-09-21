@@ -37,11 +37,6 @@ internal static class HeatModulationContextSkipPatch
 {
     internal static bool Applied { get; private set; }
     internal static bool LoopInstalled { get; private set; }
-    private static long _skipped;
-    private static long _fallback;
-    private static long _buffsSkipped;
-    private static long _buffsFallback;
-    private static long _loopStatuses;
 
     private static readonly Func<StatusHandler<IntVector2>, IStatusStore<IntVector2>> _store =
         AccessTools.MethodDelegate<Func<StatusHandler<IntVector2>, IStatusStore<IntVector2>>>(
@@ -53,6 +48,19 @@ internal static class HeatModulationContextSkipPatch
     private static readonly StatusModifiedDelegate _onModified = AccessTools.MethodDelegate<StatusModifiedDelegate>(
         AccessTools.Method(typeof(StatusHandler<IntVector2>), "OnStatusValueModified",
             new[] { typeof(Status<IntVector2>), typeof(float), typeof(StatusList<IntVector2>), typeof(bool) })!);
+
+    // Per-invocation part -> clamped resistance cache. Pass 1 of the loop is
+    // read-only for every input GetStatusResistance observes (part.Statuses
+    // membership, DamageFraction, buffs): Status.Value is a plain auto-property
+    // and the dirty/event notifications all run in pass 2, so a part's
+    // resistance cannot change between reads inside one call. A re-entrant
+    // call (a modded StatusValueModified subscriber could in theory trigger
+    // one) falls back to a fresh local map rather than sharing scratch state.
+    [ThreadStatic]
+    private static Dictionary<Part, float>? s_resistanceCache;
+
+    [ThreadStatic]
+    private static bool s_resistanceCacheInUse;
 
     private static MethodBase TargetMethod() => StatusModulationListCapacityPatch.FindTarget(typeof(IntVector2));
 
@@ -156,11 +164,6 @@ internal static class HeatModulationContextSkipPatch
         Status<IntVector2> status, Ship ship)
     {
         var skip = CanSkip(type, provider, 0);
-        if (FramePhaseDiagnosticsPatch.Enabled)
-        {
-            if (skip) Interlocked.Increment(ref _buffsSkipped);
-            else Interlocked.Increment(ref _buffsFallback);
-        }
         return skip ? null : provider.GetBuffs(status, ship);
     }
 
@@ -169,11 +172,6 @@ internal static class HeatModulationContextSkipPatch
         Ship ship, Dictionary<StatusType, IStatusLocationInfo> dictionary)
     {
         var skip = CanSkip(type, provider, dictionary.Count);
-        if (FramePhaseDiagnosticsPatch.Enabled)
-        {
-            if (skip) Interlocked.Increment(ref _skipped);
-            else Interlocked.Increment(ref _fallback);
-        }
         if (!skip) provider.PopulateStatuses(status, ship, dictionary);
     }
 
@@ -215,21 +213,43 @@ internal static class HeatModulationContextSkipPatch
         var modifier = 0f - constant.Value;
         var dt = (float)fixedUpdater.Interval;
         var changed = TempList<(Status<IntVector2>, float, StatusList<IntVector2>)>.Alloc();
+        var resistanceCache = s_resistanceCacheInUse
+            ? new Dictionary<Part, float>()
+            : (s_resistanceCache ??= new Dictionary<Part, float>());
+        var ownsCache = !s_resistanceCacheInUse;
+        if (ownsCache)
+        {
+            s_resistanceCacheInUse = true;
+        }
+        resistanceCache.Clear();
+        var nullPartResistance = Mathx.Clamp(0f, resistRange);
         try
         {
             changed.EnsureCapacity(handler.StatusCount);
-            var processed = 0;
             foreach (var list in _store(handler).GetAllStatusLists())
             {
                 foreach (var item in list)
                 {
-                    processed++;
-                    var resistance = resistRange.IsRanged
-                        ? Mathx.Clamp(
-                            provider.GetPartAtLocation(item.Location, ship)
-                                ?.GetStatusResistance(type.ID, null).value ?? 0f,
-                            resistRange)
-                        : resistRange.Min;
+                    float resistance;
+                    if (!resistRange.IsRanged)
+                    {
+                        resistance = resistRange.Min;
+                    }
+                    else
+                    {
+                        var part = provider.GetPartAtLocation(item.Location, ship);
+                        if (part == null)
+                        {
+                            resistance = nullPartResistance;
+                        }
+                        else if (!resistanceCache.TryGetValue(part, out resistance))
+                        {
+                            resistance = Mathx.Clamp(
+                                part.GetStatusResistance(type.ID, null).value,
+                                resistRange);
+                            resistanceCache[part] = resistance;
+                        }
+                    }
                     var value = ModulateCore(item.Value, resistance, dt, modifier, affected, clampRange);
                     if (!item.Value.Equals(value))
                     {
@@ -242,14 +262,15 @@ internal static class HeatModulationContextSkipPatch
             {
                 _onModified(handler, status, oldValue, list, silent: false);
             }
-            if (FramePhaseDiagnosticsPatch.Enabled)
-            {
-                Interlocked.Add(ref _loopStatuses, processed);
-            }
         }
         finally
         {
             changed.Dispose();
+            resistanceCache.Clear();
+            if (ownsCache)
+            {
+                s_resistanceCacheInUse = false;
+            }
         }
     }
 
@@ -270,9 +291,4 @@ internal static class HeatModulationContextSkipPatch
         }
         return Mathx.Clamp(value, clampRange);
     }
-
-    internal static string TakeCounters() =>
-        $"ctx={(Applied ? "on" : "off")} sk={Interlocked.Exchange(ref _skipped, 0)} vf={Interlocked.Exchange(ref _fallback, 0)}"
-        + $" bs={Interlocked.Exchange(ref _buffsSkipped, 0)}/{Interlocked.Exchange(ref _buffsFallback, 0)}"
-        + $" ls={Interlocked.Exchange(ref _loopStatuses, 0)}";
 }

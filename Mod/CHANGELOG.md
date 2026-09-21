@@ -1,5 +1,112 @@
 # Changelog
 
+## 2.2.24 (2026-09-21)
+
+- Remove the investigation instrumentation now that the resource/status
+  analysis is concluded: the `cphase`/`cnot` conversion-phase split, the
+  `stt`/`df`/`mod` status-phase split, the `rphase` resource-search split, the
+  `im=` inner-bucket timers, and the heat-modulation path counters. All were
+  flag-gated and already inert without a diagnostics flag; deleting them keeps
+  the report line to the standing infrastructure (`fb`, sim phases, scene
+  breakdown, FastParallel counters).
+- Stop shipping the two memory-diagnostics flag files enabled. The diagnostics
+  line stays available as a local opt-in - create an empty
+  `singleplayer-memory-diagnostics.flag` or
+  `multiplayer-memory-diagnostics.flag` beside `mod.rules` and restart. The
+  packaging script and release workflow now reject any `.flag` in the payload.
+
+## 2.2.23 (2026-09-21)
+
+- Replace the pooled dictionary in network resource transfers with positional
+  scratch. `SubnetworkResourceSinkQueryResult.PushResources` (and the pull-side
+  twin) rented a `TempDictionary` per call, distributed into it keyed by the
+  sink/source data struct, then paid an O(bucket-capacity) `Clear` on recycle -
+  ~9% of `OnConversionTick` in the conversion trace, mostly the clear at the
+  pooled instance's largest-seen size. The patch distributes over positional
+  indices into the result's own data list using a line-for-line port of
+  `ResourceDistributor` (same comparisons, arithmetic, and `RandomizeOrder`
+  draws; verified against the vanilla method across all ten modes, both delta
+  signs, and 4000 randomized cases in the smoke test) and emits writes in
+  vanilla's dictionary insertion order, including zero-quantity touches.
+- Skip dead cache-operation listener iteration. `SubnetworkQueryCache.
+  OnResourceOperationStart` enumerated every query result on the cache per
+  push, but no result type overrides `OnCacheResourceOperationStarted`; the
+  end pass likewise can skip the trigger dictionary, whose handler is the
+  empty base. The `ResourceOperationOngoing` flag lifecycle is unchanged, so
+  nested operations and deferred event flushing behave identically.
+
+## 2.2.22 (2026-09-21)
+
+- Cache per-part heat resistance inside the specialized heat modulation loop.
+  A CPU trace of `ShipStatusManager.FixedUpdate` showed
+  `Part.GetStatusResistance` at ~33% of the specialized loop: it runs once
+  per status cell, and each call re-evaluates `ModifiableFloat` buff values
+  and iterates `part.Statuses` where `MultiStatusList.Count` itself walks the
+  part's per-cell status lists. Pass 1 of the modulation loop is read-only
+  for every input the resistance observes (`part.Statuses` membership,
+  `DamageFraction`, buffs), so caching the clamped value per `Part` for the
+  duration of the call is bit-exact; a re-entrant call uses a fresh local map
+  instead of the shared scratch dictionary.
+- Memoize `InputCell` reads in the sparse heat diffusion path. Each candidate
+  cell queried its four neighbours' inputs without caching, so a cell shared
+  as a neighbour by up to four candidates recomputed the same part-grid hit,
+  status-list lookup and speed-factor lookup up to five times per pass.
+  Inputs are read-only until `ApplyDiffusedValues`, so the per-pass
+  `IntVector2 -> InputCell` map is value-identical.
+
+## 2.2.21 (2026-09-21)
+
+- Extend `cnot=` with two conversion-scoped counters: `rcnv` counts
+  `OnResourcesChanged` calls raised inside `OnConversionTick` (including the
+  nested propagation hops they trigger) and `wmul` counts the
+  `MultiResourceStorage` write path (`DoAddResources`/`DoSubtractResources` -
+  `ResourceDistributor.Distribute` over the child list plus one child write
+  and notify each) under the same scope. The first cnot pass showed rchg
+  exceeding the conversion tick total at scale, meaning most notifies are
+  background consumption/delivery churn rather than conversion work; a
+  thread-static depth flag now separates the two so the notify-cascade share
+  of the bucket is measured directly instead of inferred. Diagnostic only,
+  same flag gate; relayed as part of `kind=cnot`. Smoke test resolves all
+  nineteen instrumented methods.
+- Every multiplayer participant must install the same version and restart.
+
+## 2.2.20 (2026-09-21)
+
+- Extend the ConvertResources diagnostic with a second payload (`cnot=`) that
+  splits the storage notify path the `cphase=` line showed dominating
+  conversion ticks (~90% of `tick`, ~9.8 notify calls per conversion). It
+  times the per-notify `UpdateSourceRegistration` check, the computed
+  `Resources` getters on `MultiResourceStorage`/`InlineResourceConverter`
+  (which re-sum after each cache invalidation), the three propagation hops
+  that re-fire `OnResourcesChanged` a storage layer up, and consumer
+  `UpdateSinkRegistration`. Same properties as `cphase`: flag-gated, counter
+  only, no allocations, no behavior change; emitted in the multiplayer relay
+  as `kind=cnot`. Measurement scaffolding, slated for removal once the
+  optimization decision is made. The smoke test now resolves all seventeen
+  instrumented methods.
+- Every multiplayer participant must install the same version and restart.
+
+## 2.2.19 (2026-09-21)
+
+- Add a ConvertResources phase-split diagnostic (`cphase=`) beside `rphase=`.
+  The bucket is the second-largest fixed-update item - 4.7 ms/frame on the
+  2026-09-21 host session, second only to Resources - and it is event-driven
+  rather than a per-tick poll: each ship's ResourceConverterManager pops only
+  the converters whose interval elapsed. The probe times the manager body, the
+  per-conversion tick and its wants-check separately; counts source and sink
+  register/unregister churn; times the storage notify path; and samples the
+  resource priority-search queue depth - the channel through which conversion
+  churn feeds re-searches in the Resources bucket. Diagnostic only: flag-gated
+  like the other probes, two Interlocked adds per instrumented call, no
+  allocations, and Harmony never patches when no diagnostics flag is present.
+  Emitted in the multiplayer relay as a `kind=cphase` payload. This is
+  measurement scaffolding for the next optimization decision and is a
+  candidate for removal once that measurement concludes.
+- Build and smoke suite pass on Cosmoteer 0.30.4c; the smoke test resolves all
+  ten instrumented methods so a renamed game member fails the build rather
+  than the next flagged session. Every multiplayer participant must install
+  the same version and restart.
+
 ## 2.2.18 (2026-09-20)
 
 - Bound the spin at the end of `FastParallel.For` and park past the budget. This

@@ -3,6 +3,7 @@ using Halfling.Scene2D;
 using HarmonyLib;
 using System.Collections;
 using System.Diagnostics;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -2726,154 +2727,6 @@ foreach (var allocOverload in AccessTools
             "Multiplayer diagnostics retained samples across a manager replacement/resync.");
     }
 
-    // The resource phase split is inert without a diagnostics flag, so Harmony's
-    // class-level Prepare stops before TargetMethods and a renamed game method
-    // would go unnoticed until someone turned the flag on. Resolve them here so a
-    // rename fails the build instead.
-    {
-        var splitType = typeof(EntryPoint).Assembly.GetType(
-            "EmmanimLagFix.Code.ResourcePhaseSplitPatch", throwOnError: true)!;
-        var targets = AccessTools.DeclaredMethod(splitType, "TargetMethods")
-            ?? throw new MissingMethodException(splitType.FullName, "TargetMethods");
-        var resolved = ((IEnumerable<MethodBase>)targets.Invoke(null, null)!).ToArray();
-        var expected = new[]
-        {
-            "FixedUpdate", "SearchForSources", "SearchForSources", "UpdateSinkJobs",
-            "ExpireManualTransferJobs",
-        };
-        if (resolved.Length != expected.Length
-            || !expected.SequenceEqual(resolved.Select(m => m.Name)))
-        {
-            throw new InvalidOperationException(
-                "Resource phase split resolved ["
-                + string.Join(", ", resolved.Select(m => m.Name))
-                + "] instead of [" + string.Join(", ", expected) + "].");
-        }
-
-        // Both overload pairs exist on ResourceManager; picking the wrong member of
-        // either would time the per-sink call rather than the whole phase.
-        // Both SearchForSources and UpdateSinkJobs are overloaded, and the two
-        // SearchForSources entries are deliberately one of each: the FixedUpdater
-        // overload is the whole rate-limited phase, the SinkInfo one is a single
-        // search inside it. Binding either twice would double-count.
-        var expectedParameters = new[] { "FixedUpdater", "FixedUpdater", "SinkInfo", "Time", "Time" };
-        for (var i = 0; i < resolved.Length; i++)
-        {
-            var parameters = resolved[i].GetParameters();
-            var arity = resolved[i].Name == "FixedUpdate" ? 2 : 1;
-            if (parameters.Length != arity
-                || parameters[0].ParameterType.Name != expectedParameters[i])
-            {
-                throw new InvalidOperationException(
-                    $"Resource phase split bound the wrong {resolved[i].Name} overload.");
-            }
-        }
-
-        var idle = AccessTools.DeclaredMethod(splitType, "Snapshot")!.Invoke(null, null);
-        if (idle is not string text || !text.StartsWith("rphase", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException($"Resource phase snapshot shape changed: {idle}");
-        }
-    }
-
-    // The status phase split rides the same diagnostics flag, so Prepare keeps
-    // Harmony away here too. Resolve its three target sets by hand: the two
-    // StatusHandler<T> FixedUpdate impls (per-type totals), PerformDiffusion,
-    // and the two _ModulateStatusValues local functions.
-    {
-        var statusTypesPatchType = typeof(EntryPoint).Assembly.GetType(
-            "EmmanimLagFix.Code.StatusTypePhasePatch", throwOnError: true)!;
-        var typeTargets = ((IEnumerable<MethodBase>)AccessTools
-            .DeclaredMethod(statusTypesPatchType, "TargetMethods")!
-            .Invoke(null, null)!).ToArray();
-        if (typeTargets.Length != 2
-            || typeTargets.Any(m => !m.Name.EndsWith(
-                "IFixedUpdateableSceneObject.FixedUpdate", StringComparison.Ordinal))
-            || typeTargets.Select(m => m.DeclaringType!.GetGenericArguments()[0])
-                .Distinct().Count() != 2)
-        {
-            throw new InvalidOperationException(
-                "Status type timing bound ["
-                + string.Join(", ", typeTargets.Select(m => $"{m.DeclaringType?.Name}.{m.Name}"))
-                + "] instead of both StatusHandler<T> FixedUpdate impls.");
-        }
-
-        var diffusionPatchType = typeof(EntryPoint).Assembly.GetType(
-            "EmmanimLagFix.Code.StatusDiffusionPhasePatch", throwOnError: true)!;
-        var diffusionTarget = (MethodBase?)AccessTools
-            .DeclaredMethod(diffusionPatchType, "TargetMethod")!
-            .Invoke(null, null);
-        if (diffusionTarget?.Name != "PerformDiffusion")
-        {
-            throw new InvalidOperationException(
-                $"Status diffusion timing bound {diffusionTarget?.Name ?? "nothing"}.");
-        }
-
-        var modulationPatchType = typeof(EntryPoint).Assembly.GetType(
-            "EmmanimLagFix.Code.StatusModulationPhasePatch", throwOnError: true)!;
-        var modulationTargets = ((IEnumerable<MethodBase>)AccessTools
-            .DeclaredMethod(modulationPatchType, "TargetMethods")!
-            .Invoke(null, null)!).ToArray();
-        if (modulationTargets.Length != 2
-            || modulationTargets.Any(m => !m.Name.Contains("_ModulateStatusValues", StringComparison.Ordinal)))
-        {
-            throw new InvalidOperationException(
-                "Status modulation timing bound ["
-                + string.Join(", ", modulationTargets.Select(m => m.Name))
-                + "] instead of both _ModulateStatusValues local functions.");
-        }
-    }
-
-    // The inner-bucket timer is retained for offline target resolution only.
-    // It must never install in production: Harmony's __originalMethod
-    // injection allocates a RuntimeMethodInfoStub on every hot inner call.
-    // Resolve its methods by hand so game renames remain visible, and assert
-    // that Prepare keeps the allocation-heavy instrumentation disabled.
-    {
-        var innerPatchType = typeof(EntryPoint).Assembly.GetType(
-            "EmmanimLagFix.Code.BucketInnerTimingPatch", throwOnError: true)!;
-        if ((bool)AccessTools.DeclaredMethod(innerPatchType, "Prepare")!
-                .Invoke(null, null)!)
-        {
-            throw new InvalidOperationException(
-                "Bucket inner timing must stay disabled; __originalMethod allocates per call.");
-        }
-        var innerTargets = ((IEnumerable<MethodBase>)AccessTools
-            .DeclaredMethod(innerPatchType, "TargetMethods")!
-            .Invoke(null, null)!).ToArray();
-        var expectedNames = new[]
-        {
-            "OnConversionTick", "AsyncGetCrewForNextJob", "UpdateCrewAsync",
-            "UpdateCrewPostMovement", "UpdateCrewQuadsAsync", "AutoFillCrewSources",
-        };
-        var fixedFound = innerTargets.Count(m => expectedNames.Contains(m.Name));
-        var managerFound = innerTargets.Count(m => m.Name == "FixedUpdate");
-        var thrusterFound = innerTargets.Count(m => m.Name == "SetThrusterActivations");
-        if (fixedFound != expectedNames.Length || managerFound != 5 || thrusterFound < 1)
-        {
-            throw new InvalidOperationException(
-                "Bucket inner timing bound ["
-                + string.Join(", ", innerTargets.Select(m => $"{m.DeclaringType?.Name}.{m.Name}"))
-                + $"]; expected all {expectedNames.Length} fixed methods, five ship-manager FixedUpdates, "
-                + "and at least one SetThrusterActivations.");
-        }
-
-        var nameField = AccessTools.Field(innerPatchType, "Names")!;
-        var names = (System.Collections.IDictionary)nameField.GetValue(null)!;
-        // Mirrors the postfix's keying: FixedUpdate resolves through the
-        // declaring type, everything else through the bare method name.
-        var unmapped = innerTargets
-            .Where(m => !names.Contains(
-                m.Name == "FixedUpdate" ? m.DeclaringType!.Name + "." + m.Name : m.Name))
-            .ToArray();
-        if (unmapped.Length != 0)
-        {
-            throw new InvalidOperationException(
-                "Bucket inner timing resolved methods with no report code: "
-                + string.Join(", ", unmapped.Select(m => m.Name)));
-        }
-    }
-
     // Longest-first ordering binds SimRoot.ParallelFixedUpdate and rewrites
     // each dispatch slice descending by part count; both the binding and the
     // ordering itself are verified here.
@@ -4778,6 +4631,124 @@ harmony.UnpatchAll(smokeId);
     }
 }
 
+// Network resource transfer patches: the positional ResourceDistributor port
+// is exercised end-to-end against the vanilla algorithm - every mode, both
+// delta signs, random capacities - comparing remainder, per-container amounts,
+// and write order (vanilla's dictionary insertion order vs the scratch's
+// first-touch order, which is what the push/pull loops emit).
+{
+    var transferPatch = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.NetworkResourceTransferPatch", true)!;
+    var cachePatch = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.SubnetworkCacheOperationPatch", true)!;
+    var transferTargets = ((IEnumerable<MethodBase>)AccessTools
+        .Method(transferPatch, "TargetMethods")!.Invoke(null, null)!).ToArray();
+    var cacheTargets = ((IEnumerable<MethodBase>)AccessTools
+        .Method(cachePatch, "TargetMethods")!.Invoke(null, null)!).ToArray();
+    if (transferTargets.Length != 4 || cacheTargets.Length != 4)
+    {
+        throw new InvalidOperationException(
+            "Network resource transfer/cache patches resolved "
+            + $"{transferTargets.Length}+{cacheTargets.Length} targets, expected 4+4.");
+    }
+
+    var distType = gameAssembly.GetType(
+        "Cosmoteer.Ships.Parts.Resources.ResourceDistributor", true)!;
+    var modeType = gameAssembly.GetType(
+        "Cosmoteer.Ships.Parts.Resources.MultiResourceStorageMode", true)!;
+    var cvType = distType.GetNestedType("ContainerValue",
+        BindingFlags.Public | BindingFlags.NonPublic)!;
+    var vanillaDistribute = distType
+        .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+        .Single(m => m.Name == "Distribute" && m.IsGenericMethodDefinition
+            && m.GetParameters().Length == 6)
+        .MakeGenericMethod(typeof(int));
+
+    var scratchType = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.TransferScratch", true)!;
+    var distPort = typeof(EntryPoint).Assembly.GetType(
+        "EmmanimLagFix.Code.SinkDistribution", true)!;
+    var ourDistribute = AccessTools.Method(distPort, "Distribute")!;
+    var orderField = scratchType.GetField("Order")!;
+    var amountsField = scratchType.GetField("Amounts")!;
+    var indicesField = scratchType.GetField("Indices")!;
+    var beginMethod = scratchType.GetMethod("Begin")!;
+
+    var funcType = typeof(Func<,,>).MakeGenericType(typeof(int), cvType, typeof(int));
+    var rng = new Random(0x5EED);
+    int cases = 0;
+    for (int mode = 0; mode < 10; mode++)
+    {
+        var modeObj = Enum.ToObject(modeType, mode);
+        for (int trial = 0; trial < 400; trial++)
+        {
+            int n = rng.Next(0, 8);
+            var values = new int[n * 3];
+            for (int i = 0; i < n; i++)
+            {
+                // Zero values are deliberate: they exercise the eligible-list
+                // filtering and zero-quantity touches that still record a
+                // dictionary entry in vanilla.
+                values[i * 3 + 0] = rng.Next(3) == 0 ? 0 : rng.Next(1, 60);
+                values[i * 3 + 1] = rng.Next(3) == 0 ? 0 : rng.Next(60);
+                values[i * 3 + 2] = rng.Next(3) == 0 ? 0 : rng.Next(60);
+            }
+            int delta = rng.Next(-150, 151);
+            Func<int, int, int> gv = (i, k) => values[i * 3 + k];
+
+            var pi = Expression.Parameter(typeof(int));
+            var pcv = Expression.Parameter(cvType);
+            var gvDel = Expression.Lambda(funcType,
+                Expression.Invoke(Expression.Constant(gv), pi,
+                    Expression.Convert(pcv, typeof(int))), pi, pcv).Compile();
+
+            var containers = new List<int>(n);
+            for (int i = 0; i < n; i++) containers.Add(i);
+            var dict = new Dictionary<int, int>();
+            var randA = new SmokeRand((ulong)(trial * 7919 + mode));
+            var randB = new SmokeRand((ulong)(trial * 7919 + mode));
+            int vanillaLeft = (int)vanillaDistribute.Invoke(null,
+                new object?[] { containers, delta, modeObj, dict, gvDel, randA })!;
+
+            var scratch = Activator.CreateInstance(scratchType, nonPublic: true)!;
+            beginMethod.Invoke(scratch, new object?[] { n });
+            var indices = (List<int>)indicesField.GetValue(scratch)!;
+            int ourLeft = (int)ourDistribute.Invoke(null,
+                new object?[] { indices, delta, modeObj, gv, randB, scratch })!;
+
+            if (ourLeft != vanillaLeft)
+            {
+                throw new InvalidOperationException(
+                    $"Distribution port mismatch on remainder: mode={mode} delta={delta} "
+                    + $"n={n} vanilla={vanillaLeft} ported={ourLeft}.");
+            }
+            var order = (List<int>)orderField.GetValue(scratch)!;
+            var amounts = (int[])amountsField.GetValue(scratch)!;
+            if (order.Count != dict.Count)
+            {
+                throw new InvalidOperationException(
+                    $"Distribution port mismatch on touched count: mode={mode} "
+                    + $"delta={delta} n={n} vanilla={dict.Count} ported={order.Count}.");
+            }
+            int j = 0;
+            foreach (var kv in dict)
+            {
+                if (kv.Key != order[j] || kv.Value != amounts[order[j]])
+                {
+                    throw new InvalidOperationException(
+                        $"Distribution port mismatch at position {j}: mode={mode} "
+                        + $"delta={delta} n={n} vanilla=({kv.Key},{kv.Value}) "
+                        + $"ported=({order[j]},{amounts[order[j]]}).");
+                }
+                j++;
+            }
+            cases++;
+        }
+    }
+    if (cases != 4000)
+        throw new InvalidOperationException("Distribution equivalence ran " + cases + " cases.");
+}
+
 Console.WriteLine("PASS: resource traversal/desired-priority snapshot/path-contiguity hashing and visited-set search, generation-stamped resource source visited set, lock-free resource counts, transfer, trade, technology-purchase, pickup-overlay, blueprint network/stat refresh, redundant AtlasQuad write suppression, build-stats, sparse heat diffusion, visual smoothed-value throttle, opt-in resource/single-player memory diagnostics, role-priority, multiplayer initialization/session-timeout/buffer/InputTick forwarding, lazy paint-toolbox pickers/groups, toggle-mode delegate cache, allocation-free resource-ID comparison, hoisted thruster-cache guard, allocation-free shader-constant updates, plain-text layout, subscription-stable part colour updates, status-regulator affected-cell cache, pre-sized status-modulation change lists, streaming-sound start guard, sharded non-deterministic callback queue, throttled codex show-conditions, pooled status-dictionary enumeration, peer diagnostics relay, client-side desync bucket reporting, sharded resource sink-job collection, throttled minimap membership scanning, parked FastParallel idle workers, bounded FastParallel dispatcher waits, inlined small nested FastParallel dispatches, finer top-level batch sizing, a logical-processor-sized worker pool, urgent input-tick-delay HostUpdates, roof-decal target skipped for stages whose shaders never sample it, frame-phase timing, per-bucket sim breakdown, real-time multiplayer tick catch-up, and main-thread lost-ship saving patches resolved and compiled on this game build.");
 
 internal static class DeserializationDetourFixture
@@ -4787,6 +4758,29 @@ internal static class DeserializationDetourFixture
 
     internal static object Fail() =>
         throw new InvalidOperationException("detour exception fixture");
+}
+
+/// <summary>
+/// Deterministic <see cref="Halfling.Random.Rand"/> for the distribution
+/// equivalence check - two instances on one seed must produce identical draw
+/// streams so a ported shuffle can be compared against vanilla's.
+/// </summary>
+internal sealed class SmokeRand : Halfling.Random.Rand
+{
+    private ulong _state;
+
+    public SmokeRand(ulong seed)
+    {
+        _state = seed | 1;
+    }
+
+    public override ulong UInt64()
+    {
+        _state ^= _state << 13;
+        _state ^= _state >> 7;
+        _state ^= _state << 17;
+        return _state;
+    }
 }
 
 internal static class ThreadedTaskQueueFixture
