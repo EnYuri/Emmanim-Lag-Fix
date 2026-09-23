@@ -4664,15 +4664,15 @@ harmony.UnpatchAll(smokeId);
             && m.GetParameters().Length == 6)
         .MakeGenericMethod(typeof(int));
 
-    var scratchType = typeof(EntryPoint).Assembly.GetType(
+    var transferScratchType = typeof(EntryPoint).Assembly.GetType(
         "EmmanimLagFix.Code.TransferScratch", true)!;
     var distPort = typeof(EntryPoint).Assembly.GetType(
         "EmmanimLagFix.Code.SinkDistribution", true)!;
     var ourDistribute = AccessTools.Method(distPort, "Distribute")!;
-    var orderField = scratchType.GetField("Order")!;
-    var amountsField = scratchType.GetField("Amounts")!;
-    var indicesField = scratchType.GetField("Indices")!;
-    var beginMethod = scratchType.GetMethod("Begin")!;
+    var orderField = transferScratchType.GetField("Order")!;
+    var amountsField = transferScratchType.GetField("Amounts")!;
+    var indicesField = transferScratchType.GetField("Indices")!;
+    var beginMethod = transferScratchType.GetMethod("Begin")!;
 
     var funcType = typeof(Func<,,>).MakeGenericType(typeof(int), cvType, typeof(int));
     var rng = new Random(0x5EED);
@@ -4710,7 +4710,7 @@ harmony.UnpatchAll(smokeId);
             int vanillaLeft = (int)vanillaDistribute.Invoke(null,
                 new object?[] { containers, delta, modeObj, dict, gvDel, randA })!;
 
-            var scratch = Activator.CreateInstance(scratchType, nonPublic: true)!;
+            var scratch = Activator.CreateInstance(transferScratchType, nonPublic: true)!;
             beginMethod.Invoke(scratch, new object?[] { n });
             var indices = (List<int>)indicesField.GetValue(scratch)!;
             int ourLeft = (int)ourDistribute.Invoke(null,

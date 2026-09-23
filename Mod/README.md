@@ -2,12 +2,15 @@
 
 Reduces multiplayer lag and `WaitingForAck` disconnects in heavily modded games.
 
-Version 2.2.13 limits finer parallel batching to scene updates and includes
-guarded crew oxygen, resource-search and first-pass thruster optimizations.
-Build and smoke validation pass; game-level FPS gains are not established.
-With Huge Crews and the code loader, assignment budgets are one quarter of
-Huge Crews' values, independently clamped to vanilla floors. Without the code
-loader or without Huge Crews, the assignment budgets are vanilla.
+Current builds concentrate on the fixed-update hot path: finer parallel
+batching scoped to scene updates, nested dispatches inlined when the pool is
+saturated, idle and join waits parked instead of spinning, and specialized
+heat-modulation, resource-search and network-transfer internals where those
+were measured hot. Build and smoke validation pass; game-level FPS gains are
+not established. With Huge Crews and the code loader, assignment budgets are
+one quarter of Huge Crews' values, independently clamped to vanilla floors.
+Without the code loader or without Huge Crews, the assignment budgets are
+vanilla.
 
 Version 2.0 adds an optional, source-available .NET 10 code layer. Its dedicated
 loader only accepts this exact mod ID and only loads the bundled Harmony library
@@ -252,6 +255,27 @@ plus simulation bucket costs. Smoke tests and live singleplayer observations
 passed; no unbounded leak or controlled overall speedup has been established,
 and multiplayer validation remains pending.
 
+Versions 2.2.5 through 2.2.24 continue along the same lines, mostly inside
+`FastParallel` and the fixed-update hot path. The worker pool is sized by
+logical rather than physical processors; short nested dispatches run inline
+on the calling thread once every worker is busy, but still reach the pool
+while a worker is parked; and the dispatcher's own join wait now parks past a
+budget instead of spinning. The non-deterministic smoothed-value bucket joins
+vanilla's parallel scene buckets, and the parallel buckets dispatch
+longest-first. Resource source search trades its visited `HashSet` for a
+generation-stamped identity table. Tile-heat modulation runs as a specialized
+bit-equivalent loop with per-part resistance and neighbour inputs cached.
+Network resource transfers distribute over positional scratch, and dead
+cache-listener passes are skipped. The deterministic callback queues move off
+their monitor convoy onto a per-simulation concurrent queue. Attributed
+deserialization and `ThreadedTaskQueue` callbacks use compiled delegates
+instead of reflection and `DynamicInvoke`. The build-mode tile-line overlay,
+FTL-efficiency overlay and toolbox cost text stop rebuilding every frame. A
+risen input-tick delay triggers a HostUpdate immediately instead of waiting
+for the 6 Hz schedule. The investigation instrumentation that guided these
+changes was removed again, and the diagnostics flag files are no longer
+shipped enabled - they remain a local opt-in.
+
 ## Why you drop
 
 When a session drops, the game log (`Logs/log *.txt`) records this:
@@ -318,7 +342,7 @@ after the actual beam defect was identified.
 Versions 1.2.1–1.2.5 raised the assignment and search budgets while investigating that same symptom,
 including a temporary low-priority value of 600. Version 1.3.0 removes those compensations and
 restores the 1.1.0 optimization baseline. Version 1.3.1 then sets only the low-priority queue to 70,
-for a final assignment/search profile of 90/70/90.
+for an assignment/search profile of 90/70/90 at the time.
 
 This does not create missing pickup markers. Cosmoteer creates the automatic nugget-transfer job at
 the instant salvage damage destroys an asteroid part, before these assignment budgets are used. The
@@ -422,6 +446,8 @@ deliveries. The idle-crew cost outweighs the CPU saved.
 ## Install
 
 Download the release archive, extract it anywhere, and run **`Install.bat`**.
+If you already use another mod loader (such as *Yet Another Mod Loader*), run
+**`Install-NoLoader.bat`** instead - see below.
 
 That is the whole procedure. The installer:
 
@@ -446,11 +472,46 @@ Switches, for a non-default setup:
 
 | Command | Effect |
 |---|---|
-| `Install.bat -NoLoader` | `.rules` optimizations only, no DLL in `Bin` |
+| `Install-NoLoader.bat` | `.rules` optimizations only, no DLL in `Bin` - for users of another mod loader |
 | `Install.bat -LoaderOnly` | loader only, mod folder untouched |
 | `Install.bat -GameBin "...\Cosmoteer\Bin"` | override game detection |
 | `Install.bat -ModsFolder "...\Cosmoteer\<id>\Mods"` | override user-folder detection |
 | `Uninstall.bat -KeepMod` | remove the loader, keep the mod |
+
+### Manual installation
+
+If `Install.bat` cannot run in your environment - script execution is blocked,
+or there is no PowerShell - the same steps by hand:
+
+1. Close Cosmoteer completely.
+2. Open the user `Mods` folder. For a Steam install it is
+   `Saved Games\Cosmoteer\<your 17-digit SteamID>\Mods\` under your profile -
+   normally `%USERPROFILE%\Saved Games`, or wherever the *Saved Games* known
+   folder is redirected. It is the folder that also holds `settings.rules`,
+   `Logs\` and `Saved Ships\`; run the game once if it does not exist yet.
+3. Copy the extracted `emmanim_lag_fix` folder into it, so the result is
+   `Mods\emmanim_lag_fix\mod.rules`. If an `emmanim_lag_fix` folder is already
+   there, delete it first.
+4. For the code layer, copy `Loader\winmm.dll` and `Loader\ModLoader.dll` into
+   `Cosmoteer\Bin` - the folder containing `Cosmoteer.exe`. If a `winmm.dll` is
+   already present and you did not place it, stop: it belongs to another
+   loader. To keep that loader instead (the `-NoLoader` equivalent), skip the
+   copy and also delete `Loader\` from the copied mod folder - a
+   general-purpose loader scans mod folders recursively and would misread the
+   bundled `ModLoader.dll` as a copy of itself.
+5. Downloaded files carry a zone marker that can keep the DLLs from loading.
+   If in doubt, open each copied DLL's Properties and tick **Unblock**.
+6. Start the game and enable **Emmanim Lag Fix** under `Options > Mods`.
+
+The installer also writes `Bin\emmanim_lag_fix_loader.json`, a small manifest
+recording the two DLLs' SHA-256 hashes. The game never reads it - only
+`Uninstall.bat` and a later `Install.bat` do - so a manual install works fine
+without it. The cost of skipping it: `Uninstall.bat` will report no install
+record and leave `Bin` untouched, and a future `Install.bat` run will refuse
+to overwrite the `winmm.dll` it finds - delete the two DLLs by hand first,
+then run it normally. To remove a manual install, delete
+`Mods\emmanim_lag_fix` and, from `Cosmoteer\Bin`, `winmm.dll`, `ModLoader.dll`
+and `emmanim_lag_fix_loader.json` if it exists.
 
 ### Two halves, two different requirements
 
@@ -468,14 +529,43 @@ the slowest PC's compute speed, not from connection quality.
 Both wipe added files out of `Cosmoteer\Bin`. Run `Install.bat` again; it will
 skip whatever is already correct. Do the same after updating the mod, so the
 loader in `Bin` and the code modules in the mod folder stay the same build.
+Rules-only installs rerun `Install-NoLoader.bat` instead.
 
 ### If your antivirus objects
 
 A proxy `winmm.dll` beside a game executable has the same shape as a DLL
 hijack, because that is the mechanism it uses. The source for the loader and for
 both code modules is in `Source/`, and upstream is linked under *Credits*.
-Running `Install.bat -NoLoader` gives you the `.rules` optimizations with no
+Running `Install-NoLoader.bat` gives you the `.rules` optimizations with no
 native DLL at all.
+
+### If the installer reports "a loader this installer did not place"
+
+`Cosmoteer\Bin` already contains a `winmm.dll` that this installer did not
+write - most likely another mod loader, such as **Yet Another Mod Loader**,
+which uses the same file names. Only one `winmm.dll` proxy can exist, and the
+installer will not overwrite it because doing so would silently disable any
+mod that loader was running.
+
+Two options:
+
+- Keep the other loader: run **`Install-NoLoader.bat`**. It deliberately
+  installs the mod folder *without* the `Loader\` payload: a general-purpose
+  loader scans enabled mod folders recursively and would flag the bundled
+  `ModLoader.dll` as an impostor of its own loader - under Yet Another Mod
+  Loader, trusting it would then fail to load and block the entire mod. With
+  `Loader\` absent it sees only the real code modules in `Code\`. One extra
+  step applies: that loader's trust system blocks even a mod's `.rules`
+  actions while any of its libraries are untrusted, so after enabling the
+  mod, open the mods list and use its **Trust** button once. Version updates
+  are then accepted automatically, because this mod bumps its version with
+  every code change.
+- Switch to this loader: delete `winmm.dll` and `ModLoader.dll` from
+  `Cosmoteer\Bin`, then run `Install.bat` again. Note that this loader only
+  runs this mod's own code modules - other mods' DLLs are ignored by design.
+
+A `-NoLoader` install writes no uninstall manifest, so `Uninstall.bat` has
+nothing to do for it - remove it by deleting `Mods\emmanim_lag_fix` by hand.
 
 ## Load order (there is no UI for it)
 
@@ -492,8 +582,8 @@ sbg2005.korean_translation
 ```
 
 This mod's ID is deliberately lowercase so it sorts after `cosmoteer.huge_crews` and wins the
-fields they share. Version 1.3.1 deliberately replaces Huge Crews' 1000/250/1000 rates with the
-optimized 90/70/90 values.
+fields they share. It restores Huge Crews' raised rates to vanilla and, with the code loader,
+raises only the two assignment budgets to one quarter of Huge Crews' values.
 
 If you fork or rename this mod, **keep the ID lowercase**. To force it even later, pick an author
 name further down the alphabet.
@@ -504,7 +594,9 @@ order.
 ## Using it with Huge Crews
 
 `Huge Crews` raises crew assignment and resource-search rates to support its much larger crew cap.
-This mod keeps the larger crew cap but overrides those rates with 90/70/90. That trades some crew
+This mod keeps the larger crew cap but restores the search rate to vanilla, and - with the code
+loader - sets the two assignment budgets to one quarter of Huge Crews' values (250/s and 62.5/s),
+clamped to vanilla floors. Without the loader the vanilla budgets apply. That trades some crew
 reaction speed for substantially less candidate-search work on large modded ships; it no longer
 spends extra CPU trying to compensate for the unrelated ETT mining-beam defect.
 
@@ -515,7 +607,7 @@ Every value in `mod.rules` carries its vanilla number in a comment. Restart the 
 | Symptom | Adjustment |
 |---|---|
 | Crew AI consumes too much CPU | Lower `JobAssignmentsPerSecond` / `ResourceSearchesPerSecond` below 120 cautiously, though measurement says this buys little |
-| Marked mining or salvage pickup is slow | Raise `LowPriorityJobAssignmentsPerSecond` above 70 cautiously; this increases crew-search work |
+| Marked mining or salvage pickup is slow | Raise `LowPriorityJobAssignmentsPerSecond` above 30 cautiously; this increases crew-search work |
 | Only some Q-beam-mined resources have no pickup marker | Use Mods QoL 1.4.7 or later; assignment rates cannot replace the skipped salvage callback |
 | Transfer or salvage orders feel sluggish | Raise the corresponding expensive-check rate above 0.5 cautiously |
 | CPU sits high with nothing happening | Already addressed: idle `FastParallel` workers park. `fastparallel-park.txt` with `0` restores vanilla spinning |

@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.2.25 (2026-09-23)
+
+- Add `Install-NoLoader.bat`, a packaged wrapper for `Install.ps1 -NoLoader`,
+  for setups where another mod loader already owns the `winmm.dll` proxy slot
+  in `Cosmoteer\Bin`. Only one proxy can exist, so the two loaders cannot
+  coexist; this installs the mod without touching `Bin`.
+- `-NoLoader` installs now omit the `Loader\` payload from the installed mod
+  folder. A general-purpose loader (e.g. Yet Another Mod Loader) scans enabled
+  mod folders recursively and would flag the bundled `ModLoader.dll` as an
+  impostor of its own assembly - under YAML, trusting it then fails to load and
+  blocks the whole mod, actions included. The same cleanup runs when a normal
+  install aborts on a foreign `winmm.dll`, so the half-installed folder it
+  leaves behind is already in the safe shape.
+- The foreign-loader refusal now names the file's description and the two
+  ways forward (remove the other loader, or `Install-NoLoader.bat`).
+- Fix the positional network-transfer distribution port to match vanilla
+  `ResourceDistributor` in three `Prioritize*Resources` paths it diverged on:
+  `PrioritizeMostResources` removal now sorts by resources descending instead
+  of ascending, `PrioritizeLeastResources` removal now sorts ascending instead
+  of descending, and `PrioritizeLeastResources` addition now reads the
+  resources value for the levelling delta while capping each storage at its
+  remaining capacity - the previous build had the two fields swapped. The
+  scratch rewrite itself is unchanged; the sort keys and capacity field are.
+- Documentation: manual installation steps for environments where the
+  installer scripts cannot run, the other-loader coexistence path, refreshed
+  optimization summary, and corrected stale tuning numbers. No rules changes
+  beyond the version.
+
 ## 2.2.24 (2026-09-21)
 
 - Remove the investigation instrumentation now that the resource/status

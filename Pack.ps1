@@ -98,7 +98,7 @@ Write-Step 'regenerated Source/'
 # ---------------------------------------------------------------------------
 $required = @(
     'mod.rules', 'README.md', 'logo.png',
-    'Install.bat', 'Install.ps1', 'Uninstall.bat', 'Uninstall.ps1',
+    'Install.bat', 'Install.ps1', 'Install-NoLoader.bat', 'Uninstall.bat', 'Uninstall.ps1',
     'Loader\winmm.dll', 'Loader\ModLoader.dll', 'Loader\LICENSE.LGPL-2.1.txt',
     'Code\EmmanimLagFix.Code.dll', 'Code\ModsQol.Code.dll', 'Code\0Harmony.dll', 'Code\LICENSE.Harmony.txt',
     'Code\EmmanimLagFix.Code.pdb', 'Code\ModsQol.Code.pdb'

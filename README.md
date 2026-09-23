@@ -14,7 +14,7 @@ It combines ordinary `.rules` tuning, safe to read and reason about like any
 other mod, with a narrowly-scoped .NET 10 code layer for work that `.rules`
 alone can't express - UI caching, lock-free data structures, and the
 `WaitingForAck` timeout extension itself. The installer sets up both together
-by default; `Install.bat -NoLoader` skips the code layer and keeps just the
+by default; `Install-NoLoader.bat` skips the code layer and keeps just the
 `.rules` tuning (see [Installation](#installation)).
 
 The code loader is deliberately restricted to the exact mod ID
@@ -33,11 +33,49 @@ mod, so the module is always dormant and does nothing for other users - see
 > Every multiplayer participant must install the same mod version because the
 > `.rules` portion changes deterministic simulation settings.
 
+## Installation
+
+Releases are distributed as a single archive from the
+[Releases](https://github.com/EnYuri/Emmanim-Lag-Fix/releases) page. Extract it
+anywhere and run `Install.bat`.
+
+There *is* a Steam Workshop listing, `Emmanim Lag Fix (GitHub download
+required)`, but it's a stub: subscribing to it changes nothing in your game.
+Workshop can't host or review the optional native code layer this mod ships,
+so the listing exists only so the mod is discoverable from Workshop search; its
+description points here. Get the real mod from Releases above.
+
+The installer places the mod in the Cosmoteer user `Mods` folder and the code
+loader in `Cosmoteer\Bin`, resolving both the same way the game does. Both code
+modules travel inside the mod folder, so a single `Install.bat` run puts
+`EmmanimLagFix.Code.dll` and `ModsQol.Code.dll` in place together; only
+`winmm.dll` and `ModLoader.dll` go outside it, and only those two are tracked in
+the uninstall manifest. It
+declines to run while the game is open, to overwrite a `winmm.dll` or
+`ModLoader.dll` it did not place - usually another mod loader such as Yet
+Another Mod Loader; only one `winmm.dll` proxy can exist - or to replace a
+mod folder that is not this mod. `Uninstall.bat` removes files only when
+their hashes still match its install manifest.
+
+`Install-NoLoader.bat` installs the `.rules` optimizations alone, with no
+native DLL, for setups where another mod loader already owns the `winmm.dll`
+slot. It also leaves the `Loader\` payload out of the installed mod folder,
+because a general-purpose loader scans mod folders recursively and would
+misread the bundled `ModLoader.dll` as a copy of itself. Under Yet Another
+Mod Loader the code modules are then still picked up from `Code\` - after one
+trust click in the mods list. See `Mod/README.md` for the full switch list,
+and for manual installation steps when the installer scripts cannot run in
+your environment.
+
+To work from a source tree instead, copy `Mod` into the user `Mods` folder and
+run `Mod/Install.bat -LoaderOnly`.
+
 ## Current optimizations
 
-- Avoids repeated planetary tag-enumerator allocations in resource hauling,
-  preserving danger-zone decisions. Transfer expiry creates callback state
-  only when scheduling a change or removal. See [2.2.4 validation](CHANGELOG.md).
+- Avoids repeated avoidance-tag enumerator allocations in resource hauling -
+  planets, stations and stasis stations alike - preserving danger-zone
+  decisions. Transfer expiry creates callback state only when scheduling a
+  change or removal. See [2.2.4 validation](CHANGELOG.md).
 - Uses vanilla crew assignment rates without Huge Crews. With Huge Crews and
   the code loader, uses one quarter of its assignment rates with vanilla floors
   (currently 250/s normal and 62.5/s low priority). Resource search stays 120/s.
@@ -71,7 +109,10 @@ mod, so the module is always dormant and does nothing for other users - see
   client's second complete payload copy when guarded stream ownership transfer
   is available.
 - Reduces normal whole-game integrity hashes and host state updates from 30 Hz
-  to 6 Hz without lowering lockstep input or simulation cadence.
+  to 6 Hz without lowering lockstep input or simulation cadence. A risen
+  input-tick delay is still sent at once rather than waiting for the schedule;
+  the delay steers when peers stamp their inputs, so sitting on it stalls the
+  world.
 - Reuses the host's per-client `InputTick` forwarding filters instead of
   allocating a closure and delegate for every received tick.
 - Shards the resource manager's sink-job collection lists per thread, removing
@@ -98,6 +139,39 @@ mod, so the module is always dormant and does nothing for other users - see
   one only when its callback list changes. Runtime callback registration keeps
   vanilla's next-invocation semantics, and weak ownership avoids extending a
   destroyed ship's lifetime.
+- Sizes the `FastParallel` worker pool by logical processors rather than
+  physical cores - an idle sibling now parks instead of spinning, so the SMT
+  half of the machine costs nothing to include. Runs short nested dispatches
+  inline on the calling thread once every worker is busy, where a pool
+  round-trip buys no parallelism, while still handing them to the pool
+  whenever a worker is parked. Bounds the dispatcher's own join wait the same
+  way worker idling is bounded, parking past a budget instead of spinning.
+- Runs the non-deterministic smoothed-value scene bucket on the worker pool
+  alongside vanilla's four parallel buckets - it was the largest serial item
+  on the update side - and dispatches the parallel scene buckets
+  longest-first.
+- Replaces the resource source search's visited `HashSet` with a
+  generation-stamped open-addressed identity table; emptying it is one
+  integer increment, and the table is only ever probed, never enumerated.
+- Specializes the built-in tile-heat modulation into a bit-equivalent loop
+  with dead context and buff lookups removed, caches each part's heat
+  resistance for the duration of a pass, and memoizes neighbour cell inputs
+  in the sparse diffusion path - which on large ships evaluates only active
+  heat cells and their neighbours rather than the whole bounding rectangle.
+- Reuses the thruster solver's already-prepared SRF in its first iteration
+  instead of repeating the transform and weighting.
+- Replaces attributed deserialization constructor reflection with cached
+  compiled delegates, and `ThreadedTaskQueue`'s `Delegate.DynamicInvoke` with
+  a strongly-typed invoker; unsupported shapes keep the vanilla paths.
+- Distributes network resource transfers over positional scratch instead of
+  a pooled per-call dictionary, and skips cache-operation listener passes no
+  result type implements.
+- Replaces the monitor convoy on the deterministic callback queues with a
+  per-simulation concurrent queue; drain timing, `(objectID, arrival)` sort
+  order and mid-drain reposting are unchanged.
+- Rebuilds the build-mode tile-line and FTL-efficiency overlays without
+  per-frame LINQ, boxing or per-cell closures, and caches the toolbox
+  item-cost text behind a fingerprint of everything it reads.
 
 The code patches UI aggregation/construction, resource bookkeeping, visual
 updates, and local multiplayer timeout/initialization behavior. It does not
@@ -132,35 +206,6 @@ ModPreLoader/                   Alternate preloader
 CosmoDoorstop/                  Native Windows entry point
 Pack.ps1                        Builds the GitHub release archive
 ```
-
-## Installation
-
-Releases are distributed as a single archive from the
-[Releases](https://github.com/EnYuri/Emmanim-Lag-Fix/releases) page. Extract it
-anywhere and run `Install.bat`.
-
-There *is* a Steam Workshop listing, `Emmanim Lag Fix (GitHub download
-required)`, but it's a stub: subscribing to it changes nothing in your game.
-Workshop can't host or review the optional native code layer this mod ships,
-so the listing exists only so the mod is discoverable from Workshop search; its
-description points here. Get the real mod from Releases above.
-
-The installer places the mod in the Cosmoteer user `Mods` folder and the code
-loader in `Cosmoteer\Bin`, resolving both the same way the game does. Both code
-modules travel inside the mod folder, so a single `Install.bat` run puts
-`EmmanimLagFix.Code.dll` and `ModsQol.Code.dll` in place together; only
-`winmm.dll` and `ModLoader.dll` go outside it, and only those two are tracked in
-the uninstall manifest. It
-declines to run while the game is open, to overwrite a `winmm.dll` or
-`ModLoader.dll` it did not place, or to replace a mod folder that is not this
-mod. `Uninstall.bat` removes files only when their hashes still match its
-install manifest.
-
-`Install.bat -NoLoader` installs the `.rules` optimizations alone, with no
-native DLL. See `Mod/README.md` for the full switch list.
-
-To work from a source tree instead, copy `Mod` into the user `Mods` folder and
-run `Mod/Install.bat -LoaderOnly`.
 
 ## Mods QoL support
 

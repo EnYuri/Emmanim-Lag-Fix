@@ -198,6 +198,16 @@ if (-not $LoaderOnly) {
         Copy-Item -LiteralPath $sourceFull -Destination $target -Recurse -Force
         Write-Step "Installed the mod: $target"
     }
+    if ($NoLoader) {
+        # A foreign loader (e.g. Yet Another Mod Loader) scans mod folders
+        # recursively; a stray ModLoader.dll inside the installed copy would be
+        # flagged as an impostor of that loader's own assembly and get the whole
+        # mod blocked, so the loader payload stays out of a -NoLoader install.
+        $loaderDir = Join-Path $target 'Loader'
+        if (Test-Path -LiteralPath $loaderDir) {
+            Remove-Item -LiteralPath $loaderDir -Recurse -Force
+        }
+    }
     $installedModFolder = $target
 }
 
@@ -220,7 +230,23 @@ if (-not $NoLoader) {
             # likely another mod loader or an unrelated proxy DLL.
             $manifestPath = Join-Path $resolvedBin $manifestName
             if (-not (Test-Path -LiteralPath $manifestPath)) {
-                throw "$dest is a loader this installer does not own. Nothing was overwritten."
+                # Leave the half-installed mod folder in the same shape a
+                # -NoLoader install produces: a foreign loader scans mod
+                # folders recursively and would flag our bundled ModLoader.dll
+                # as an impostor of its own assembly.
+                if ($installedModFolder) {
+                    $loaderDir = Join-Path $installedModFolder 'Loader'
+                    if (Test-Path -LiteralPath $loaderDir) {
+                        Remove-Item -LiteralPath $loaderDir -Recurse -Force
+                    }
+                }
+                $fileDesc = (Get-Item -LiteralPath $dest).VersionInfo.FileDescription
+                $what = if ($fileDesc) { " ('$fileDesc')" } else { '' }
+                throw ("$dest is a loader this installer did not place$what.`n" +
+                    'Only one winmm.dll proxy can exist in Bin; this is most likely another ' +
+                    "mod loader such as 'Yet Another Mod Loader'. Either remove that loader's " +
+                    'winmm.dll and ModLoader.dll and run this again, or keep it and install ' +
+                    'the rules-only half with Install-NoLoader.bat. Nothing was overwritten.')
             }
             $owned = (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).Files.$name
             if (-not $owned -or $owned -ne $destHash) {

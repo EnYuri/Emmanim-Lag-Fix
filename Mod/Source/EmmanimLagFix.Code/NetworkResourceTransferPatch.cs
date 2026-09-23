@@ -427,22 +427,23 @@ internal static class SinkDistribution
         int num = -1;
         for (int i = 0; i < sorted.Count; i++)
         {
-            int num2 = getValue(sorted[i], RemainingCapacity);
+            int num2 = getValue(sorted[i], Resources);
             if (num2 > num)
             {
-                // Vanilla distributes the additive least-resources pass by the
-                // Resources value - quirk preserved verbatim.
-                total = Evenly(total, i, sorted, Resources, getValue, s, num2 - num);
+                // Vanilla bounds the additive least-resources pass by a
+                // Resources difference but caps each container at its
+                // RemainingCapacity - quirk preserved verbatim.
+                total = Evenly(total, i, sorted, RemainingCapacity, getValue, s, num2 - num);
                 num = num2;
             }
         }
-        return Evenly(total, sorted.Count, sorted, Resources, getValue, s);
+        return Evenly(total, sorted.Count, sorted, RemainingCapacity, getValue, s);
     }
 
     private static int MostResourcesSubtractive(
         int total, List<int> containers, Func<int, int, int> getValue, TransferScratch s)
     {
-        var sorted = SortAscending(s.SortBuffer, containers, Resources, getValue);
+        var sorted = SortDescending(s.SortBuffer, containers, Resources, getValue);
         int num = int.MaxValue;
         for (int i = 0; i < sorted.Count; i++)
         {
@@ -459,7 +460,7 @@ internal static class SinkDistribution
     private static int LeastResourcesSubtractive(
         int total, List<int> containers, Func<int, int, int> getValue, TransferScratch s)
     {
-        var sorted = SortDescending(s.SortBuffer, containers, Resources, getValue);
+        var sorted = SortAscending(s.SortBuffer, containers, Resources, getValue);
         return InOrder(total, sorted, Resources, getValue, s);
     }
 
