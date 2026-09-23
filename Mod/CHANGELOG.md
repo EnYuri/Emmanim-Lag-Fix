@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.26 (2026-09-23)
+
+- Fix the installer aborting with `Cannot find drive` on machines where
+  Steam's `libraryfolders.vdf` still lists a library on a removed or
+  unmounted drive - `Join-Path` throws on the dead drive letter before
+  `Test-Path` can skip it, so drive roots are now checked with
+  `Directory.Exists` first. The same guard covers a Saved Games known
+  folder redirected to a drive that no longer exists. No code or rules
+  changes beyond the version.
+
 ## 2.2.25 (2026-09-23)
 
 - Add `Install-NoLoader.bat`, a packaged wrapper for `Install.ps1 -NoLoader`,
