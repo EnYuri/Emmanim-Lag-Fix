@@ -72,12 +72,20 @@ function Find-CosmoteerBin {
         if (Test-Path -LiteralPath $vdf) {
             foreach ($match in [regex]::Matches((Get-Content -LiteralPath $vdf -Raw), '"path"\s+"([^"]+)"')) {
                 $library = $match.Groups[1].Value.Replace('\\', '\')
+                # libraryfolders.vdf keeps stale entries for drives that are
+                # gone (removed external disks, unmounted USB sticks), and
+                # Join-Path throws on a drive letter that does not exist -
+                # skip those before joining rather than aborting the search.
+                $drive = [IO.Path]::GetPathRoot($library)
+                if ($drive -and -not [IO.Directory]::Exists($drive)) { continue }
                 $candidates.Add((Join-Path $library 'steamapps\common\Cosmoteer\Bin'))
             }
         }
     }
     foreach ($candidate in $candidates | Select-Object -Unique) {
-        if (Test-Path -LiteralPath (Join-Path $candidate 'Cosmoteer.exe')) {
+        $exe = $null
+        try { $exe = Join-Path $candidate 'Cosmoteer.exe' } catch { continue }
+        if (Test-Path -LiteralPath $exe) {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
@@ -112,7 +120,13 @@ function Find-UserModsFolder {
     )
     foreach ($key in $shellKeys) {
         $raw = (Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue).$savedGamesGuid
-        if ($raw) { $roots.Add((Join-Path ([Environment]::ExpandEnvironmentVariables($raw)) 'Cosmoteer')) }
+        if (-not $raw) { continue }
+        $expanded = [Environment]::ExpandEnvironmentVariables($raw)
+        # Folder redirection can leave the known folder pointing at a drive
+        # that no longer exists; Join-Path throws on the missing drive letter.
+        $drive = [IO.Path]::GetPathRoot($expanded)
+        if ($drive -and -not [IO.Directory]::Exists($drive)) { continue }
+        $roots.Add((Join-Path $expanded 'Cosmoteer'))
     }
 
     foreach ($root in $roots | Select-Object -Unique) {
